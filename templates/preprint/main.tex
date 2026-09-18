@@ -1,0 +1,54 @@
+% Single-column preprint, the shape arXiv readers expect.
+\documentclass[11pt]{article}
+\usepackage[margin=1.25in]{geometry}
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage[numbers]{natbib}
+\usepackage[hidelinks]{hyperref}
+\usepackage[capitalise]{cleveref}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{definition}{Definition}
+
+\title{A title that states the result}
+\author{First Author\thanks{Affiliation. \texttt{first@example.edu}}}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+One sentence on the problem, one on what is new, one on the evidence, one on why it matters.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+
+\section{Setting}
+\label{sec:setting}
+
+\begin{definition}[Name the object]
+  \label{def:object}
+\end{definition}
+
+\begin{theorem}
+  \label{thm:main}
+\end{theorem}
+
+\begin{proof}
+\end{proof}
+
+\section{Experiments}
+\label{sec:experiments}
+
+\section{Discussion}
+\label{sec:discussion}
+
+\appendix
+\section{Proofs}
+\label{app:proofs}
+
+\bibliographystyle{plainnat}
+\bibliography{refs}
+\end{document}

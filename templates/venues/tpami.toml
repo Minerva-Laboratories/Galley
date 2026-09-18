@@ -1,0 +1,8 @@
+# Venue preset (SPEC §13.8). Copy and edit to add your own.
+id = "tpami"
+name = "IEEE TPAMI"
+short = "TPAMI"
+pages = 14
+font_size = "10pt"
+anonymous = false
+engine = "TeX Live 2025"

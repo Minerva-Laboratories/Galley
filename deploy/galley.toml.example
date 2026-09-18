@@ -1,0 +1,35 @@
+# Galley configuration for a self-hosted deployment. Every key is optional.
+# The values below suit a small public instance behind a TLS reverse proxy.
+# Copy this file to /etc/galley/galley.toml and edit `domain`.
+
+[server]
+# Bind loopback only. A reverse proxy (Caddy, nginx or similar) terminates TLS
+# and forwards to this address. Do NOT bind 0.0.0.0 on a public host.
+bind = "127.0.0.1:7000"
+
+# The public hostname. Setting this turns on "public mode":
+#   - the session and CSRF cookies get the Secure flag, which HTTPS requires,
+#   - the server REFUSES to start if no compile sandbox is available.
+# Leave it empty for a localhost-only instance, or when a proxy handles TLS.
+domain = "galley.example.com"
+
+# Where the projects, the git repos, the SQLite DB and the PDF cache live.
+data_dir = "/var/lib/galley"
+
+# Allow anyone to create an account. This is off by default. Create accounts
+# with `galley admin create-user`, or share a project link.
+public_signup = false
+
+[build]
+engine = "tectonic"
+# auto uses bubblewrap. If bubblewrap is missing it uses Docker. If both are
+# missing it refuses to start in public mode. Set a fixed value if you know the
+# host: "bwrap" (no daemon, preferred) or "docker".
+sandbox = "auto"
+timeout_s = 120
+memory_mb = 2048
+cpus = 1.0
+# Allow public mode with no sandbox. This is off by default, because an
+# unsandboxed compiler must not face the internet. Turn it on ONLY for a group
+# you trust, and only if the host has neither bubblewrap nor Docker.
+allow_unsandboxed = false

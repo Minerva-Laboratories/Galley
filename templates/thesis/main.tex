@@ -1,0 +1,29 @@
+% Thesis or long report. Each chapter is its own file, so two people can write at once
+% without touching the same document.
+\documentclass[11pt,twoside]{report}
+\usepackage[margin=1.25in]{geometry}
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage[hidelinks]{hyperref}
+\usepackage[capitalise]{cleveref}
+
+\title{Thesis title}
+\author{Your name}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\end{abstract}
+
+\tableofcontents
+
+\input{chapters/introduction}
+\input{chapters/background}
+\input{chapters/conclusion}
+
+\bibliographystyle{plain}
+\bibliography{refs}
+\end{document}

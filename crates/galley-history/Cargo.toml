@@ -1,0 +1,16 @@
+[package]
+name = "galley-history"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "git2 wrapper: repositories, auto-commits, checkpoints, log"
+
+[dependencies]
+chrono.workspace = true
+git2.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

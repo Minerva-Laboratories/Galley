@@ -1,0 +1,8 @@
+# Keep the build context small and let the image build its own artifacts.
+target/
+**/target/
+web/node_modules/
+web/dist/
+.git/
+*.log
+/tmp/

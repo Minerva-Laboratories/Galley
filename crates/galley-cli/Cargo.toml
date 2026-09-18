@@ -1,0 +1,26 @@
+[package]
+name = "galley-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The galley command"
+
+[[bin]]
+name = "galley"
+path = "src/main.rs"
+
+[dependencies]
+reqwest = { workspace = true }
+galley-agents.workspace = true
+galley-build.workspace = true
+galley-index.workspace = true
+galley-lit.workspace = true
+galley-server.workspace = true
+
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

@@ -1,0 +1,6 @@
+# Venue preset (SPEC §13.8). Copy and edit to add your own.
+id = "arxiv"
+name = "arXiv"
+short = "arXiv"
+anonymous = false
+engine = "TeX Live 2025"

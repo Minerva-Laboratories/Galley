@@ -1,0 +1,1137 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Galley — interactive prototype</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500&family=JetBrains+Mono:wght@400;500&family=Source+Serif+4:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
+<style>
+:root{
+  --ink:#1B1A17; --paper:#F6F3EC; --vellum:#ECE7DC; --panel:#FBF9F4;
+  --red:#C6402A; --red-soft:#F6DCD5; --slate:#5B6470; --moss:#3E7C59; --moss-soft:#DDEBE2;
+  --amber:#C98A1B; --amber-soft:#F7E8C8; --line:#D9D3C6; --line-strong:#B9B2A3;
+  --text:var(--ink); --text-2:var(--slate); --text-3:#8A8F98;
+  --bg:var(--paper); --bg-panel:var(--panel); --bg-sunk:var(--vellum);
+  --sel:#E8E1D2; --cmd:#7A3E9D; --math:#1F5F8B; --cmt:#8A8F98;
+  --add:#DDEBE2; --add-t:#26573A; --del:#F6DCD5; --del-t:#8A2A1A;
+  --font:'Inter',system-ui,sans-serif; --mono:'JetBrains Mono',ui-monospace,monospace; --serif:'Source Serif 4',Georgia,serif;
+}
+[data-theme="dark"]{
+  --text:#EAE6DC; --text-2:#B4AFA4; --text-3:#7E7A72;
+  --bg:#1B1A17; --bg-panel:#23221E; --bg-sunk:#181714; --line:#34322C; --line-strong:#4A473F;
+  --sel:#2E2C26; --cmd:#C9A0E8; --math:#8DBCE0; --cmt:#7E7A72;
+  --add:#1F3A2A; --add-t:#9ED4B0; --del:#4A2018; --del-t:#F0A090; --red-soft:#4A2018; --moss-soft:#1F3A2A; --amber-soft:#3E2E10;
+}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{font-family:var(--font);font-size:13px;color:var(--text);background:var(--bg);-webkit-font-smoothing:antialiased}
+button,input,select,textarea{font:inherit;color:inherit}
+button{background:none;border:0;padding:0;cursor:pointer}
+button:focus-visible,input:focus-visible,select:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--red);outline-offset:2px}
+.app{height:100%;display:grid;grid-template-rows:44px 1fr 32px;grid-template-columns:100%}
+
+/* top bar */
+.top{display:flex;align-items:center;gap:14px;padding:0 12px;border-bottom:1px solid var(--line);background:var(--bg-panel)}
+.wordmark{font-family:var(--serif);font-size:20px;font-weight:500;letter-spacing:-.01em;display:flex;align-items:baseline}
+.wordmark .caret{color:var(--red);font-family:var(--mono);font-weight:500;margin-left:1px}
+.proj{display:flex;align-items:center;gap:4px;padding:5px 8px;border-radius:6px;font-weight:500}
+.proj:hover{background:var(--bg-sunk)}
+.presence{display:flex;align-items:center;margin-left:auto;gap:8px;color:var(--text-2);font-size:12px}
+.avs{display:flex}
+.av{width:22px;height:22px;border-radius:50%;font-size:10px;font-weight:500;display:inline-flex;align-items:center;justify-content:center;border:2px solid var(--bg-panel);margin-left:-6px}
+.av:first-child{margin-left:0}
+.a-an{background:#D9EEE4;color:#1F5A3B}.a-jr{background:#E6E1F5;color:#3D2F7A}.a-me{background:var(--red-soft);color:#7A2414}
+[data-theme="dark"] .a-an{background:#1F3A2A;color:#9ED4B0}[data-theme="dark"] .a-jr{background:#2C2650;color:#C9BFF0}[data-theme="dark"] .a-me{background:#4A2018;color:#F0A090}
+.tb{display:flex;align-items:center;gap:6px;height:30px;padding:0 10px;border-radius:6px;border:1px solid var(--line);background:var(--bg);color:var(--text);font-size:12px;white-space:nowrap}
+.tb:hover{border-color:var(--line-strong);background:var(--bg-sunk)}
+.tb.primary{background:var(--red);border-color:var(--red);color:#fff}
+.tb.primary:hover{background:#B2361F}
+.tb kbd{font-family:var(--mono);font-size:10px;color:var(--text-3);margin-left:2px}
+.tb.primary kbd{color:rgba(255,255,255,.75)}
+.tb.icon{width:30px;padding:0;justify-content:center;border-color:transparent;background:transparent}
+.tb.icon:hover{background:var(--bg-sunk)}
+.search{min-width:220px;justify-content:flex-start;color:var(--text-3)}
+.search span{flex:1;text-align:left}
+.pill{font-size:11px;padding:2px 8px;border-radius:999px;font-weight:500}
+.pill.off{background:var(--amber-soft);color:#6B4300}
+[data-theme="dark"] .pill.off{color:#F0C060}
+.pill.sync{background:var(--moss-soft);color:#26573A}
+[data-theme="dark"] .pill.sync{color:#9ED4B0}
+
+/* main */
+.main{display:grid;grid-template-columns:48px auto 1fr 6px 1fr;min-height:0}
+.main.no-preview{grid-template-columns:48px auto 1fr 0 0}
+.rail{border-right:1px solid var(--line);background:var(--bg-panel);display:flex;flex-direction:column;align-items:center;padding-top:10px;gap:4px}
+.rail button{width:34px;height:34px;border-radius:8px;color:var(--text-2);display:flex;align-items:center;justify-content:center;position:relative}
+.rail button:hover{background:var(--bg-sunk);color:var(--text)}
+.rail button.on{background:var(--bg-sunk);color:var(--red)}
+.rail button .badge{position:absolute;top:4px;right:4px;width:7px;height:7px;border-radius:50%;background:var(--red)}
+.rail .sp{flex:1}
+.rail svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.drawer{width:280px;border-right:1px solid var(--line);background:var(--bg-panel);display:flex;flex-direction:column;min-height:0;overflow:hidden}
+.drawer.hidden{display:none}
+.dh{display:flex;align-items:center;justify-content:space-between;padding:10px 12px 8px;font-weight:500}
+.dh .tb{height:26px;padding:0 8px}
+.db{flex:1;overflow:auto;padding:0 8px 12px}
+.row{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:6px;cursor:pointer;color:var(--text)}
+.row:hover{background:var(--bg-sunk)}
+.row.on{background:var(--sel)}
+.row .m{margin-left:auto;font-size:11px;color:var(--text-3);font-family:var(--mono)}
+.row svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.6;color:var(--text-2)}
+.row.sub{padding-left:24px;color:var(--text-2)}
+.empty{padding:20px 12px;color:var(--text-2);line-height:1.5}
+.empty b{display:block;color:var(--text);font-weight:500;margin-bottom:4px}
+.card{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin:8px 0}
+.card .h{display:flex;gap:8px;align-items:center;font-size:12px;color:var(--text-2)}
+.card .t{font-weight:500;margin-top:4px}
+.card .d{color:var(--text-2);margin-top:3px;line-height:1.5}
+.card .acts{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+.card .tb{height:26px;padding:0 9px;font-size:12px}
+.card.resolved{opacity:.55}
+.lvl{font-size:11px;padding:1px 7px;border-radius:999px;font-weight:500}
+.lvl.error{background:var(--red-soft);color:#8A2A1A}.lvl.warning{background:var(--amber-soft);color:#6B4300}.lvl.info{background:var(--bg-sunk);color:var(--text-2)}
+[data-theme="dark"] .lvl.error{color:#F0A090}[data-theme="dark"] .lvl.warning{color:#F0C060}
+.loc{font-family:var(--mono);font-size:11px;color:var(--text-3)}
+.diff{font-family:var(--mono);font-size:11.5px;line-height:1.6;margin-top:8px;border:1px solid var(--line);border-radius:6px;overflow:hidden;white-space:pre-wrap;word-break:break-word}
+.diff div{padding:1px 8px}
+.diff .hd{color:var(--text-3);background:var(--bg-sunk)}
+.diff .a{background:var(--add);color:var(--add-t)}.diff .r{background:var(--del);color:var(--del-t)}
+
+/* editor */
+.editor{display:flex;flex-direction:column;min-width:0;min-height:0;background:var(--bg)}
+.tabs{display:flex;border-bottom:1px solid var(--line);background:var(--bg-panel);overflow-x:auto}
+.tab{display:flex;align-items:center;gap:8px;padding:8px 14px;font-size:12px;color:var(--text-2);border-bottom:2px solid transparent;white-space:nowrap}
+.tab:hover{color:var(--text)}
+.tab.on{color:var(--text);border-bottom-color:var(--red)}
+.tab .x{width:16px;height:16px;border-radius:4px;color:var(--text-3);display:inline-flex;align-items:center;justify-content:center}
+.tab .x:hover{background:var(--bg-sunk);color:var(--text)}
+.banner{display:none;align-items:center;gap:10px;padding:6px 12px;background:var(--amber-soft);color:#6B4300;font-size:12px}
+[data-theme="dark"] .banner{color:#F0C060}
+.banner.show{display:flex}
+.banner .tb{height:24px;padding:0 8px;margin-left:auto}
+.ed{position:relative;flex:1;min-height:0;display:flex;overflow:hidden}
+.gutter{width:56px;flex:none;background:var(--bg);border-right:1px solid var(--line);font-family:var(--mono);font-size:12.5px;line-height:1.7;color:var(--text-3);text-align:right;padding:12px 0;user-select:none;overflow:hidden}
+.gutter div{position:relative;padding-right:10px;height:calc(12.5px*1.7)}
+.gutter .mk{position:absolute;left:0;top:3px;bottom:3px;width:3px;border-radius:2px}
+.gutter .mk.add{background:var(--moss)}.gutter .mk.mod{background:var(--amber)}
+.gutter .dot{position:absolute;left:8px;top:6px;width:8px;height:8px;border-radius:50%}
+.gutter .dot.error{background:var(--red)}.gutter .dot.warning{background:var(--amber)}
+.gutter .dot.cmt{background:none;border:1.5px solid var(--red);border-radius:50% 50% 50% 0}
+.scroll{position:relative;flex:1;overflow:auto}
+.hl,.ta{margin:0;padding:12px 16px;font-family:var(--mono);font-size:12.5px;line-height:1.7;tab-size:2;white-space:pre;min-width:100%;min-height:100%}
+.hl{position:absolute;inset:0;pointer-events:none;color:var(--text);overflow:hidden}
+.ta{position:relative;display:block;width:100%;height:100%;resize:none;border:0;outline:0;background:transparent;color:transparent;caret-color:var(--text);overflow:hidden}
+.ta::selection{background:var(--sel)}
+.ta:disabled{cursor:default}
+.hl .c{color:var(--cmd)}.hl .k{color:var(--cmt);font-style:italic}.hl .m{color:var(--math)}.hl .b{color:var(--text-2)}
+.hl .errln{background:var(--red-soft)}
+.hl .sug-a{background:var(--add);color:var(--add-t)}.hl .sug-r{background:var(--del);color:var(--del-t);text-decoration:line-through}
+.rc{position:relative;display:inline-block;width:0}
+.rc i{position:absolute;left:-1px;top:2px;width:2px;height:18px;background:#1D9E75}
+.rc b{position:absolute;left:-1px;top:-11px;font-family:var(--font);font-style:normal;font-weight:500;font-size:10px;line-height:12px;padding:0 4px;border-radius:3px;background:#1D9E75;color:#fff;white-space:nowrap}
+
+/* split */
+.split{background:transparent;cursor:col-resize;border-left:1px solid var(--line)}
+.split:hover{background:var(--line-strong)}
+
+/* preview */
+.preview{display:flex;flex-direction:column;min-width:0;min-height:0;background:var(--bg-sunk)}
+.main.no-preview .preview,.main.no-preview .split{display:none}
+.ph{display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid var(--line);background:var(--bg-panel);font-size:12px}
+.ph .tb{height:26px;padding:0 8px}
+.ph .tb.on{background:var(--sel);border-color:var(--line-strong)}
+.ph .pg{margin-left:auto;color:var(--text-2);font-family:var(--mono);font-size:11px}
+.pb{flex:1;overflow:auto;padding:20px 24px;position:relative}
+.stale{display:none;position:sticky;top:0;z-index:2;background:var(--red);color:#fff;padding:5px 10px;font-size:12px;border-radius:6px;margin:-8px 0 12px}
+.stale.show{display:block}
+.page{background:#fff;color:#111;width:100%;max-width:560px;margin:0 auto 20px;padding:44px 52px 60px;border:1px solid var(--line);font-family:var(--serif);font-size:12.5px;line-height:1.55;min-height:700px;box-shadow:0 1px 0 rgba(0,0,0,.04)}
+[data-theme="dark"] .page{background:#F2EEE6;color:#1B1A17}
+.page.inv{filter:invert(1) hue-rotate(180deg)}
+.page h1{font-size:20px;font-weight:500;text-align:center;margin:0 0 6px;line-height:1.25}
+.page .au{text-align:center;font-size:12px;margin-bottom:22px}
+.page .ab{margin:0 30px 18px;font-size:11.5px}
+.page .ab b{display:block;text-align:center;font-weight:500;margin-bottom:4px}
+.page h2{font-size:14px;font-weight:500;margin:18px 0 6px}
+.page h3{font-size:12.5px;font-weight:500;margin:12px 0 4px}
+.page p{margin:0 0 8px;text-align:justify;hyphens:auto}
+.page .fig{margin:14px auto;text-align:center;font-size:11px}
+.page .fig .box{margin:0 auto 6px;height:110px;width:70%;border:1px solid #c9c2b2;display:flex;align-items:center;justify-content:center;color:#8A8F98;font-family:var(--font)}
+.page .fig .box.draft{border-style:dashed;background:repeating-linear-gradient(45deg,transparent 0 6px,#f0ece3 6px 8px)}
+.page table{border-collapse:collapse;margin:12px auto;font-size:11.5px}
+.page th,.page td{padding:3px 12px;text-align:left}
+.page thead th{border-top:1.5px solid #111;border-bottom:1px solid #111}
+.page tbody tr:last-child td{border-bottom:1.5px solid #111}
+.page .cap{font-size:11px;text-align:center;margin-bottom:6px}
+.page .ref{margin:0 0 4px 18px;text-indent:-18px;font-size:11px}
+.page .foot{margin-top:40px;text-align:center;font-size:10px;color:#666}
+.page .clk{cursor:pointer}
+.page .clk:hover{background:#FFF1C8}
+.page em{font-style:italic}
+
+/* build bar */
+.build{display:flex;align-items:center;gap:10px;padding:0 12px;border-top:1px solid var(--line);background:var(--bg-panel);font-size:12px}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--text-3)}
+.dot.ok{background:var(--moss)}.dot.fail{background:var(--red)}.dot.run{background:var(--amber);animation:blink 1s infinite}
+@keyframes blink{50%{opacity:.3}}
+.build .st{cursor:pointer;display:flex;align-items:center;gap:8px}
+.build .st:hover{text-decoration:underline}
+.build .wc{color:var(--text-3);font-family:var(--mono);font-size:11px}
+.build .r{margin-left:auto;display:flex;align-items:center;gap:8px}
+.build select{height:26px;border:1px solid var(--line);border-radius:6px;background:var(--bg);padding:0 6px;font-size:12px}
+.build .tb{height:26px}
+
+/* problems drawer */
+.probs{grid-column:1/-1;display:none;flex-direction:column;border-top:1px solid var(--line);background:var(--bg-panel);height:230px}
+.probs.show{display:flex}
+.app.probs-open{grid-template-rows:44px 1fr auto 32px}
+.probs .dh{padding:8px 14px}
+.probs .db{padding:0 14px 10px;display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:10px;align-content:start}
+.probs .card{margin:0}
+
+/* modal, palette, toast */
+.overlay{position:fixed;inset:0;background:rgba(27,26,23,.35);display:none;align-items:flex-start;justify-content:center;padding-top:12vh;z-index:20}
+.overlay.show{display:flex}
+.modal{background:var(--bg-panel);border:1px solid var(--line);border-radius:12px;width:480px;max-width:92vw;overflow:hidden}
+.modal .mh{padding:14px 18px 10px;font-weight:500;font-size:14px;display:flex;align-items:center}
+.modal .mb{padding:0 18px 16px}
+.modal .mh .tb{margin-left:auto}
+.field{display:flex;gap:8px;align-items:center;margin:8px 0}
+.field input,.field select{flex:1;height:32px;border:1px solid var(--line);border-radius:6px;background:var(--bg);padding:0 10px}
+.field input:focus{border-color:var(--line-strong)}
+.member{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--line)}
+.member .n{font-weight:500}.member .e{font-size:11px;color:var(--text-3)}
+.member select{margin-left:auto;height:28px;border:1px solid var(--line);border-radius:6px;background:var(--bg);padding:0 6px}
+.link{display:flex;gap:8px;align-items:center;margin-top:10px;font-family:var(--mono);font-size:11.5px;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:6px 10px}
+.link span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pal{background:var(--bg-panel);border:1px solid var(--line);border-radius:12px;width:560px;max-width:92vw;overflow:hidden}
+.pal input{width:100%;height:46px;border:0;border-bottom:1px solid var(--line);background:transparent;padding:0 16px;font-size:14px;outline:0}
+.pal .list{max-height:320px;overflow:auto;padding:6px}
+.pal .it{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:6px;cursor:pointer}
+.pal .it.on,.pal .it:hover{background:var(--sel)}
+.pal .it .g{font-size:11px;color:var(--text-3);margin-left:auto;font-family:var(--mono)}
+.toast{position:fixed;left:50%;bottom:48px;transform:translateX(-50%);background:var(--ink);color:#EAE6DC;padding:8px 14px;border-radius:8px;font-size:12.5px;display:none;z-index:30;box-shadow:0 4px 14px rgba(0,0,0,.18)}
+[data-theme="dark"] .toast{background:#EAE6DC;color:#1B1A17}
+.toast.show{display:block}
+.toast button{margin-left:12px;color:inherit;text-decoration:underline}
+.ag{display:flex;flex-direction:column;gap:6px;padding:4px 4px 10px}
+.ag button.agent{display:flex;gap:10px;align-items:flex-start;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);text-align:left}
+.ag button.agent:hover{border-color:var(--line-strong)}
+.ag button.agent b{display:block;font-weight:500}
+.ag button.agent span{color:var(--text-2);font-size:12px;line-height:1.4}
+.ag button.agent svg{width:16px;height:16px;flex:none;stroke:var(--red);fill:none;stroke-width:1.6;margin-top:2px}
+.backend{display:flex;align-items:center;gap:8px;padding:8px 10px;margin:4px 4px 8px;background:var(--bg-sunk);border-radius:8px;font-size:12px;color:var(--text-2)}
+.backend select{margin-left:auto;height:24px;border:1px solid var(--line);border-radius:5px;background:var(--bg);font-size:11px}
+textarea.csv{width:100%;height:80px;border:1px solid var(--line);border-radius:6px;background:var(--bg);padding:8px;font-family:var(--mono);font-size:11.5px;resize:vertical}
+.tl{position:relative;padding-left:18px;margin:6px 4px}
+.tl:before{content:"";position:absolute;left:5px;top:6px;bottom:6px;width:1px;background:var(--line-strong)}
+.ti{position:relative;padding:6px 8px;border-radius:6px;cursor:pointer;margin-bottom:2px}
+.ti:hover{background:var(--bg-sunk)}
+.ti.on{background:var(--sel)}
+.ti:before{content:"";position:absolute;left:-16px;top:11px;width:7px;height:7px;border-radius:50%;background:var(--line-strong);border:1px solid var(--bg-panel)}
+.ti.cp:before{background:var(--red);width:9px;height:9px;left:-17px;top:10px}
+.ti .l{font-weight:500}.ti .s{font-size:11px;color:var(--text-3);display:flex;gap:8px}
+.ti .s .sha{font-family:var(--mono)}
+.ti.auto .l{font-weight:400;color:var(--text-2)}
+.hint{font-size:11px;color:var(--text-3);padding:6px 8px}
+.chk{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-2);cursor:pointer}
+@media (max-width:1100px){
+  .main{grid-template-columns:48px auto 1fr 0 0}
+  .main.show-preview{grid-template-columns:48px auto 0 0 1fr}
+  .split{display:none}
+  .search{min-width:0}
+}
+@media (max-width:700px){
+  .drawer{position:absolute;left:48px;top:44px;bottom:32px;z-index:5}
+  .presence span.n{display:none}
+}
+@media (prefers-reduced-motion:reduce){.dot.run{animation:none}}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+
+.mini{display:inline-flex;height:6px;width:96px;border-radius:3px;overflow:hidden;background:var(--bg-sunk);vertical-align:middle;cursor:pointer}
+.mini i,.prof .bar i{display:block;height:100%}
+.prof{grid-column:1/-1;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+.prof .bar{display:flex;height:10px;border-radius:4px;overflow:hidden;background:var(--bg-sunk);margin:8px 0}
+.prof .leg{display:flex;flex-wrap:wrap;gap:12px 16px;font-size:11px;color:var(--text-2);align-items:center}
+.prof .leg i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+.seg-parse{background:#B4B2A9}.seg-pkg{background:#7F77DD}.seg-fig{background:#C6402A}.seg-bib{background:#1D9E75}.seg-out{background:#C98A1B}
+.budget{height:3px;background:var(--bg-sunk);border-radius:2px;margin:-2px 8px 6px 8px}.budget i{display:block;height:100%;border-radius:2px;background:var(--moss)}.budget i.over{background:var(--red)}
+.row .m.b{cursor:pointer}.row .m.b:hover{color:var(--text)}
+.dl{font-size:11px;padding:3px 9px;border-radius:999px;border:1px solid var(--line);color:var(--text-2);cursor:pointer;white-space:nowrap}
+.dl.soon{background:var(--amber-soft);color:#6B4300;border-color:transparent}.dl.now{background:var(--red-soft);color:#8A2A1A;border-color:transparent}
+[data-theme="dark"] .dl.soon{color:#F0C060}[data-theme="dark"] .dl.now{color:#F0A090}
+.page .todo{background:#FFE9B3;color:#6B4300;font-family:var(--font);font-size:10px;padding:0 5px;border-radius:3px;white-space:nowrap}
+.page .fig .box.tikz{background:repeating-linear-gradient(90deg,#e9e3d5 0 10px,#fff 10px 20px)}
+.hl .k.todo{color:var(--amber);font-style:normal}
+.gutter .dot.lint{background:var(--text-3)}
+.lvl.lint{background:var(--bg-sunk);color:var(--text-2)}
+.chk-row{display:flex;gap:10px;align-items:flex-start;padding:7px 4px;border-bottom:1px solid var(--line);font-size:12px;line-height:1.4}
+.chk-row .ic{flex:none;width:16px;text-align:center;font-weight:500}.chk-row .ok{color:var(--moss)}.chk-row .bad{color:var(--red)}.chk-row .na{color:var(--text-3)}
+.chk-row .tb{margin-left:auto;height:24px;padding:0 8px;flex:none}
+.meter{display:flex;align-items:baseline;gap:6px;margin:6px 4px 2px}.meter b{font-size:22px;font-weight:500}.meter span{color:var(--text-2);font-size:12px}
+.mbar{height:6px;background:var(--bg-sunk);border-radius:3px;margin:0 4px 10px}.mbar i{display:block;height:100%;border-radius:3px;background:var(--moss)}.mbar i.over{background:var(--red)}
+.file-li{display:flex;gap:8px;align-items:center;padding:4px 0;font-size:12px}.file-li .loc{flex:1}.file-li .why{color:var(--text-3);font-size:11px}
+.cmd{display:flex;gap:8px;align-items:center;font-family:var(--mono);font-size:11.5px;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:6px 10px;margin:6px 0}
+.cmd span{flex:1;overflow:auto;white-space:nowrap}
+.sec-h{font-weight:500;margin:14px 0 4px}
+</style>
+</head>
+<body>
+<div class="app" id="app">
+
+  <header class="top">
+    <div class="wordmark" aria-label="Galley">galley<span class="caret">^</span></div>
+    <button class="proj" id="projName" title="Switch project">Sparse attention (thesis) <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m6 9 6 6 6-6"/></svg></button>
+    <button class="tb search" id="openPalette"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><span>Search files, commands, sections</span><kbd>Ctrl K</kbd></button>
+    <button class="dl" id="deadline" title="Click to change the deadline"></button>
+    <div class="presence">
+      <span class="pill off" id="offPill" style="display:none">Offline · edits stored locally</span>
+      <span class="pill sync" id="syncPill" style="display:none">Synced</span>
+      <div class="avs" title="Ana Novak, Julia Ruiz, you"><span class="av a-an">AN</span><span class="av a-jr">JR</span><span class="av a-me">ME</span></div>
+      <span class="n" id="online">3 online</span>
+    </div>
+    <button class="tb" id="openShare"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></svg>Share</button>
+    <button class="tb icon" id="themeBtn" title="Toggle theme" aria-label="Toggle theme"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3a9 9 0 1 0 9 9c0-.5 0-1-.1-1.4A5.5 5.5 0 0 1 12 3z"/></svg></button>
+    <button class="tb icon" id="settingsBtn" title="Settings" aria-label="Settings"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
+  </header>
+
+  <div class="main" id="main">
+    <nav class="rail" aria-label="Panels">
+      <button data-drawer="files" class="on" title="Files"><svg viewBox="0 0 24 24"><path d="M14 3v5h5M6 3h8l5 5v13H6z"/></svg></button>
+      <button data-drawer="outline" title="Outline"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h10M4 18h13"/></svg></button>
+      <button data-drawer="bib" title="Bibliography"><svg viewBox="0 0 24 24"><path d="M4 19V5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2zm0 0a2 2 0 0 0 2 2h13"/></svg></button>
+      <button data-drawer="comments" title="Comments" id="railComments"><svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-8 8H8l-4 3V12a8 8 0 0 1 8-8h1a8 8 0 0 1 8 8z"/></svg></button>
+      <button data-drawer="history" title="History"><svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7M3 4v5h5M12 8v4l3 2"/></svg></button>
+      <button data-drawer="tasks" title="Tasks" id="railTasks"><svg viewBox="0 0 24 24"><path d="M9 6h11M9 12h11M9 18h11M4 6l1 1 2-2M4 12l1 1 2-2M4 18l1 1 2-2"/></svg></button>
+      <button data-drawer="submit" title="Submit"><svg viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/><path d="M5 21h14"/></svg></button>
+      <button data-drawer="agents" title="Agents" id="railAgents"><svg viewBox="0 0 24 24"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8zM19 17l.7 2.3L22 20l-2.3.7L19 23l-.7-2.3L16 20l2.3-.7z"/></svg></button>
+      <span class="sp"></span>
+      <button id="offlineBtn" title="Simulate going offline"><svg viewBox="0 0 24 24"><path d="M5 12.5a10 10 0 0 1 14 0M8.5 16a5 5 0 0 1 7 0M12 19.5h0M2 9a15 15 0 0 1 20 0"/></svg></button>
+    </nav>
+
+    <aside class="drawer" id="drawer">
+      <div class="dh"><span id="drawerTitle">Files</span><span id="drawerActions"></span></div>
+      <div class="db" id="drawerBody"></div>
+    </aside>
+
+    <section class="editor">
+      <div class="tabs" id="tabs"></div>
+      <div class="banner" id="banner"><span id="bannerText"></span><button class="tb" id="restoreBtn">Restore this version</button><button class="tb" id="backBtn">Back to latest</button></div>
+      <div class="ed">
+        <div class="gutter" id="gutter"></div>
+        <div class="scroll" id="scroll">
+          <pre class="hl" id="hl" aria-hidden="true"></pre>
+          <textarea class="ta" id="ta" spellcheck="false" aria-label="LaTeX source"></textarea>
+        </div>
+      </div>
+    </section>
+
+    <div class="split" id="split" role="separator" aria-orientation="vertical"></div>
+
+    <section class="preview">
+      <div class="ph">
+        <span style="font-weight:500">Preview</span>
+        <button class="tb" id="draftBtn" title="Skip figures for faster builds">Draft</button>
+        <button class="tb" id="invertBtn" title="Dark page">Invert</button>
+        <button class="tb" id="syncBtn" title="Click a paragraph in the PDF to jump to source">Sync</button>
+        <button class="tb icon" title="Download PDF" aria-label="Download PDF" id="dlBtn"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 4v11m-5-5 5 5 5-5M5 20h14"/></svg></button>
+        <span class="pg" id="pg">1 / 1</span>
+      </div>
+      <div class="pb" id="pb"><div class="stale" id="stale">Last build failed. Showing the previous PDF.</div><div class="page" id="page"></div></div>
+    </section>
+
+    <div class="probs" id="probs">
+      <div class="dh"><span id="probsTitle">Problems</span><button class="tb" id="closeProbs">Close</button></div>
+      <div class="db" id="probsBody"></div>
+    </div>
+  </div>
+
+  <footer class="build">
+    <span class="dot" id="bdot"></span>
+    <button class="st" id="bstatus">Not built yet</button>
+    <span class="mini" id="mini" title="Build profile"></span>
+    <span class="wc" id="wc"></span>
+    <div class="r">
+      <span style="color:var(--text-3)" id="engine">Tectonic · main.tex</span>
+      <select id="auto" aria-label="Build mode"><option value="auto">Auto build</option><option value="manual">Manual</option></select>
+      <button class="tb" id="cpBtn">Checkpoint <kbd>Ctrl ⇧ C</kbd></button>
+      <button class="tb primary" id="buildBtn">Build <kbd>Ctrl ↵</kbd></button>
+    </div>
+  </footer>
+</div>
+
+<div class="overlay" id="shareOv"><div class="modal" role="dialog" aria-label="Share project">
+  <div class="mh">Share “Sparse attention”<button class="tb" id="shareClose">Done</button></div>
+  <div class="mb">
+    <div id="members"></div>
+    <div class="field" style="margin-top:14px"><input id="invEmail" placeholder="name@university.edu"><select id="invRole"><option>Editor</option><option>Commenter</option><option>Viewer</option></select><button class="tb" id="invBtn">Invite</button></div>
+    <div style="margin-top:16px;font-weight:500">Share link</div>
+    <div class="field"><select id="linkRole"><option>Commenter</option><option>Viewer</option><option>Editor</option></select><select id="linkExp"><option>Expires in 30 days</option><option>Expires in 7 days</option><option>Never expires</option></select><button class="tb" id="genLink">Create link</button></div>
+    <div class="link" id="linkBox" style="display:none"><span id="linkText"></span><button class="tb" id="copyLink">Copy</button></div>
+    <div class="hint" style="padding-left:0">Reviewers with a link only need a display name.</div>
+    <div class="sec-h">Work locally</div>
+    <div class="hint" style="padding:0 0 4px">Every project is a plain git repo. Vim and Emacs collaborators never need the web UI.</div>
+    <div class="cmd"><span>galley clone tex.uni.edu/p/sparse-attention</span><button class="tb" data-copy="galley clone tex.uni.edu/p/sparse-attention">Copy</button></div>
+    <div class="cmd"><span>galley push   # merges through the CRDT, no conflicts for online editors</span><button class="tb" data-copy="galley push">Copy</button></div>
+    <button class="tb" id="cliPush">Simulate a push from Julia's terminal</button>
+  </div>
+</div></div>
+
+<div class="overlay" id="packOv"><div class="modal" role="dialog" aria-label="Submission package" style="width:560px">
+  <div class="mh"><span id="packTitle">Package for arXiv</span><button class="tb" id="packClose">Close</button></div>
+  <div class="mb" id="packBody"></div>
+</div></div>
+<div class="overlay" id="palOv"><div class="pal" role="dialog" aria-label="Command palette">
+  <input id="palIn" placeholder="Type a command, file, or section" autocomplete="off">
+  <div class="list" id="palList"></div>
+</div></div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+/* ---------- state ---------- */
+const files = {
+'main.tex': String.raw`\documentclass[11pt]{article}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{tikz}
+\usepackage{todonotes}
+
+\title{Sparse attention for long documents}
+\author{Ana Novak \and Julia Ruiz \and Marco Estrada}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We propose a sparse attention mask that scales to book-length inputs
+without sacrificing accuracy on downstream tasks.
+\end{abstract}
+
+\section{Introduction}
+Transformers \cite{vaswani2017} attend to every token pair, so cost grows
+quadratically with sequence length. In order to process long documents,
+prior work truncates the input or utilizes sliding windows \cite{beltagy2020}.
+% TODO(@julia): cite Big Bird here as well
+We take a different approach, described in Section~\ref{sec:method}.
+
+\input{sections/method}
+
+\section{Results}
+Table~\ref{tab:results} summarizes accuracy on three benchmarks.
+Our method is very competitive with dense attention while using
+roughly a quarter of the memory.\todo{@ana add the A100 memory numbers}
+
+\section{Conclusion}
+Sparse masks are a practical route to long-context models.
+
+\bibliographystyle{plain}
+\bibliography{refs}
+\end{document}
+`,
+'sections/method.tex': String.raw`\section{Method}
+\label{sec:method}
+We build on the standard attention mechanism and extend it to a sparse
+mask. Each query attends to a local window plus a small set of global
+tokens.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics{fig1}
+  \caption{Mask pattern for a 16-token block.}
+  \label{fig:mask}
+\end{figure}
+
+The mask $M_{ij}$ is one if $|i-j| \le w$ or $j \in G$, and zero otherwise.
+
+\begin{figure}[t]
+  \centering
+  \begin{tikzpicture}[scale=.45]
+    \foreach \i in {0,...,7} \foreach \j in {0,...,7}
+      \fill[gray!20] (\i,-\j) rectangle ++(1,-1);
+    \foreach \i in {0,...,7} \fill[black] (\i,-\i) rectangle ++(1,-1);
+    \foreach \j in {0,...,7} \fill[black!60] (0,-\j) rectangle ++(1,-1);
+  \end{tikzpicture}
+  \caption{Local band plus one global column, drawn with TikZ.}
+  \label{fig:mask-tikz}
+\end{figure}
+`,
+'refs.bib': String.raw`@inproceedings{vaswani2017,
+  title     = {Attention is all you need},
+  author    = {Vaswani, Ashish and Shazeer, Noam and Parmar, Niki and others},
+  booktitle = {Advances in Neural Information Processing Systems},
+  year      = {2017}
+}
+
+@article{beltagy2020,
+  title   = {Longformer: The long-document transformer},
+  author  = {Beltagy, Iz and Peters, Matthew E. and Cohan, Arman},
+  journal = {arXiv preprint arXiv:2004.05150},
+  year    = {2020}
+}
+`};
+const catalog = {
+  attention:{key:'vaswani2017',entry:null},
+  sparse:{key:'child2019',entry:String.raw`@article{child2019,
+  title   = {Generating long sequences with sparse transformers},
+  author  = {Child, Rewon and Gray, Scott and Radford, Alec and Sutskever, Ilya},
+  journal = {arXiv preprint arXiv:1904.10509},
+  year    = {2019}
+}`},
+  long:{key:'beltagy2020',entry:null},
+  memory:{key:'dao2022',entry:String.raw`@inproceedings{dao2022,
+  title     = {FlashAttention: Fast and memory-efficient exact attention with IO-awareness},
+  author    = {Dao, Tri and Fu, Daniel Y. and Ermon, Stefano and Rudra, Atri and R{\'e}, Christopher},
+  booktitle = {Advances in Neural Information Processing Systems},
+  year      = {2022}
+}`},
+  window:{key:'zaheer2020',entry:String.raw`@inproceedings{zaheer2020,
+  title     = {Big Bird: Transformers for longer sequences},
+  author    = {Zaheer, Manzil and Guruganesh, Guru and Dubey, Avinava and others},
+  booktitle = {Advances in Neural Information Processing Systems},
+  year      = {2020}
+}`}
+};
+const state = {
+  cur:'main.tex', open:['main.tex','sections/method.tex'], drawer:'files',
+  build:{status:'idle',errors:[],ms:0}, lastGood:null, draft:false, inv:false, auto:true,
+  history:[], viewing:null, comments:[], suggestions:[], offline:false, queued:0,
+  baseline:{}, agentRuns:[], backend:'ollama', probsOpen:false, preview:true, suggestionMode:false,
+  remote:{file:'sections/method.tex',line:4,col:20}
+};
+for (const f in files) state.baseline[f]=files[f];
+const $ = id => document.getElementById(id);
+const esc = s => s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+let toastT; function toast(msg, action){ const t=$('toast'); t.innerHTML=esc(msg)+(action?` <button id="toastAct">${esc(action.label)}</button>`:''); t.classList.add('show'); if(action) $('toastAct').onclick=()=>{action.fn();t.classList.remove('show')}; clearTimeout(toastT); toastT=setTimeout(()=>t.classList.remove('show'),3500); }
+const sha = () => Math.random().toString(16).slice(2,9);
+const ago = t => { const s=Math.round((Date.now()-t)/1000); if(s<60) return 'just now'; if(s<3600) return Math.round(s/60)+' min ago'; return Math.round(s/3600)+' h ago'; };
+
+/* ---------- editor ---------- */
+const ta=$('ta'), hl=$('hl'), gutter=$('gutter');
+function highlightLine(line){
+  let out='', re=/(%.*)|(\\[a-zA-Z@]+\*?)|(\$[^$]*\$)|([{}\[\]])/g, last=0, m;
+  while((m=re.exec(line))){
+    out+=esc(line.slice(last,m.index));
+    if(m[1]) out+=`<span class="k ${/^%\s*(TODO|FIXME)/.test(m[1])?'todo':''}">${esc(m[1])}</span>`;
+    else if(m[2]) out+=`<span class="c">${esc(m[2])}</span>`;
+    else if(m[3]) out+=`<span class="m">${esc(m[3])}</span>`;
+    else out+=`<span class="b">${esc(m[4])}</span>`;
+    last=m.index+m[0].length;
+  }
+  return out+esc(line.slice(last));
+}
+function render(){
+  const text = state.viewing ? state.viewing.snapshot[state.cur] : files[state.cur];
+  if(ta.value!==text) ta.value=text;
+  ta.disabled = !!state.viewing;
+  const lines=text.split('\n');
+  const errLines = new Set(state.build.errors.filter(e=>e.file===state.cur&&e.level!=='lint').map(e=>e.line));
+  const base=(state.baseline[state.cur]||'').split('\n');
+  let html='';
+  lines.forEach((l,i)=>{
+    let s=highlightLine(l);
+    const sug=state.suggestions.find(x=>x.file===state.cur&&x.line===i+1&&x.status==='open');
+    if(sug && state.suggestionMode){ s=s.replace(esc(sug.from), `<span class="sug-r">${esc(sug.from)}</span><span class="sug-a">${esc(sug.to)}</span>`); }
+    if(state.remote.file===state.cur && state.remote.line===i+1 && !state.viewing){
+      const c=Math.min(state.remote.col, l.length); s=highlightLine(l.slice(0,c))+`<span class="rc"><i></i><b>Ana</b></span>`+highlightLine(l.slice(c));
+    }
+    html+= (errLines.has(i+1)?`<span class="errln">${s} </span>`:s) + '\n';
+  });
+  hl.innerHTML=html;
+  let g='';
+  lines.forEach((l,i)=>{
+    let mk='';
+    if(!state.viewing){
+      if(i>=base.length) mk+='<span class="mk add"></span>';
+      else if(base[i]!==l) mk+='<span class="mk mod"></span>';
+    }
+    const e=state.build.errors.find(x=>x.file===state.cur&&x.line===i+1);
+    if(e) mk+=`<span class="dot ${e.level}" title="${esc(e.message)}"></span>`;
+    else if(state.comments.some(c=>c.file===state.cur&&c.line===i+1&&!c.resolved)) mk+='<span class="dot cmt" title="Comment"></span>';
+    g+=`<div>${mk}${i+1}</div>`;
+  });
+  gutter.innerHTML=g;
+  const w=Object.values(files).filter((_,i)=>Object.keys(files)[i].endsWith('.tex')).join(' ').replace(/\\[a-zA-Z]+(\[[^\]]*\])?(\{[^}]*\})?/g,' ').replace(/[{}$%]/g,' ').split(/\s+/).filter(Boolean).length;
+  $('wc').textContent = w+' words';
+  renderTabs();
+}
+ta.addEventListener('input',()=>{
+  if(state.viewing) return;
+  files[state.cur]=ta.value; autoLabel(); render(); if(state.offline) state.queued++;
+  if(state.drawer==='outline'||state.drawer==='bib') renderDrawer();
+  scheduleAutoCommit(); scheduleAutoBuild();
+});
+ta.addEventListener('scroll',()=>{ hl.scrollTop=ta.scrollTop; hl.scrollLeft=ta.scrollLeft; gutter.scrollTop=ta.scrollTop; });
+$('scroll').addEventListener('scroll',()=>{ gutter.scrollTop=$('scroll').scrollTop; });
+ta.addEventListener('keydown',e=>{
+  if(e.key==='Tab'){ e.preventDefault(); if(expandSnippet()) return; const s=ta.selectionStart; ta.setRangeText('  ',s,ta.selectionEnd,'end'); ta.dispatchEvent(new Event('input')); }
+});
+function renderTabs(){
+  $('tabs').innerHTML = state.open.map(f=>`<button class="tab ${f===state.cur?'on':''}" data-f="${f}">${f}<span class="x" data-x="${f}" title="Close">×</span></button>`).join('');
+  $('tabs').querySelectorAll('.tab').forEach(b=>b.onclick=e=>{ if(e.target.dataset.x){ closeTab(e.target.dataset.x); return; } openFile(b.dataset.f); });
+}
+function openFile(f, line){
+  if(!state.open.includes(f)) state.open.push(f);
+  state.cur=f; render();
+  if(line){ const lines=ta.value.split('\n'); let pos=0; for(let i=0;i<line-1;i++) pos+=lines[i].length+1; ta.focus(); ta.setSelectionRange(pos,pos+(lines[line-1]||'').length); const lh=12.5*1.7; ta.scrollTop=Math.max(0,(line-6)*lh); ta.dispatchEvent(new Event('scroll')); }
+  if(state.drawer==='files') renderDrawer();
+}
+function closeTab(f){ if(state.open.length===1) return; state.open=state.open.filter(x=>x!==f); if(state.cur===f) state.cur=state.open[0]; render(); }
+function selectedText(){ return ta.value.slice(ta.selectionStart,ta.selectionEnd); }
+function cursorLine(){ return ta.value.slice(0,ta.selectionStart).split('\n').length; }
+
+/* ---------- linter (simulated compiler) ---------- */
+function lint(){
+  const errs=[]; const main=files['main.tex'];
+  const all = Object.keys(files).filter(f=>f.endsWith('.tex'));
+  const labels=new Set(), keys=new Set();
+  all.forEach(f=>{ for(const m of files[f].matchAll(/\\label\{([^}]+)\}/g)) labels.add(m[1]); });
+  for(const m of files['refs.bib'].matchAll(/@\w+\{([^,]+),/g)) keys.add(m[1].trim());
+  const hasNatbib=/\\usepackage(\[[^\]]*\])?\{natbib\}/.test(main);
+  all.forEach(f=>{
+    const lines=files[f].split('\n'); const stack=[];
+    lines.forEach((l,i)=>{
+      const ln=i+1; const code=l.replace(/%.*$/,'');
+      if(/\\cite[pt]\b/.test(code) && !hasNatbib) errs.push({level:'error',file:f,line:ln,code:'undefined-control-sequence',message:'Undefined control sequence \\cite'+(code.match(/\\cite([pt])/)[1]),hint:'\\citep and \\citet come from natbib. Add \\usepackage{natbib} to the preamble, or use \\cite.',fix:{label:'Add natbib',file:'main.tex',after:/\\documentclass[^\n]*\n/,text:'\\usepackage{natbib}\n'}});
+      for(const m of code.matchAll(/\\ref\{([^}]+)\}/g)) if(!labels.has(m[1])) errs.push({level:'warning',file:f,line:ln,code:'undefined-reference',message:`Reference "${m[1]}" undefined`,hint:m[1].startsWith('tab:')?`No \\label{${m[1]}} exists. Generate a table with the Table agent, which labels it for you.`:`No \\label{${m[1]}} exists anywhere in the project.`,agent:m[1].startsWith('tab:')?'table':null});
+      for(const m of code.matchAll(/\\cite[pt]?\{([^}]+)\}/g)) m[1].split(',').map(s=>s.trim()).forEach(k=>{ if(!keys.has(k)) errs.push({level:'warning',file:f,line:ln,code:'undefined-citation',message:`Citation "${k}" undefined`,hint:'The key is not in refs.bib. Use the Cite agent to look it up, or add the entry by hand.',agent:'cite'}); });
+      if(/\\includegraphics\{/.test(code) && !/\\includegraphics\[/.test(code)) errs.push({level:'warning',file:f,line:ln,code:'float-too-large',message:'Float too large for page',hint:'The figure has no width set, so it is placed at native size. Constrain it to the text width.',fix:{label:'Set width',file:f,find:/\\includegraphics\{/,text:'\\includegraphics[width=.8\\linewidth]{'}});
+      for(const m of code.matchAll(/\\begin\{(\w+)\}/g)) stack.push({env:m[1],line:ln});
+      for(const m of code.matchAll(/\\end\{(\w+)\}/g)){ const top=stack.pop(); if(!top) errs.push({level:'error',file:f,line:ln,code:'extra-end',message:`\\end{${m[1]}} without matching \\begin`,hint:'Remove this \\end or add the missing \\begin above it.'}); else if(top.env!==m[1]) errs.push({level:'error',file:f,line:ln,code:'env-mismatch',message:`\\begin{${top.env}} on line ${top.line} ended by \\end{${m[1]}}`,hint:`Change this to \\end{${top.env}} or fix the nesting.`,fix:{label:`Use \\end{${top.env}}`,file:f,line:ln,find:new RegExp('\\\\end\\{'+m[1]+'\\}'),text:`\\end{${top.env}}`}}); }
+    });
+    stack.forEach(s=>{ if(s.env!=='document') errs.push({level:'error',file:f,line:s.line,code:'unclosed-env',message:`\\begin{${s.env}} is never closed`,hint:`Add \\end{${s.env}} after the environment's content.`}); });
+  });
+  if(!/\\begin\{document\}/.test(main)) errs.push({level:'error',file:'main.tex',line:1,code:'no-document',message:'No \\begin{document} found',hint:'The main file needs a document environment.'});
+  return errs;
+}
+
+/* ---------- build ---------- */
+let buildTimer=null, autoBuildT=null;
+function scheduleAutoBuild(){ if(!state.auto) return; clearTimeout(autoBuildT); autoBuildT=setTimeout(()=>{ if(state.build.status!=='running') build(); },1500); }
+function build(){
+  if(state.viewing) return;
+  clearTimeout(autoBuildT);
+  state.build.status='running'; $('bdot').className='dot run'; $('bstatus').textContent='Building…';
+  const t0=Date.now(); const prof=profile(); const ms=prof.total;
+  clearTimeout(buildTimer);
+  buildTimer=setTimeout(()=>{
+    const errs=lint().concat(lintStyle()); state.build={status:errs.some(e=>e.level==='error')?'fail':'ok',errors:errs,ms:((Date.now()-t0)/1000).toFixed(1),profile:prof};
+    if(state.cache&&!state.draft) state.cacheWarm=true;
+    const ne=errs.filter(e=>e.level==='error').length, nw=errs.filter(e=>e.level==='warning').length;
+    renderMini();
+    if(state.build.status==='ok'){ state.lastGood=renderPDF(); $('page').innerHTML=state.lastGood; $('stale').classList.remove('show'); $('bdot').className='dot ok'; $('bstatus').textContent=`Compiled ${state.build.ms} s · ${nw?nw+' warning'+(nw>1?'s':''):'no warnings'}`; }
+    else { $('stale').classList.toggle('show',!!state.lastGood); if(!state.lastGood) $('page').innerHTML='<div class="foot">No PDF yet. Fix the errors below and build again.</div>'; $('bdot').className='dot fail'; $('bstatus').textContent=`Build failed · ${ne} error${ne>1?'s':''}${nw?' · '+nw+' warning'+(nw>1?'s':''):''}`; if(!state.probsOpen) openProbs(); }
+    $('pg').textContent='1 / '+(state.draft?'1':'2');
+    commit(null,true); render(); renderProbs();
+    if(state.build.status==='fail') toast('Build failed. The previous PDF is still shown.', {label:'Fix with agent', fn:()=>runAgent('fix')});
+  },ms);
+}
+function attachSync(){ $('page').querySelectorAll('[data-src]').forEach(el=>el.onclick=()=>{ const [f,l]=el.dataset.src.split(':'); openFile(f,+l); toast('Jumped to '+f+':'+l); }); }
+function renderPDF(){
+  const main=files['main.tex'];
+  const inlined = main.replace(/\\input\{([^}]+)\}/g,(m,p)=>{ const f=p.endsWith('.tex')?p:p+'.tex'; return files[f]?`%%FILE ${f}\n`+files[f]+`\n%%FILE main.tex`:''; });
+  const g=(re)=>{ const m=main.match(re); return m?m[1]:''; };
+  const keys=[]; const keyList=[...files['refs.bib'].matchAll(/@\w+\{([^,]+),/g)].map(m=>m[1].trim());
+  const cite=k=>{ const parts=k.split(',').map(s=>s.trim()); return '['+parts.map(p=>{ if(!keys.includes(p)) keys.push(p); return keyList.includes(p)?keys.indexOf(p)+1:'?'; }).join(', ')+']'; };
+  const labels={}; let sec=0, sub=0, fig=0, tab=0;
+  const inl=s=>esc(s).replace(/\\todo\{([^}]+)\}/g,'<span class="todo">$1</span>').replace(/\\cite[pt]?\{([^}]+)\}/g,(m,k)=>cite(k)).replace(/~/g,'&nbsp;').replace(/\\ref\{([^}]+)\}/g,(m,l)=>labels[l]||'??').replace(/\\textbf\{([^}]+)\}/g,'<b>$1</b>').replace(/\\emph\{([^}]+)\}/g,'<em>$1</em>').replace(/\\textit\{([^}]+)\}/g,'<em>$1</em>').replace(/\$([^$]+)\$/g,(m,x)=>'<em>'+x.replace(/\\le/g,'≤').replace(/\\in/g,'∈').replace(/[{}]/g,'').replace(/_(\w)/g,'<sub>$1</sub>').replace(/\|/g,'|')+'</em>').replace(/\\%/g,'%').replace(/---/g,'—').replace(/--/g,'–').replace(/``/g,'“').replace(/''/g,'”');
+  let html=`<h1>${inl(g(/\\title\{([^}]+)\}/))}</h1><div class="au">${esc(g(/\\author\{([^}]+)\}/)).replace(/\\and/g,' · ')}</div>`;
+  const body=(inlined.match(/\\begin\{document\}([\s\S]*)\\end\{document\}/)||['',''])[1];
+  const ab=body.match(/\\begin\{abstract\}([\s\S]*?)\\end\{abstract\}/); if(ab) html+=`<div class="ab"><b>Abstract</b>${inl(ab[1].trim().replace(/\s*\n\s*/g,' '))}</div>`;
+  const lines=body.replace(/\\begin\{abstract\}[\s\S]*?\\end\{abstract\}/,'').replace(/\\maketitle/,'').split('\n');
+  let file='main.tex', lineNo=lines.length?0:0; const mainStart=main.split('\n').findIndex(l=>/\\begin\{document\}/.test(l))+1; let mainLine=mainStart; let fileLine=0;
+  let para=[], paraSrc=''; let i=0; let inFig=false, figCap='', figSrc='', figTikz=false; let inTab=false, tabRows=[], tabCap='';
+  const flush=()=>{ if(para.length){ html+=`<p class="clk" data-src="${paraSrc}">${inl(para.join(' '))}</p>`; para=[]; } };
+  const pos=()=> file==='main.tex'?`main.tex:${mainLine}`:`${file}:${fileLine}`;
+  for(const raw of lines){
+    if(raw.startsWith('%%FILE ')){ file=raw.slice(7); fileLine=0; if(file==='main.tex') mainLine--; continue; }
+    if(file==='main.tex') mainLine++; else fileLine++;
+    const l=raw.replace(/%.*$/,'').trim();
+    if(!l){ flush(); continue; }
+    let m;
+    if((m=l.match(/\\section\{([^}]+)\}/))){ flush(); sec++; sub=0; html+=`<h2 class="clk" data-src="${pos()}">${sec} ${inl(m[1])}</h2>`; continue; }
+    if((m=l.match(/\\subsection\{([^}]+)\}/))){ flush(); sub++; html+=`<h3 class="clk" data-src="${pos()}">${sec}.${sub} ${inl(m[1])}</h3>`; continue; }
+    if(/\\begin\{figure\}/.test(l)){ flush(); inFig=true; fig++; figCap=''; figSrc=pos(); figTikz=false; continue; }
+    if(inFig && /\\begin\{tikzpicture\}/.test(l)) figTikz=true;
+    if(/\\end\{figure\}/.test(l)){ inFig=false; html+=`<div class="fig clk" data-src="${figSrc}"><div class="box ${state.draft?'draft':''} ${figTikz&&!state.draft?'tikz':''}">${state.draft?(figTikz?'tikz (draft)':'fig1 (draft)'):(figTikz?('tikz'+(state.cacheWarm?' · from cache':' · drawn')):'fig1.pdf')}</div>Figure ${fig}: ${inl(figCap)}</div>`; continue; }
+    if(/\\begin\{table\}/.test(l)){ flush(); inTab=true; tab++; tabRows=[]; tabCap=''; continue; }
+    if(/\\end\{table\}/.test(l)){ inTab=false; const rows=tabRows.map(r=>r.split('&').map(c=>inl(c.trim()))); const head=rows.shift()||[]; html+=`<div class="cap">Table ${tab}: ${inl(tabCap)}</div><table><thead><tr>${head.map(c=>`<th>${c}</th>`).join('')}</tr></thead><tbody>${rows.map(r=>`<tr>${r.map(c=>`<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table>`; continue; }
+    if((m=l.match(/\\label\{([^}]+)\}/))){ labels[m[1]]= inFig?String(fig): inTab?String(tab): sub?`${sec}.${sub}`:String(sec); continue; }
+    if((m=l.match(/\\caption\{([^}]+)\}/))){ if(inFig) figCap=m[1]; else tabCap=m[1]; continue; }
+    if(inFig||inTab){ if(inTab && /&/.test(l) && !/\\(toprule|midrule|bottomrule)/.test(l)) tabRows.push(l.replace(/\\\\$/,'')); continue; }
+    if(/^\\(bibliography|bibliographystyle|centering|toprule|midrule|bottomrule|end|begin|usepackage|documentclass|title|author)/.test(l)) { flush(); continue; }
+    if(!para.length) paraSrc=pos();
+    para.push(l);
+  }
+  flush();
+  html=html.replace(/\?\?/g,(x)=>'??');
+  Object.entries(labels).forEach(([k,v])=>{ html=html.split(`\\ref{${k}}`).join(v); });
+  if(keys.length){ html+='<h2>References</h2>'; keys.forEach((k,i)=>{ const e=files['refs.bib'].match(new RegExp('@\\w+\\{'+k+',[\\s\\S]*?\\n\\}')); if(!e){ html+=`<div class="ref">[${i+1}] ?? ${esc(k)}</div>`; return; } const f=n=>{ const mm=e[0].match(new RegExp(n+'\\s*=\\s*\\{([^}]*)\\}')); return mm?mm[1]:''; }; html+=`<div class="ref">[${i+1}] ${esc(f('author').replace(/ and others/,' et al.').replace(/ and /g,', '))}. ${esc(f('title'))}. <em>${esc(f('booktitle')||f('journal'))}</em>, ${esc(f('year'))}.</div>`; }); }
+  html+=`<div class="foot">1</div>`;
+  setTimeout(attachSync,0);
+  return html;
+}
+
+/* ---------- history ---------- */
+let autoCommitT=null;
+function scheduleAutoCommit(){ clearTimeout(autoCommitT); autoCommitT=setTimeout(()=>commit(null,true),4000); }
+function commit(label, auto){
+  const last=state.history[0];
+  const snap={}; for(const f in files) snap[f]=files[f];
+  if(auto && last && Object.keys(snap).every(f=>snap[f]===last.snapshot[f])) return;
+  const changed=Object.keys(snap).filter(f=>!last||snap[f]!==last.snapshot[f]);
+  state.history.unshift({sha:sha(),label:label||('edit: '+(changed.join(', ')||'no changes')),auto:!!auto,time:Date.now(),snapshot:snap,author:'You'});
+  if(state.drawer==='history') renderDrawer();
+}
+function checkpoint(){ const l=prompt('Checkpoint label','Before rewriting the method section'); if(l===null) return; commit(l,false); toast('Checkpoint created'); }
+function viewVersion(h){ state.viewing=h; $('banner').classList.add('show'); $('bannerText').textContent=`Viewing “${h.label}” (${ago(h.time)}). Editing is off while browsing history.`; render(); renderDrawer(); }
+$('backBtn').onclick=()=>{ state.viewing=null; $('banner').classList.remove('show'); render(); renderDrawer(); };
+$('restoreBtn').onclick=()=>{ const h=state.viewing; for(const f in h.snapshot) files[f]=h.snapshot[f]; state.viewing=null; $('banner').classList.remove('show'); commit('restore: '+h.label,false); render(); toast('Restored as a new commit. Nothing was rewritten.'); scheduleAutoBuild(); };
+
+/* ---------- drawers ---------- */
+document.querySelectorAll('.rail [data-drawer]').forEach(b=>b.onclick=()=>{ if(state.drawer===b.dataset.drawer){ state.drawer=null; } else state.drawer=b.dataset.drawer; renderDrawer(); });
+function renderDrawer(){
+  document.querySelectorAll('.rail [data-drawer]').forEach(b=>b.classList.toggle('on',b.dataset.drawer===state.drawer));
+  const d=$('drawer'); d.classList.toggle('hidden',!state.drawer); if(!state.drawer) return;
+  const titles={files:'Files',outline:'Outline',bib:'Bibliography',comments:'Comments',history:'History',agents:'Agents',tasks:'Tasks',submit:'Submit'};
+  $('drawerTitle').textContent=titles[state.drawer]; const body=$('drawerBody'); const acts=$('drawerActions'); acts.innerHTML='';
+  const ico={tex:'<svg viewBox="0 0 24 24"><path d="M14 3v5h5M6 3h8l5 5v13H6z"/></svg>',bib:'<svg viewBox="0 0 24 24"><path d="M4 19V5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2zm0 0a2 2 0 0 0 2 2h13"/></svg>',img:'<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m3 16 5-5 4 4 3-3 6 6"/><circle cx="16" cy="9" r="1.5"/></svg>',dir:'<svg viewBox="0 0 24 24"><path d="M3 6h6l2 2h10v11H3z"/></svg>'};
+  if(state.drawer==='files'){
+    acts.innerHTML='<button class="tb" id="newFile">New</button>';
+    const tree=[['main.tex','tex',0],['sections/','dir',0],['sections/method.tex','tex',1],['refs.bib','bib',0],['figures/','dir',0],['figures/fig1.pdf','img',1]];
+    body.innerHTML=tree.map(([n,t,depth])=>`<div class="row ${n===state.cur?'on':''} ${depth?'sub':''}" data-f="${n}" ${t==='dir'||t==='img'?'style="cursor:default"':''}>${ico[t]}<span>${n.split('/').pop()||n}</span>${t==='img'?'<span class="m">42 KB</span>':''}</div>`).join('')+`<div class="hint">Drop images here to add them to figures/.</div>`;
+    body.querySelectorAll('.row[data-f]').forEach(r=>r.onclick=()=>{ if(files[r.dataset.f]) openFile(r.dataset.f); });
+    $('newFile').onclick=()=>{ const n=prompt('File name','sections/results.tex'); if(!n) return; files[n]=files[n]||'\\section{'+n.split('/').pop().replace('.tex','')+'}\n'; state.baseline[n]=''; openFile(n); renderDrawer(); toast('Created '+n); };
+  }
+  if(state.drawer==='outline') renderOutline(body,acts);
+  if(state.drawer==='tasks') renderTasks(body,acts);
+  if(state.drawer==='submit') renderSubmit(body,acts);
+  if(state.drawer==='bib'){
+    acts.innerHTML='<button class="tb" id="addDoi">Add by DOI</button>';
+    const entries=[...files['refs.bib'].matchAll(/@(\w+)\{([^,]+),([\s\S]*?)\n\}/g)].map(m=>({type:m[1],key:m[2].trim(),title:(m[3].match(/title\s*=\s*\{([^}]*)\}/)||[,''])[1],year:(m[3].match(/year\s*=\s*\{([^}]*)\}/)||[,''])[1]}));
+    const used=new Set(); Object.keys(files).filter(f=>f.endsWith('.tex')).forEach(f=>{ for(const m of files[f].matchAll(/\\cite[pt]?\{([^}]+)\}/g)) m[1].split(',').forEach(k=>used.add(k.trim())); });
+    body.innerHTML=entries.map(e=>`<div class="card" style="margin:6px 0"><div class="h"><span class="loc">${esc(e.key)}</span><span style="margin-left:auto">${e.year}</span></div><div class="t" style="font-weight:400">${esc(e.title)}</div><div class="acts"><button class="tb" data-ins="${esc(e.key)}">Insert \\cite</button>${used.has(e.key)?'<span class="lvl info">used</span>':'<span class="lvl warning">unused</span>'}</div></div>`).join('')+'<div class="hint">Paste a DOI or arXiv URL anywhere in the editor to add an entry.</div>';
+    body.querySelectorAll('[data-ins]').forEach(b=>b.onclick=()=>{ if(!state.cur.endsWith('.tex')) openFile('main.tex'); ta.focus(); ta.setRangeText('\\cite{'+b.dataset.ins+'}',ta.selectionStart,ta.selectionEnd,'end'); ta.dispatchEvent(new Event('input')); });
+    $('addDoi').onclick=()=>{ const d=prompt('DOI or arXiv id','arXiv:1904.10509'); if(!d) return; addBib(catalog.sparse); toast('Added child2019 to refs.bib'); renderDrawer(); };
+  }
+  if(state.drawer==='comments'){
+    acts.innerHTML=`<label class="chk"><input type="checkbox" id="sugMode" ${state.suggestionMode?'checked':''}> Suggesting</label>`;
+    $('sugMode').onchange=e=>{ state.suggestionMode=e.target.checked; render(); toast(state.suggestionMode?'Suggestion mode on: edits are tracked per author':'Suggestion mode off'); };
+    let html='<div class="hint">Select text in the editor and press Ctrl+Shift+M, or use the button below.</div><div style="padding:0 4px 6px"><button class="tb" id="addCmt">Comment on selection</button></div>';
+    const sugs=state.suggestions.filter(s=>s.status==='open');
+    if(sugs.length) html+='<div class="hint">Suggestions</div>'+sugs.map(s=>`<div class="card"><div class="h"><span class="av a-an" style="width:18px;height:18px;font-size:9px;margin:0">AN</span><span>${s.author}</span><span class="loc" style="margin-left:auto">${s.file.split('/').pop()}:${s.line}</span></div><div class="d">Replace <span class="sug-r" style="text-decoration:line-through">${esc(s.from)}</span> with <span class="sug-a">${esc(s.to)}</span></div><div class="acts"><button class="tb" data-sgo="${s.id}">Go to</button><button class="tb" data-acc="${s.id}">Accept</button><button class="tb" data-rej="${s.id}">Reject</button></div></div>`).join('');
+    const cs=state.comments;
+    html+= cs.length? '<div class="hint">Comments</div>'+cs.map(c=>`<div class="card ${c.resolved?'resolved':''}"><div class="h"><span class="av ${c.author==='You'?'a-me':'a-jr'}" style="width:18px;height:18px;font-size:9px;margin:0">${c.author==='You'?'ME':'JR'}</span><span>${c.author}</span><span class="loc" style="margin-left:auto">${c.file.split('/').pop()}:${c.line}</span></div><div class="d">${esc(c.body)}</div>${c.quote?`<div class="loc" style="margin-top:4px">“${esc(c.quote.slice(0,60))}${c.quote.length>60?'…':''}”</div>`:''}<div class="acts"><button class="tb" data-go="${c.id}">Go to</button>${c.resolved?'':`<button class="tb" data-res="${c.id}">Resolve</button>`}</div></div>`).join('') : '<div class="empty"><b>No comments yet</b>Comments stay anchored to the text as it moves.</div>';
+    body.innerHTML=html;
+    $('addCmt').onclick=addComment;
+    body.querySelectorAll('[data-go]').forEach(b=>b.onclick=()=>{ const c=state.comments.find(x=>x.id==b.dataset.go); openFile(c.file,c.line); });
+    body.querySelectorAll('[data-res]').forEach(b=>b.onclick=()=>{ state.comments.find(x=>x.id==b.dataset.res).resolved=true; renderDrawer(); render(); updateBadges(); });
+    body.querySelectorAll('[data-sgo]').forEach(b=>b.onclick=()=>{ const s=state.suggestions.find(x=>x.id==b.dataset.sgo); openFile(s.file,s.line); });
+    body.querySelectorAll('[data-acc]').forEach(b=>b.onclick=()=>{ const s=state.suggestions.find(x=>x.id==b.dataset.acc); files[s.file]=files[s.file].replace(s.from,s.to); s.status='accepted'; render(); renderDrawer(); updateBadges(); toast('Suggestion accepted'); scheduleAutoBuild(); });
+    body.querySelectorAll('[data-rej]').forEach(b=>b.onclick=()=>{ state.suggestions.find(x=>x.id==b.dataset.rej).status='rejected'; render(); renderDrawer(); updateBadges(); });
+  }
+  if(state.drawer==='history'){
+    acts.innerHTML='<button class="tb" id="cpBtn2">Checkpoint</button><label class="chk" style="margin-left:8px"><input type="checkbox" id="showAuto"> all</label>';
+    $('cpBtn2').onclick=checkpoint;
+    const showAuto=body.dataset.showAuto==='1';
+    const list=state.history.filter(h=>showAuto||!h.auto);
+    body.innerHTML='<div class="tl">'+(state.viewing?'':'<div class="ti on"><div class="l">Current (unsaved edits sync live)</div><div class="s"><span>You, Ana, Julia</span></div></div>')+list.map(h=>`<div class="ti ${h.auto?'auto':'cp'} ${state.viewing===h?'on':''}" data-sha="${h.sha}"><div class="l">${esc(h.label)}</div><div class="s"><span class="sha">${h.sha}</span><span>${h.author}</span><span>${ago(h.time)}</span></div></div>`).join('')+'</div>'+(list.length?'<div class="hint">Click a version to browse it. Restoring creates a new commit; history is never rewritten.</div>':'<div class="hint">Auto-commits appear after 4 s of quiet. Tick “all” to see them.</div>')+'<div style="padding:8px 4px"><button class="tb" id="pdfDiff">Compare PDFs with latexdiff</button>'+(state.submitted?` <button class="tb" id="camDiff">Diff against “${esc(state.submitted.label)}”</button>`:'')+'</div>';
+    if(state.submitted) $('camDiff').onclick=()=>{ viewVersion(state.submitted); toast('Camera-ready diff: the marked-up PDF compiles in the sandbox (simulated as a source view here)'); };
+    $('showAuto').checked=showAuto; $('showAuto').onchange=e=>{ body.dataset.showAuto=e.target.checked?'1':'0'; renderDrawer(); };
+    body.querySelectorAll('.ti[data-sha]').forEach(el=>el.onclick=()=>viewVersion(state.history.find(h=>h.sha===el.dataset.sha)));
+    $('pdfDiff').onclick=()=>toast('latexdiff runs in the sandbox against the selected checkpoint (not simulated here)');
+  }
+  if(state.drawer==='agents'){
+    body.innerHTML=`<div class="backend"><span class="dot ok" style="width:7px;height:7px"></span><span id="beText"></span><select id="beSel"><option value="ollama">Ollama · local</option><option value="anthropic">Claude · API</option><option value="openai">OpenAI-compatible</option></select></div>
+    <div class="ag">
+      <button class="agent" data-agent="fix"><svg viewBox="0 0 24 24"><path d="M14.7 6.3a4 4 0 0 0 5 5l-9.4 9.4a2.1 2.1 0 0 1-3-3l9.4-9.4z"/></svg><div><b>Fix build</b><span>Reads the error log, patches the cause, and verifies by compiling.</span></div></button>
+      <button class="agent" data-agent="proof"><svg viewBox="0 0 24 24"><path d="M4 20h16M6 16 16.5 5.5a2 2 0 0 1 3 3L9 19l-4 1z"/></svg><div><b>Proofread selection</b><span>Grammar and clarity. Returns tracked suggestions, never silent edits.</span></div></button>
+      <button class="agent" data-agent="tighten"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h10M4 17h6"/></svg><div><b>Tighten selection</b><span>Cuts filler and hedging to a target length.</span></div></button>
+      <button class="agent" data-agent="cite"><svg viewBox="0 0 24 24"><path d="M4 19V5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2zm0 0a2 2 0 0 0 2 2h13"/></svg><div><b>Find a citation</b><span>Searches Crossref and arXiv, adds the entry, inserts the key.</span></div></button>
+      <button class="agent" data-agent="table"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="1"/><path d="M3 10h18M3 15h18M9 5v14"/></svg><div><b>Table from data</b><span>Paste CSV, get a booktabs table with a label.</span></div></button>
+      <button class="agent" data-agent="review"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg><div><b>Review as reviewer 2</b><span>Leaves comments on weak claims and missing references. No edits.</span></div></button>
+    </div>
+    <div class="hint">Agents run in the project sandbox with read, search, compile, and propose-patch tools only. Every output is a diff you approve.</div>
+    <div class="hint" id="budget">Today: 0 runs · 0 tokens</div>`;
+    const beNames={ollama:'Local model · nothing leaves this machine',anthropic:'Claude API · text is sent to Anthropic',openai:'Custom endpoint · text is sent to your provider'};
+    $('beSel').value=state.backend; $('beText').textContent=beNames[state.backend]; $('beSel').onchange=e=>{ state.backend=e.target.value; $('beText').textContent=beNames[state.backend]; };
+    body.querySelectorAll('[data-agent]').forEach(b=>b.onclick=()=>runAgent(b.dataset.agent));
+    $('budget').textContent=`Today: ${state.agentRuns.length} run${state.agentRuns.length===1?'':'s'} · ${state.agentRuns.reduce((a,r)=>a+r.tokens,0).toLocaleString()} tokens`;
+  }
+}
+function updateBadges(){ const open=state.comments.filter(c=>!c.resolved).length+state.suggestions.filter(s=>s.status==='open').length; $('railComments').innerHTML=$('railComments').innerHTML.replace(/<span class="badge"><\/span>/,'')+(open?'<span class="badge"></span>':''); }
+function addComment(){
+  if(!state.cur.endsWith('.tex')) return toast('Comments go on .tex files');
+  const q=selectedText(); const line=cursorLine();
+  const body=prompt(q?`Comment on “${q.slice(0,40)}${q.length>40?'…':''}”`:'Comment on line '+line); if(!body) return;
+  state.comments.unshift({id:sha(),file:state.cur,line,author:'You',body,quote:q,resolved:false});
+  if(state.drawer!=='comments'){ state.drawer='comments'; } renderDrawer(); render(); updateBadges();
+}
+
+/* ---------- problems ---------- */
+function openProbs(){ state.probsOpen=true; $('probs').classList.add('show'); $('app').classList.add('probs-open'); renderProbs(); }
+function closeProbs(){ state.probsOpen=false; $('probs').classList.remove('show'); $('app').classList.remove('probs-open'); }
+$('closeProbs').onclick=closeProbs; $('bstatus').onclick=()=>state.probsOpen?closeProbs():openProbs();
+function renderProbs(){
+  const all=state.build.errors; const errs=all.filter(e=>e.level!=='lint'); const lints=all.filter(e=>e.level==='lint');
+  $('probsTitle').textContent=(errs.length||lints.length)?`Problems · ${errs.length}${lints.length?' · lint '+lints.length:''}`:'Problems';
+  const runs=state.agentRuns.filter(r=>r.status==='pending');
+  let html='';
+  if(state.build.profile) html+=profileCard();
+  runs.forEach(r=>{ html+=patchCard(r); });
+  const card=(e,i)=>`<div class="card"><div class="h"><span class="lvl ${e.level}">${e.level}</span><span class="loc">${e.file}:${e.line}</span><span class="loc" style="margin-left:auto">${e.code}</span></div><div class="t">${esc(e.message)}</div><div class="d">${esc(e.hint)}</div><div class="acts"><button class="tb" data-goto="${i}">Go to line</button>${e.fix?`<button class="tb" data-fix="${i}">${esc(e.fix.label)}</button>`:''}${e.agent?`<button class="tb" data-ag="${e.agent}">Open ${e.agent==='cite'?'Cite':'Table'} agent</button>`:e.level==='error'&&!e.fix?`<button class="tb" data-ag="fix">Ask Galley</button>`:''}${e.level!=='lint'?`<button class="tb" data-explain="${i}">Explain</button>`:''}</div></div>`;
+  html+= errs.length? all.map((e,i)=>e.level!=='lint'?card(e,i):'').join('') : (runs.length?'':`<div class="empty" style="grid-column:1/-1"><b>${state.build.status==='idle'?'Nothing built yet':'No errors or warnings'}</b>${state.build.status==='idle'?'Press Ctrl+Enter to build.':'The last build compiled cleanly.'}</div>`);
+  if(lints.length) html+=`<div class="hint" style="grid-column:1/-1;padding:4px 0 0">Lint · style and hygiene, never blocks a build</div>`+all.map((e,i)=>e.level==='lint'?card(e,i):'').join('');
+  $('probsBody').innerHTML=html;
+  $('probsBody').querySelectorAll('[data-goto]').forEach(b=>b.onclick=()=>{ const e=all[b.dataset.goto]; openFile(e.file,e.line); });
+  $('probsBody').querySelectorAll('[data-fix]').forEach(b=>b.onclick=()=>{ applyFix(all[b.dataset.fix].fix); toast('Fix applied. Rebuilding.'); build(); });
+  $('probsBody').querySelectorAll('[data-ag]').forEach(b=>b.onclick=()=>runAgent(b.dataset.ag));
+  $('probsBody').querySelectorAll('[data-explain]').forEach(b=>b.onclick=()=>{ const e=all[b.dataset.explain]; toast(explain(e)); });
+  const cc=$('cacheChk'); if(cc) cc.onchange=e=>{ state.cache=e.target.checked; if(!state.cache) state.cacheWarm=false; toast(state.cache?'Figure cache on: TikZ is drawn once and reused until the source changes':'Figure cache off'); build(); };
+  bindPatchCards();
+}
+function explain(e){ return {'undefined-control-sequence':'LaTeX met a command it has never seen. Usually the package that defines it is not loaded, or there is a typo.','undefined-reference':'\\ref looks up a \\label from the previous run. If the label does not exist, you get ?? in the PDF.','undefined-citation':'BibTeX could not find that key in any .bib file listed in \\bibliography.','float-too-large':'Figures without a width are placed at their native size, which can exceed the page.','env-mismatch':'Every \\begin needs a matching \\end with the same name, in nesting order.','unclosed-env':'The environment was opened but the file ended before it was closed.'}[e.code]||'This one is not in the hint database yet. Ask Galley to investigate.'; }
+function applyFix(fix){
+  let t=files[fix.file];
+  if(fix.after) t=t.replace(fix.after,m=>m+fix.text);
+  else if(fix.line){ const ls=t.split('\n'); ls[fix.line-1]=ls[fix.line-1].replace(fix.find,fix.text); t=ls.join('\n'); }
+  else t=t.replace(fix.find,fix.text);
+  files[fix.file]=t; render();
+}
+
+/* ---------- agents ---------- */
+function lineDiff(a,b){
+  const A=a.split('\n'),B=b.split('\n'); let s=0; while(s<A.length&&s<B.length&&A[s]===B[s]) s++;
+  let e=0; while(e<A.length-s&&e<B.length-s&&A[A.length-1-e]===B[B.length-1-e]) e++;
+  return {start:s+1,removed:A.slice(s,A.length-e),added:B.slice(s,B.length-e)};
+}
+function patchCard(r){
+  const d=r.diff; return `<div class="card" data-run="${r.id}"><div class="h"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--red)" stroke-width="1.6"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/></svg><span style="color:var(--text);font-weight:500">${esc(r.name)}</span><span>· ${r.backendLabel}${r.verified?' · verified by compile':''}</span><span class="loc" style="margin-left:auto">${r.tokens.toLocaleString()} tok</span></div><div class="d">${esc(r.summary)}</div>${d?`<div class="diff"><div class="hd">@@ ${esc(r.file)}:${d.start} @@</div>${d.removed.map(l=>`<div class="r">- ${esc(l)}</div>`).join('')}${d.added.map(l=>`<div class="a">+ ${esc(l)}</div>`).join('')}</div>`:''}<div class="acts">${d?`<button class="tb" data-accept="${r.id}">Accept</button>`:''}<button class="tb" data-reject="${r.id}">${d?'Reject':'Dismiss'}</button></div></div>`;
+}
+function bindPatchCards(){
+  document.querySelectorAll('[data-accept]').forEach(b=>b.onclick=()=>{ const r=state.agentRuns.find(x=>x.id==b.dataset.accept); files[r.file]=r.newText; state.baseline[r.file]=state.baseline[r.file]??''; r.status='accepted'; render(); renderProbs(); if(r.after) r.after(); commit(`agent: ${r.name.toLowerCase()} (${r.file})`,false); toast('Patch applied as your edit'); if(state.auto) build(); });
+  document.querySelectorAll('[data-reject]').forEach(b=>b.onclick=()=>{ const r=state.agentRuns.find(x=>x.id==b.dataset.reject); r.status='rejected'; renderProbs(); });
+}
+function addBib(c){ if(c.entry && !files['refs.bib'].includes('{'+c.key+',')) files['refs.bib']=files['refs.bib'].trimEnd()+'\n\n'+c.entry+'\n'; }
+function runAgent(kind){
+  const beLabel={ollama:'local',anthropic:'Claude',openai:'custom'}[state.backend];
+  const finish=(run)=>{ run.id=sha(); run.status='pending'; run.backendLabel=beLabel; state.agentRuns.unshift(run); openProbs(); if(state.drawer==='agents') renderDrawer(); };
+  const thinking=(name,cb,ms)=>{ toast(name+' is working…'); setTimeout(cb,ms||900+Math.random()*600); };
+  if(kind==='fix'){
+    const errs=lint(); const e=errs.find(x=>x.fix)||errs.find(x=>x.level==='error');
+    if(!e) return toast('Nothing to fix: the project compiles.');
+    thinking('Fix build',()=>{
+      if(!e.fix) return finish({name:'Fix build',summary:`I could not produce a safe patch for "${e.message}" at ${e.file}:${e.line}. ${e.hint}`,tokens:1420,file:e.file});
+      const old=files[e.file]; const tmp={...files}; applyFix(e.fix); const nw=files[e.file]; files[e.file]=old; render();
+      finish({name:'Fix build',summary:`${e.message} at ${e.file}:${e.line}. ${e.hint} I applied this and the compile succeeded in the sandbox.`,tokens:2180,file:e.file,newText:nw,diff:lineDiff(old,nw),verified:true});
+    },1400);
+  }
+  if(kind==='proof'||kind==='tighten'){
+    if(!state.cur.endsWith('.tex')) return toast('Select some prose in a .tex file first');
+    let s=ta.selectionStart,e=ta.selectionEnd; let text=files[state.cur];
+    if(s===e){ const ls=text.split('\n'); const ln=cursorLine(); let a=ln-1,b=ln-1; while(a>0&&ls[a-1].trim()&&!/^\\/.test(ls[a-1])) a--; while(b<ls.length-1&&ls[b+1].trim()&&!/^\\/.test(ls[b+1])) b++; s=ls.slice(0,a).join('\n').length+(a?1:0); e=ls.slice(0,b+1).join('\n').length; }
+    const sel=text.slice(s,e); if(!sel.trim()) return toast('Nothing selected');
+    const rules= kind==='proof'? [[/\bIn order to\b/g,'To'],[/\bin order to\b/g,'to'],[/\butilizes\b/g,'uses'],[/\butilize\b/g,'use'],[/\bvery competitive\b/g,'competitive'],[/\bdifferent approach\b/g,'different route'],[/\s{2,}/g,' ']] : [[/\bIn order to\b/g,'To'],[/\bin order to\b/g,'to'],[/\butilizes\b/g,'uses'],[/\bvery /g,''],[/\broughly /g,'about '],[/\bWe take a different approach, described in\b/g,'See'],[/\bprior work\b/g,'prior work'],[/\ba practical route to\b/g,'practical for']];
+    let out=sel; rules.forEach(([re,to])=>out=out.replace(re,to));
+    const name=kind==='proof'?'Proofread':'Tighten';
+    thinking(name,()=>{
+      if(out===sel) return finish({name,summary:'No changes suggested for this passage. It reads clearly.',tokens:640,file:state.cur});
+      const nw=text.slice(0,s)+out+text.slice(e);
+      const wc=t=>t.split(/\s+/).filter(Boolean).length;
+      finish({name,summary: kind==='proof'?'Replaced wordy phrasing and one weak intensifier. Meaning preserved; LaTeX untouched.':`Cut ${wc(sel)-wc(out)} words (${Math.round(100*(wc(sel)-wc(out))/wc(sel))}%). Removed hedges and filler.`,tokens:kind==='proof'?980:1120,file:state.cur,newText:nw,diff:lineDiff(text,nw)});
+    });
+  }
+  if(kind==='cite'){
+    const sel=selectedText(); const q=prompt('What claim needs a citation?', sel||'sparse attention patterns'); if(!q) return;
+    const hit=Object.keys(catalog).find(k=>q.toLowerCase().includes(k)); const c=hit?catalog[hit]:catalog.window;
+    thinking('Cite',()=>{
+      const target=state.cur.endsWith('.tex')?state.cur:'main.tex'; const text=files[target]; const pos=state.cur===target?ta.selectionEnd:text.length;
+      const nw=text.slice(0,pos)+(text[pos-1]===' '||text[pos-1]==='\n'?'':' ')+'\\cite{'+c.key+'}'+text.slice(pos);
+      finish({name:'Find a citation',summary:`Found "${c.entry?c.entry.match(/title\s*=\s*\{([^}]*)\}/)[1]:'Attention is all you need'}" (${c.key}) on ${c.entry?'arXiv':'Crossref'}. The entry ${c.entry?'will be added to refs.bib':'already exists in refs.bib'} and the key inserted at the cursor.`,tokens:1650,file:target,newText:nw,diff:lineDiff(text,nw),after:()=>{ addBib(c); if(state.drawer==='bib') renderDrawer(); }});
+    });
+  }
+  if(kind==='table'){
+    const csv=prompt('Paste CSV (header row first)','Benchmark,Dense,Ours\nArXiv-long,71.2,70.8\nBooks,64.5,64.9\nPatents,80.1,79.6'); if(!csv) return;
+    const rows=csv.trim().split('\n').map(r=>r.split(',').map(c=>c.trim())); const n=rows[0].length;
+    const numeric=rows.slice(1).every(r=>r.slice(1).every(c=>!isNaN(parseFloat(c))));
+    const tex=`\\begin{table}[t]\n  \\centering\n  \\caption{Accuracy on three benchmarks.}\n  \\label{tab:results}\n  \\begin{tabular}{l${(numeric?'S':'c').repeat(n-1)}}\n    \\toprule\n    ${rows[0].map((c,i)=>i&&numeric?`{${c}}`:c).join(' & ')} \\\\\n    \\midrule\n${rows.slice(1).map(r=>'    '+r.join(' & ')+' \\\\').join('\n')}\n    \\bottomrule\n  \\end{tabular}\n\\end{table}\n`;
+    thinking('Table',()=>{
+      const text=files['main.tex']; const anchor=text.indexOf('\\section{Results}'); const at=anchor>=0? text.indexOf('\n',anchor)+1 : text.indexOf('\\end{document}');
+      const nw=text.slice(0,at)+tex+text.slice(at);
+      finish({name:'Table from data',summary:`Built a ${rows.length-1}-row booktabs table${numeric?' with siunitx-aligned numeric columns':''}, labeled tab:results, and placed it under the Results heading.`,tokens:890,file:'main.tex',newText:nw,diff:lineDiff(text,nw),after:()=>{ if(numeric&&!/siunitx/.test(files['main.tex'])) files['main.tex']=files['main.tex'].replace(/\\usepackage\{booktabs\}\n/,'\\usepackage{booktabs}\n\\usepackage{siunitx}\n'); }});
+    });
+  }
+  if(kind==='review'){
+    thinking('Reviewer 2',()=>{
+      const notes=[['main.tex',/very competitive/,'“Very competitive” is not a result. State the accuracy gap and the memory ratio with numbers.'],['main.tex',/a quarter of the memory/,'Memory claim needs a measurement setup: sequence length, batch size, hardware.'],['sections/method.tex',/small set of global\s*\ntokens/,'How are global tokens chosen? Cite or specify the selection rule.'],['main.tex',/truncates the input/,'Consider citing Big Bird here as well; the related-work coverage is thin.']];
+      let added=0; notes.forEach(([f,re,body])=>{ const idx=files[f].search(re); if(idx<0) return; const line=files[f].slice(0,idx).split('\n').length; if(state.comments.some(c=>c.body===body)) return; state.comments.push({id:sha(),file:f,line,author:'Reviewer 2 (agent)',body,quote:files[f].match(re)[0],resolved:false}); added++; });
+      state.agentRuns.unshift({id:sha(),name:'Review',status:'accepted',tokens:3100});
+      state.drawer='comments'; renderDrawer(); render(); updateBadges(); toast(added?`Reviewer 2 left ${added} comments`:'Reviewer 2 has nothing new to add'); if(state.drawer==='agents') renderDrawer();
+    },1600);
+  }
+}
+
+/* ---------- share ---------- */
+const members=[{n:'Marco Estrada (you)',e:'marco@uni.edu',r:'Owner',c:'a-me',i:'ME'},{n:'Ana Novak',e:'ana@uni.edu',r:'Editor',c:'a-an',i:'AN'},{n:'Julia Ruiz',e:'julia@lab.org',r:'Editor',c:'a-jr',i:'JR'}];
+function renderMembers(){ $('members').innerHTML=members.map((m,i)=>`<div class="member"><span class="av ${m.c}" style="margin:0;width:26px;height:26px">${m.i}</span><div><div class="n">${esc(m.n)}</div><div class="e">${esc(m.e)}</div></div>${m.r==='Owner'?'<span style="margin-left:auto;font-size:12px;color:var(--text-2)">Owner</span>':`<select data-m="${i}"><option ${m.r==='Editor'?'selected':''}>Editor</option><option ${m.r==='Commenter'?'selected':''}>Commenter</option><option ${m.r==='Viewer'?'selected':''}>Viewer</option></select>`}</div>`).join(''); $('members').querySelectorAll('select').forEach(s=>s.onchange=()=>{ members[s.dataset.m].r=s.value; toast(`${members[s.dataset.m].n} is now ${s.value.toLowerCase()}`); }); }
+$('openShare').onclick=()=>{ renderMembers(); $('shareOv').classList.add('show'); };
+$('shareClose').onclick=()=>$('shareOv').classList.remove('show');
+$('invBtn').onclick=()=>{ const e=$('invEmail').value.trim(); if(!e.includes('@')) return toast('Enter an email address'); members.push({n:e.split('@')[0],e,r:$('invRole').value,c:'a-jr',i:e.slice(0,2).toUpperCase()}); $('invEmail').value=''; renderMembers(); toast('Invitation sent'); };
+$('genLink').onclick=()=>{ $('linkBox').style.display='flex'; $('linkText').textContent=`https://tex.uni.edu/s/${sha()}${sha()}?role=${$('linkRole').value.toLowerCase()}`; };
+$('copyLink').onclick=()=>{ navigator.clipboard?.writeText($('linkText').textContent); toast('Link copied'); };
+document.querySelectorAll('.overlay').forEach(o=>o.addEventListener('click',e=>{ if(e.target===o) o.classList.remove('show'); }));
+
+/* ---------- palette ---------- */
+let palIdx=0;
+function palItems(){
+  const q=$('palIn').value.toLowerCase();
+  const items=[
+    {t:'Build',g:'Ctrl ↵',f:build},{t:'Create checkpoint',g:'Ctrl ⇧ C',f:checkpoint},{t:'Toggle preview',g:'Ctrl ⇧ P',f:togglePreview},{t:'Toggle draft mode',g:'',f:()=>$('draftBtn').click()},{t:'Toggle theme',g:'',f:()=>$('themeBtn').click()},{t:'Toggle suggestion mode',g:'Ctrl ⇧ S',f:()=>{ state.suggestionMode=!state.suggestionMode; render(); if(state.drawer==='comments') renderDrawer(); toast('Suggestion mode '+(state.suggestionMode?'on':'off')); }},{t:'Comment on selection',g:'Ctrl ⇧ M',f:addComment},{t:'Share project',g:'',f:()=>$('openShare').click()},{t:'Fix build with agent',g:'',f:()=>runAgent('fix')},{t:'Proofread selection',g:'Ctrl .',f:()=>runAgent('proof')},{t:'Find a citation',g:'',f:()=>runAgent('cite')},{t:'Export as zip',g:'',f:()=>toast('Export: project.zip (not simulated)')},{t:'Push to GitHub',g:'',f:()=>toast('Pushed 3 commits to origin/main (simulated)')},
+    ...Object.keys(files).map(f=>({t:'Open '+f,g:'file',f:()=>openFile(f)})),
+  ];
+  Object.keys(files).filter(f=>f.endsWith('.tex')).forEach(f=>files[f].split('\n').forEach((l,i)=>{ const m=l.match(/\\(section|subsection)\{([^}]+)\}/); if(m) items.push({t:'§ '+m[2],g:f.split('/').pop()+':'+(i+1),f:()=>openFile(f,i+1)}); const lb=l.match(/\\label\{([^}]+)\}/); if(lb) items.push({t:'label '+lb[1],g:f.split('/').pop()+':'+(i+1),f:()=>openFile(f,i+1)}); }));
+  items.push(...extraCommands());
+  return items.filter(it=>!q||it.t.toLowerCase().includes(q)||it.g.toLowerCase().includes(q)).slice(0,14);
+}
+function renderPal(){ const items=palItems(); palIdx=Math.min(palIdx,Math.max(0,items.length-1)); $('palList').innerHTML=items.length?items.map((it,i)=>`<div class="it ${i===palIdx?'on':''}" data-i="${i}"><span>${esc(it.t)}</span><span class="g">${esc(it.g)}</span></div>`).join(''):'<div class="empty">No matches.</div>'; $('palList').querySelectorAll('.it').forEach(el=>el.onclick=()=>{ items[el.dataset.i].f(); closePal(); }); }
+function openPal(){ $('palOv').classList.add('show'); $('palIn').value=''; palIdx=0; renderPal(); setTimeout(()=>$('palIn').focus(),0); }
+function closePal(){ $('palOv').classList.remove('show'); ta.focus(); }
+$('openPalette').onclick=openPal;
+$('palIn').addEventListener('input',()=>{ palIdx=0; renderPal(); });
+$('palIn').addEventListener('keydown',e=>{ const items=palItems(); if(e.key==='ArrowDown'){ palIdx=(palIdx+1)%items.length; renderPal(); e.preventDefault(); } if(e.key==='ArrowUp'){ palIdx=(palIdx-1+items.length)%items.length; renderPal(); e.preventDefault(); } if(e.key==='Enter'&&items[palIdx]){ items[palIdx].f(); closePal(); } if(e.key==='Escape') closePal(); });
+
+/* ---------- misc controls ---------- */
+$('buildBtn').onclick=build; $('cpBtn').onclick=checkpoint;
+$('auto').onchange=e=>{ state.auto=e.target.value==='auto'; };
+$('draftBtn').onclick=()=>{ state.draft=!state.draft; $('draftBtn').classList.toggle('on',state.draft); toast(state.draft?'Draft mode: figures skipped, faster builds':'Draft mode off'); build(); };
+$('themeBtn').onclick=()=>{ const h=document.documentElement; h.dataset.theme=h.dataset.theme==='dark'?'light':'dark'; };
+$('settingsBtn').onclick=()=>toast('Settings: engine, keymap, agents, backups (not in this prototype)');
+$('dlBtn').onclick=()=>toast('Downloads main.pdf from the last successful build');
+$('syncBtn').onclick=()=>toast('SyncTeX is on: click any paragraph or heading in the preview');
+$('projName').onclick=()=>toast('Project switcher opens the Projects screen');
+$('offlineBtn').onclick=()=>{ state.offline=!state.offline; $('offPill').style.display=state.offline?'':'none'; $('online').textContent=state.offline?'You (offline)':'3 online'; if(state.offline){ state.queued=0; toast('Offline. Keep writing; edits are stored locally.'); } else { $('syncPill').textContent=`Synced ${state.queued} change${state.queued===1?'':'s'}`; $('syncPill').style.display=''; setTimeout(()=>$('syncPill').style.display='none',3000); toast('Back online. Local edits merged without conflicts.'); } };
+function togglePreview(){ state.preview=!state.preview; $('main').classList.toggle('no-preview',!state.preview); $('main').classList.toggle('show-preview',state.preview&&innerWidth<=1100); }
+$('invertBtn').onclick=()=>{ state.inv=!state.inv; $('page').classList.toggle('inv',state.inv); $('invertBtn').classList.toggle('on',state.inv); };
+
+/* split drag */
+(function(){ const sp=$('split'), main=$('main'); let drag=false; sp.addEventListener('mousedown',()=>{ drag=true; document.body.style.cursor='col-resize'; document.body.style.userSelect='none'; }); window.addEventListener('mouseup',()=>{ drag=false; document.body.style.cursor=''; document.body.style.userSelect=''; }); window.addEventListener('mousemove',e=>{ if(!drag) return; const r=main.getBoundingClientRect(); const left=48+(state.drawer?280:0); const x=Math.min(Math.max(e.clientX-r.left-left,260),r.width-left-260); main.style.gridTemplateColumns=`48px auto ${x}px 6px 1fr`; }); })();
+
+/* keyboard */
+document.addEventListener('keydown',e=>{
+  const mod=e.ctrlKey||e.metaKey;
+  if(mod&&e.key==='Enter'){ e.preventDefault(); build(); }
+  else if(mod&&e.key.toLowerCase()==='k'){ e.preventDefault(); openPal(); }
+  else if(mod&&e.key.toLowerCase()==='b'&&!e.shiftKey){ e.preventDefault(); state.drawer=state.drawer?null:'files'; renderDrawer(); }
+  else if(mod&&e.shiftKey&&e.key.toLowerCase()==='p'){ e.preventDefault(); togglePreview(); }
+  else if(mod&&e.shiftKey&&e.key.toLowerCase()==='c'){ e.preventDefault(); checkpoint(); }
+  else if(mod&&e.shiftKey&&e.key.toLowerCase()==='m'){ e.preventDefault(); addComment(); }
+  else if(mod&&e.shiftKey&&e.key.toLowerCase()==='s'){ e.preventDefault(); state.suggestionMode=!state.suggestionMode; render(); if(state.drawer==='comments') renderDrawer(); toast('Suggestion mode '+(state.suggestionMode?'on':'off')); }
+  else if(mod&&e.key==='.'){ e.preventDefault(); runAgent('proof'); }
+  else if(e.key==='Escape'){ document.querySelectorAll('.overlay').forEach(o=>o.classList.remove('show')); }
+});
+
+/* remote collaborator */
+setInterval(()=>{ if(state.offline) return; const f='sections/method.tex'; const n=files[f].split('\n'); const cands=n.map((l,i)=>l.trim()&&!/^\\/.test(l.trim())?i+1:0).filter(Boolean); if(!cands.length) return; state.remote={file:f,line:cands[Math.floor(Math.random()*cands.length)],col:Math.floor(Math.random()*30)}; if(state.cur===f) render(); },7000);
+
+/* seed */
+state.suggestions.push({id:sha(),file:'main.tex',line:19,from:'prior work truncates the input',to:'prior work either truncates the input',author:'Ana Novak',status:'open'});
+state.comments.push({id:sha(),file:'sections/method.tex',line:9,author:'Julia Ruiz',body:'Can we get a vector version of this figure? The raster one is blurry at print size.',quote:'\\includegraphics{fig1}',resolved:false});
+state.history.push({sha:sha(),label:'Submitted to workshop',auto:false,time:Date.now()-1000*60*60*26,snapshot:{...files},author:'Ana Novak'});
+state.history.push({sha:sha(),label:'Initial import from Overleaf',auto:false,time:Date.now()-1000*60*60*72,snapshot:{...files, 'main.tex':files['main.tex'].replace('\\section{Conclusion}\nSparse masks are a practical route to long-context models.\n\n','')},author:'You'});
+state.cache=true; state.cacheWarm=false; state.deadline=Date.now()+1000*60*60*24*12; state.venue='neurips'; state.submitted=null;
+state.budgets={'Introduction':250,'Method':400,'Results':350,'Conclusion':120};
+</script>
+<script>
+/* ---------- 1+2. figure cache & compile profiler ---------- */
+function texFiles(){ return Object.keys(files).filter(f=>f.endsWith('.tex')); }
+function countAll(re){ return texFiles().reduce((n,f)=>n+(files[f].match(re)||[]).length,0); }
+function profile(){
+  const tikz=countAll(/\\begin\{tikzpicture\}/g), raster=countAll(/\\includegraphics/g), tabs=countAll(/\\begin\{table\}/g);
+  const p={parse:110+Math.random()*30, pkg:320+Math.random()*60, fig: state.draft?0:(tikz*(state.cache&&state.cacheWarm?55:1150)+raster*70), bib:240+Math.random()*40, out:130+tabs*20};
+  p.total=Math.round(p.parse+p.pkg+p.fig+p.bib+p.out); p.tikz=tikz; return p;
+}
+const segs=[['parse','Parse','seg-parse'],['pkg','Packages','seg-pkg'],['fig','Figures','seg-fig'],['bib','BibTeX','seg-bib'],['out','Output','seg-out']];
+function renderMini(){ const p=state.build.profile; if(!p) return; $('mini').innerHTML=segs.map(([k,,c])=>`<i class="${c}" style="width:${100*p[k]/p.total}%"></i>`).join(''); $('mini').onclick=()=>openProbs(); }
+function profileCard(){
+  const p=state.build.profile; const w=k=>(100*p[k]/p.total).toFixed(1);
+  const figNote= state.draft?'Figures skipped (draft mode).': p.tikz? (state.cache&&state.cacheWarm? `${p.tikz} TikZ figure${p.tikz>1?'s':''} served from the persistent cache.` : `${p.tikz} TikZ figure${p.tikz>1?'s':''} drawn from scratch; ${state.cache?'cached now for the next build.':'turn the cache on to draw them once.'}`) : 'No TikZ figures.';
+  return `<div class="prof"><div class="h" style="display:flex;gap:10px;align-items:center"><span style="font-weight:500">Build profile · ${(p.total/1000).toFixed(1)} s</span><span style="color:var(--text-2);font-size:12px">${figNote}</span><label class="chk" style="margin-left:auto"><input type="checkbox" id="cacheChk" ${state.cache?'checked':''}> Persistent figure cache</label></div><div class="bar">${segs.map(([k,,c])=>`<i class="${c}" style="width:${w(k)}%" title="${k} ${(p[k]/1000).toFixed(2)} s"></i>`).join('')}</div><div class="leg">${segs.map(([k,l,c])=>`<span><i class="${c}"></i>${l} ${(p[k]/1000).toFixed(2)} s</span>`).join('')}</div></div>`;
+}
+
+/* ---------- 3. snippets with auto-labels ---------- */
+const snippets={
+  fig:{text:'\\begin{figure}[t]\n  \\centering\n  \\includegraphics[width=.8\\linewidth]{}\n  \\caption{}\n  \\label{fig:} % auto\n\\end{figure}\n', cursor:'\\caption{'},
+  tab:{text:'\\begin{table}[t]\n  \\centering\n  \\caption{}\n  \\label{tab:} % auto\n  \\begin{tabular}{lcc}\n    \\toprule\n     & & \\\\\n    \\midrule\n     & & \\\\\n    \\bottomrule\n  \\end{tabular}\n\\end{table}\n', cursor:'\\caption{'},
+  eq:{text:'\\begin{equation}\n  \n  \\label{eq:}\n\\end{equation}\n', cursor:'\n  \n'},
+  sec:{text:'\\section{}\n\\label{sec:} % auto\n', cursor:'\\section{'},
+  sub:{text:'\\subsection{}\n\\label{sec:} % auto\n', cursor:'\\subsection{'},
+  cite:{text:'\\cite{}', cursor:'\\cite{'},
+  todo:{text:'% TODO(@me): ', cursor:'% TODO(@me): '},
+};
+function expandSnippet(){
+  const pos=ta.selectionStart; const before=ta.value.slice(0,pos); const m=before.match(/(^|\s)(fig|tab|eq|sec|sub|cite|todo)$/);
+  if(!m) return false; const sn=snippets[m[2]]; const start=pos-m[2].length;
+  ta.setRangeText(sn.text,start,pos,'end'); const at=start+sn.text.indexOf(sn.cursor)+sn.cursor.length; ta.setSelectionRange(at,at);
+  ta.dispatchEvent(new Event('input')); toast(`Inserted ${m[2]} snippet${sn.text.includes('% auto')?' · label follows the caption while “% auto” is present':''}`); return true;
+}
+const slug=t=>t.replace(/\\[a-zA-Z]+/g,' ').replace(/[^a-zA-Z0-9 ]/g,' ').trim().toLowerCase().split(/\s+/).filter(Boolean).slice(0,4).join('-');
+function autoLabel(){
+  let t=ta.value, changed=false;
+  t=t.replace(/([\s\S]*?)\\label\{(fig|tab):[^}]*\} % auto/g,(m,pre,kind)=>{ const cap=pre.match(/\\caption\{([^}]*)\}[^\\]*$/); const sl=cap?slug(cap[1]):''; const nl=`\\label{${kind}:${sl}} % auto`; if(!m.endsWith(nl)) changed=true; return pre+nl; });
+  t=t.replace(/([\s\S]*?)\\label\{sec:[^}]*\} % auto/g,(m,pre)=>{ const h=pre.match(/\\(?:sub)?section\{([^}]*)\}\s*$/); const sl=h?slug(h[1]):''; const nl=`\\label{sec:${sl}} % auto`; if(!m.endsWith(nl)) changed=true; return pre+nl; });
+  if(changed){ const s0=ta.selectionStart,e0=ta.selectionEnd; ta.value=t; files[state.cur]=t; ta.setSelectionRange(s0,e0); }
+}
+
+/* ---------- 4. rename label ---------- */
+function labelAtCursor(){ const l=ta.value.split('\n')[cursorLine()-1]||''; const m=l.match(/\\(?:label|ref|eqref|autoref|cref)\{([^}]+)\}/); return m?m[1]:''; }
+function renameLabel(){
+  const old=prompt('Label to rename',labelAtCursor()||'sec:method'); if(!old) return;
+  const nw=prompt(`Rename “${old}” to`,old); if(!nw||nw===old) return;
+  let n=0; texFiles().forEach(f=>{ files[f]=files[f].replace(new RegExp('\\\\(label|ref|eqref|autoref|cref)\\{'+old.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'\\}','g'),(m,c)=>{ n++; return '\\'+c+'{'+nw+'}'; }); });
+  render(); if(state.drawer==='outline') renderDrawer(); toast(n?`Renamed ${n} occurrence${n>1?'s':''} across the project`:'No occurrences found'); if(n) { commit(`rename label ${old} → ${nw}`,false); scheduleAutoBuild(); }
+}
+function extraCommands(){ return [
+  {t:'Rename label…',g:'Ctrl ⇧ R',f:renameLabel},
+  {t:'Package for submission',g:'',f:()=>openPack()},
+  {t:'Set deadline',g:'',f:setDeadline},
+  {t:'Insert snippet: fig / tab / eq / sec / cite / todo + Tab',g:'editor',f:()=>toast('Type fig, tab, eq, sec, sub, cite, or todo and press Tab')},
+  {t:'Toggle persistent figure cache',g:'',f:()=>{ state.cache=!state.cache; if(!state.cache) state.cacheWarm=false; build(); }},
+  {t:'Open tasks',g:'',f:()=>{ state.drawer='tasks'; renderDrawer(); }},
+  {t:'Open submission checks',g:'',f:()=>{ state.drawer='submit'; renderDrawer(); }},
+]; }
+
+/* ---------- 5. lint ---------- */
+function lintStyle(){
+  const out=[]; const tex=texFiles();
+  const labels={}, refs=new Set(), keys=[...files['refs.bib'].matchAll(/@\w+\{([^,]+),/g)].map(m=>m[1].trim()), used=new Set();
+  tex.forEach(f=>files[f].split('\n').forEach((l,i)=>{ const c=l.replace(/%.*$/,''); for(const m of c.matchAll(/\\label\{([^}]+)\}/g)) labels[m[1]]={file:f,line:i+1}; for(const m of c.matchAll(/\\(?:ref|eqref|autoref|cref)\{([^}]+)\}/g)) refs.add(m[1]); for(const m of c.matchAll(/\\cite[pt]?\{([^}]+)\}/g)) m[1].split(',').forEach(k=>used.add(k.trim())); }));
+  Object.entries(labels).forEach(([k,v])=>{ if(!refs.has(k)) out.push({level:'lint',file:v.file,line:v.line,code:'unused-label',message:`Label "${k}" is never referenced`,hint:'Harmless, but stale labels make renames confusing. Remove it or reference it.'}); });
+  keys.forEach(k=>{ if(!used.has(k)){ const line=files['refs.bib'].slice(0,files['refs.bib'].indexOf('{'+k+',')).split('\n').length; out.push({level:'lint',file:'refs.bib',line,code:'unused-entry',message:`Bib entry "${k}" is never cited`,hint:'Unused entries are dropped from the submission package automatically.'}); } });
+  tex.forEach(f=>files[f].split('\n').forEach((l,i)=>{
+    const c=l.replace(/%.*$/,''); let m;
+    if((m=c.match(/\b(\w+) \1\b/i)) && !/\\/.test(m[0])) out.push({level:'lint',file:f,line:i+1,code:'doubled-word',message:`Doubled word "${m[1]} ${m[1]}"`,hint:'Probably a typo.',fix:{label:'Remove duplicate',file:f,line:i+1,find:new RegExp('\\b'+m[1]+' '+m[1]+'\\b','i'),text:m[1]}});
+    if((m=c.match(/\b(Section|Table|Figure|Eq\.|Equation|Chapter) \\(ref|eqref|cref)\{/))) out.push({level:'lint',file:f,line:i+1,code:'breakable-ref',message:`Line may break between "${m[1]}" and its number`,hint:'Use a non-breaking space: '+m[1]+'~\\'+m[2]+'{…}.',fix:{label:'Insert ~',file:f,line:i+1,find:new RegExp(m[1]+' \\\\'+m[2]+'\\{'),text:m[1]+'~\\'+m[2]+'{'}});
+    if(/\\\\\s*$/.test(c) && !/&/.test(c) && !/\\(hline|midrule|toprule|bottomrule)/.test(c) && !/\\begin|\\end/.test(c) && f.endsWith('.tex') && !/tabular|align/.test(c)) {}
+    if(/\\textbf\{[^}]{80,}\}/.test(c)) out.push({level:'lint',file:f,line:i+1,code:'long-bold',message:'Long bold run',hint:'Bold spans of a full sentence usually read as shouting; consider \\emph or plain text.'});
+  }));
+  return out;
+}
+
+/* ---------- 8. outline with targets, deadline ---------- */
+function sectionCounts(){
+  const res=[]; texFiles().forEach(f=>{ const ls=files[f].split('\n'); let cur=null; ls.forEach((l,i)=>{ const m=l.match(/\\(section|subsection)\{([^}]+)\}/); if(m){ cur={f,line:i+1,lvl:m[1]==='section'?0:1,t:m[2],words:0}; res.push(cur); return; } if(cur&&!/^\s*%/.test(l)) cur.words+=l.replace(/\\[a-zA-Z]+(\[[^\]]*\])?(\{[^}]*\})?/g,' ').replace(/[{}$%&\\]/g,' ').split(/\s+/).filter(Boolean).length; }); });
+  return res;
+}
+function renderOutline(body,acts){
+  const items=sectionCounts(); acts.innerHTML=`<span class="hint" style="padding:0">${items.reduce((a,b)=>a+b.words,0)} words</span>`;
+  if(!items.length){ body.innerHTML='<div class="empty"><b>No sections yet</b>Type sec and press Tab to add one.</div>'; return; }
+  body.innerHTML=items.map((it,i)=>{ const b=state.budgets[it.t]; const pct=b?Math.min(100,Math.round(100*it.words/b)):0; return `<div class="row ${it.lvl?'sub':''}" data-i="${i}"><span>${esc(it.t)}</span><span class="m b" data-b="${i}" title="Click to set a word budget">${it.words}${b?' / '+b:''}</span></div>${b?`<div class="budget"><i class="${it.words>b?'over':''}" style="width:${pct}%"></i></div>`:''}`; }).join('')+'<div class="hint">Click a count to set a budget. Labels: '+Object.keys(state.budgets).length+' budgets set.</div><div style="padding:0 4px 8px"><button class="tb" id="renameLbl">Rename a label…</button></div>';
+  body.querySelectorAll('.row').forEach(r=>r.onclick=()=>{ const it=items[r.dataset.i]; openFile(it.f,it.line); });
+  body.querySelectorAll('[data-b]').forEach(el=>el.onclick=e=>{ e.stopPropagation(); const it=items[el.dataset.b]; const v=prompt(`Word budget for “${it.t}”`, state.budgets[it.t]||300); if(v===null) return; if(!+v) delete state.budgets[it.t]; else state.budgets[it.t]=+v; renderDrawer(); });
+  $('renameLbl').onclick=renameLabel;
+}
+function renderDeadline(){ const d=Math.ceil((state.deadline-Date.now())/86400000); const v=venues[state.venue]; const el=$('deadline'); el.textContent=`${v.short} · ${d<0?'past due':d+' day'+(d===1?'':'s')}`; el.className='dl '+(d<=3?'now':d<=7?'soon':''); el.onclick=setDeadline; }
+function setDeadline(){ const cur=new Date(state.deadline).toISOString().slice(0,10); const v=prompt('Deadline (YYYY-MM-DD)',cur); if(!v) return; const t=Date.parse(v); if(isNaN(t)) return toast('Enter a date like 2026-09-30'); state.deadline=t; renderDeadline(); }
+
+/* ---------- 9. tasks ---------- */
+function collectTasks(){
+  const out=[]; texFiles().forEach(f=>files[f].split('\n').forEach((l,i)=>{ let m;
+    if((m=l.match(/%\s*(TODO|FIXME)(?:\((@?\w+)\))?:?\s*(.*)$/))) out.push({file:f,line:i+1,kind:m[1],who:(m[2]||'').replace('@',''),text:m[3].trim(),src:'comment',raw:m[0]});
+    for(const mm of l.matchAll(/\\todo\{(@\w+)?\s*([^}]*)\}/g)) out.push({file:f,line:i+1,kind:'TODO',who:(mm[1]||'').replace('@',''),text:mm[2].trim(),src:'macro',raw:mm[0]});
+  })); return out;
+}
+function renderTasks(body,acts){
+  const tasks=collectTasks(); const people=[...new Set(tasks.map(t=>t.who).filter(Boolean))];
+  acts.innerHTML=`<select id="taskWho" style="height:26px;border:1px solid var(--line);border-radius:6px;background:var(--bg);font-size:12px"><option value="">Everyone</option>${people.map(p=>`<option ${state.taskWho===p?'selected':''}>${p}</option>`).join('')}</select>`;
+  $('taskWho').onchange=e=>{ state.taskWho=e.target.value; renderDrawer(); };
+  const list=tasks.filter(t=>!state.taskWho||t.who===state.taskWho);
+  body.innerHTML= list.length? list.map((t,i)=>`<div class="card"><div class="h"><span class="lvl ${t.kind==='FIXME'?'warning':'info'}">${t.kind}</span>${t.who?`<span class="av ${t.who==='ana'?'a-an':t.who==='julia'?'a-jr':'a-me'}" style="width:18px;height:18px;font-size:9px;margin:0">${t.who.slice(0,2).toUpperCase()}</span>`:''}<span class="loc" style="margin-left:auto">${t.file.split('/').pop()}:${t.line}</span></div><div class="d" style="color:var(--text)">${esc(t.text)||'<i>(no text)</i>'}</div><div class="acts"><button class="tb" data-tgo="${i}">Go to</button><button class="tb" data-tdone="${i}">Done</button></div></div>`).join('')+'<div class="hint">Add tasks with % TODO(@name): … or \\todo{@name …}. Done removes the note from the source.</div>' : '<div class="empty"><b>No open tasks</b>Type todo and press Tab in the editor to add one.</div>';
+  body.querySelectorAll('[data-tgo]').forEach(b=>b.onclick=()=>{ const t=list[b.dataset.tgo]; openFile(t.file,t.line); });
+  body.querySelectorAll('[data-tdone]').forEach(b=>b.onclick=()=>{ const t=list[b.dataset.tdone]; const ls=files[t.file].split('\n'); if(t.src==='comment'&&ls[t.line-1].trim()===t.raw.trim()) ls.splice(t.line-1,1); else ls[t.line-1]=ls[t.line-1].replace(t.raw,'').replace(/\s+$/,''); files[t.file]=ls.join('\n'); render(); renderDrawer(); updateTaskBadge(); toast('Task removed from the source'); scheduleAutoBuild(); });
+}
+function updateTaskBadge(){ const n=collectTasks().length; $('railTasks').innerHTML=$('railTasks').innerHTML.replace(/<span class="badge"><\/span>/,'')+(n?'<span class="badge"></span>':''); }
+
+/* ---------- 6+7. submission: compliance + packer ---------- */
+const venues={
+  arxiv:{name:'arXiv',short:'arXiv',pages:null,anon:false,pt:null,engine:'TeX Live 2025'},
+  neurips:{name:'NeurIPS 2026',short:'NeurIPS',pages:9,anon:true,pt:'10pt',engine:'TeX Live 2025'},
+  acl:{name:'ACL Rolling Review',short:'ACL',pages:8,anon:true,pt:'11pt',engine:'TeX Live 2024'},
+  tpami:{name:'IEEE TPAMI',short:'TPAMI',pages:14,anon:false,pt:'10pt',engine:'TeX Live 2025'},
+};
+function estimatePages(){ const words=sectionCounts().reduce((a,b)=>a+b.words,0)+60; const figs=countAll(/\\begin\{figure\}/g), tabs=countAll(/\\begin\{table\}/g); return +(words/480+figs*0.3+tabs*0.25+0.4).toFixed(1); }
+function complianceChecks(v){
+  const main=files['main.tex']; const body=(main.match(/\\begin\{document\}([\s\S]*)/)||['',''])[1]+texFiles().filter(f=>f!=='main.tex').map(f=>files[f]).join('\n');
+  const pt=(main.match(/\\documentclass\[([^\]]*)\]/)||['',''])[1].split(',').map(x=>x.trim()).find(x=>/pt$/.test(x))||'10pt';
+  const authors=(main.match(/\\author\{([^}]+)\}/)||['',''])[1].split(/\\and/).map(a=>a.trim().split(' ').pop()).filter(Boolean);
+  const leaks=authors.filter(a=>new RegExp('\\b'+a+'\\b').test(body)); const firstPerson=/\b(our (previous|prior|earlier) work|we previously showed)\b/i.test(body);
+  const pages=estimatePages(); const c=[];
+  c.push({ok:v.pages?pages<=v.pages:true, na:!v.pages, t:v.pages?`Page limit: ${pages} of ${v.pages} pages (estimated)`:'No page limit', hint:v.pages&&pages>v.pages?'Try draft mode to check figure sizes, or the Tighten agent on the longest section.':null});
+  c.push({ok:v.pt?pt===v.pt:true, na:!v.pt, t:v.pt?`Font size: ${pt}${pt===v.pt?'':' (venue requires '+v.pt+')'}`:'Font size: '+pt, fix:v.pt&&pt!==v.pt?{label:'Set '+v.pt,file:'main.tex',find:new RegExp(pt),text:v.pt}:null});
+  c.push({ok:!v.anon||(!leaks.length&&!firstPerson), na:!v.anon, t:v.anon?(leaks.length?`Anonymization: author name "${leaks[0]}" appears in the body`:firstPerson?'Anonymization: first-person reference to prior work':'Anonymization: no author names or self-references found'):'Anonymous review not required'});
+  const todos=collectTasks().length; c.push({ok:!todos, t:todos?`${todos} open TODO${todos>1?'s':''} still in the source`:'No TODOs left in the source'});
+  const errs=(state.build.errors||[]).filter(e=>e.level==='error'||e.level==='warning').length; c.push({ok:!errs, t:errs?`${errs} build error${errs>1?'s':''} or warning${errs>1?'s':''}`:'Last build: no errors or warnings'});
+  c.push({ok:countAll(/\\bibliography\{/g)>0, t:'Bibliography included via \\bibliography{refs}'});
+  return {checks:c,pages,pt};
+}
+function renderSubmit(body,acts){
+  acts.innerHTML=`<select id="venueSel" style="height:26px;border:1px solid var(--line);border-radius:6px;background:var(--bg);font-size:12px">${Object.entries(venues).map(([k,v])=>`<option value="${k}" ${state.venue===k?'selected':''}>${v.name}</option>`).join('')}</select>`;
+  $('venueSel').onchange=e=>{ state.venue=e.target.value; renderDeadline(); renderDrawer(); };
+  const v=venues[state.venue]; const r=complianceChecks(v); const okN=r.checks.filter(c=>c.ok).length;
+  body.innerHTML=`<div class="meter"><b>${r.pages}</b><span>estimated pages${v.pages?' of '+v.pages:''}</span></div>${v.pages?`<div class="mbar"><i class="${r.pages>v.pages?'over':''}" style="width:${Math.min(100,100*r.pages/v.pages)}%"></i></div>`:'<div style="height:8px"></div>'}
+  <div class="hint" style="padding:0 4px 4px">${okN} of ${r.checks.length} checks pass</div>
+  ${r.checks.map((c,i)=>`<div class="chk-row"><span class="ic ${c.na?'na':c.ok?'ok':'bad'}">${c.na?'–':c.ok?'✓':'✗'}</span><span>${esc(c.t)}${c.hint?`<div style="color:var(--text-3);font-size:11px">${esc(c.hint)}</div>`:''}</span>${c.fix?`<button class="tb" data-cfix="${i}">${esc(c.fix.label)}</button>`:''}</div>`).join('')}
+  <div style="padding:12px 4px 4px;display:flex;gap:6px;flex-wrap:wrap"><button class="tb primary" id="packBtn">Package for ${esc(v.short)}</button><button class="tb" id="freezeBtn">Freeze as submitted</button></div>
+  <div class="hint">Packaging flattens \\input, strips comments, keeps only used figures and bib entries, generates the .bbl, and proves the result builds in a clean ${esc(v.engine)} sandbox.</div>${state.submitted?`<div class="hint">Frozen: “${esc(state.submitted.label)}”. History can diff against it.</div>`:''}`;
+  body.querySelectorAll('[data-cfix]').forEach(b=>b.onclick=()=>{ applyFix(r.checks[b.dataset.cfix].fix); renderDrawer(); toast('Applied'); scheduleAutoBuild(); });
+  $('packBtn').onclick=openPack; $('freezeBtn').onclick=freezeSubmitted;
+}
+function freezeSubmitted(){ const v=venues[state.venue]; commit('Submitted to '+v.name,false); state.submitted=state.history[0]; if(state.drawer==='submit'||state.drawer==='history') renderDrawer(); toast(`Checkpoint “Submitted to ${v.name}” frozen. Camera-ready diffs use it.`); }
+function openPack(){
+  const v=venues[state.venue]; $('packTitle').textContent='Package for '+v.name;
+  const main=files['main.tex']; const flat=main.replace(/\\input\{([^}]+)\}/g,(m,p)=>files[p.endsWith('.tex')?p:p+'.tex']||'');
+  const stripped=flat.split('\n').map(l=>l.replace(/(^|[^\\])%.*$/,'$1')).filter(l=>l.trim()!=='').join('\n');
+  const comments=flat.split('\n').filter(l=>/(^|[^\\])%/.test(l)).length; const inl=texFiles().filter(f=>f!=='main.tex');
+  const used=new Set(); texFiles().forEach(f=>{ for(const m of files[f].matchAll(/\\cite[pt]?\{([^}]+)\}/g)) m[1].split(',').forEach(k=>used.add(k.trim())); });
+  const keys=[...files['refs.bib'].matchAll(/@\w+\{([^,]+),/g)].map(m=>m[1].trim()); const unused=keys.filter(k=>!used.has(k));
+  const figUsed=countAll(/\\includegraphics/g)>0; const tikz=countAll(/\\begin\{tikzpicture\}/g);
+  const errs=lint().filter(e=>e.level==='error').length;
+  $('packBody').innerHTML=`<div class="sec-h" style="margin-top:0">Included</div>
+  <div class="file-li"><span class="loc">main.tex</span><span class="why">flattened · ${stripped.split('\n').length} lines · ${comments} comment line${comments===1?'':'s'} stripped</span></div>
+  ${figUsed?'<div class="file-li"><span class="loc">figures/fig1.pdf</span><span class="why">referenced</span></div>':''}
+  ${tikz?`<div class="file-li"><span class="loc">figures/tikz-*.pdf</span><span class="why">${tikz} externalized TikZ figure${tikz>1?'s':''}, so the venue never re-draws them</span></div>`:''}
+  <div class="file-li"><span class="loc">main.bbl</span><span class="why">generated · ${used.size} entr${used.size===1?'y':'ies'}</span></div>
+  <div class="file-li"><span class="loc">00README.XXX</span><span class="why">arXiv build hints (main file, engine)</span></div>
+  <div class="sec-h">Left out</div>
+  ${inl.map(f=>`<div class="file-li"><span class="loc">${f}</span><span class="why">inlined into main.tex</span></div>`).join('')}
+  <div class="file-li"><span class="loc">refs.bib</span><span class="why">replaced by main.bbl${unused.length?` · ${unused.length} unused entr${unused.length===1?'y':'ies'} dropped`:''}</span></div>
+  <div class="file-li"><span class="loc">.galley/, .git/</span><span class="why">never shipped</span></div>
+  <div class="sec-h">Clean sandbox build</div>
+  <div class="chk-row" style="border:0"><span class="ic ${errs?'bad':'ok'}">${errs?'✗':'✓'}</span><span>${errs?`Fails with ${errs} error${errs>1?'s':''}. Fix them before packaging.`:`Compiles with ${esc(v.engine)} in a fresh container with no cache — the same conditions as ${esc(v.short)}.`}</span></div>
+  <div style="display:flex;gap:6px;margin-top:12px"><button class="tb primary" id="dlPack" ${errs?'disabled style="opacity:.5"':''}>Download ${esc(v.short.toLowerCase())}-package.zip</button><button class="tb" id="freezePack">Freeze as submitted</button></div>`;
+  $('packOv').classList.add('show');
+  $('dlPack').onclick=()=>{ if(errs) return; toast('Package built and verified (download not simulated)'); };
+  $('freezePack').onclick=()=>{ freezeSubmitted(); $('packOv').classList.remove('show'); };
+}
+$('packClose').onclick=()=>$('packOv').classList.remove('show');
+
+/* ---------- 10. local-first: CLI push ---------- */
+document.querySelectorAll('[data-copy]').forEach(b=>b.onclick=()=>{ navigator.clipboard?.writeText(b.dataset.copy); toast('Copied'); });
+$('cliPush').onclick=()=>{
+  const f='sections/method.tex'; const add='Global tokens are chosen once per document from the highest-degree\nnodes of the citation graph, following prior sparse designs.';
+  if(files[f].includes('highest-degree')) return toast('Julia already pushed; nothing new on the remote');
+  files[f]=files[f].replace(/tokens\.\n/,'tokens. '+add+'\n'); state.baseline[f]=state.baseline[f];
+  state.history.unshift({sha:sha(),label:'julia: expand global-token selection (pushed from CLI)',auto:false,time:Date.now(),snapshot:{...files},author:'Julia Ruiz'});
+  render(); if(state.drawer==='history') renderDrawer(); $('shareOv').classList.remove('show'); openFile(f,5);
+  toast('Merged Julia\'s push through the CRDT. Online editors kept their cursors; no conflict.'); scheduleAutoBuild();
+};
+
+/* keyboard: rename */
+document.addEventListener('keydown',e=>{ if((e.ctrlKey||e.metaKey)&&e.shiftKey&&e.key.toLowerCase()==='r'){ e.preventDefault(); renameLabel(); } });
+
+/* boot */
+renderDrawer(); render(); updateBadges(); updateTaskBadge(); renderProbs(); renderDeadline();
+setTimeout(build,400);
+</script>
+</body>
+</html>

@@ -1,0 +1,18 @@
+[package]
+name = "galley-sync"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "yrs documents, persistence, and the flusher that lands text in git"
+
+[dependencies]
+galley-history.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+yrs.workspace = true
+
+[dev-dependencies]
+galley-history.workspace = true
+tempfile.workspace = true

@@ -1,0 +1,8 @@
+# Venue preset (SPEC §13.8). Copy and edit to add your own.
+id = "neurips"
+name = "NeurIPS 2026"
+short = "NeurIPS"
+pages = 9
+font_size = "10pt"
+anonymous = true
+engine = "TeX Live 2025"

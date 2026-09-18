@@ -1,0 +1,25 @@
+# Caddy reverse proxy for Galley. Caddy fetches and renews a Let's Encrypt
+# certificate automatically, so your friends get real HTTPS with no manual steps.
+#
+#   sudo apt install caddy
+#   sudo cp deploy/Caddyfile /etc/caddy/Caddyfile   # edit the hostname + email
+#   sudo systemctl reload caddy
+#
+# First point the hostname's DNS A/AAAA record at this host. Then make sure that
+# `domain` in galley.toml matches, so that the cookies get the Secure flag.
+
+galley.example.com {
+	# The contact address for the Let's Encrypt expiry notices.
+	tls you@example.com
+
+	# The WebSockets for CRDT sync and live events upgrade on their own.
+	# They need no extra config.
+	reverse_proxy 127.0.0.1:7000
+
+	# A compile can take a long time on a large document. Do not cut long
+	# responses off.
+	request_body {
+		max_size 60MB
+	}
+	encode zstd gzip
+}

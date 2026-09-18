@@ -1,0 +1,43 @@
+[package]
+name = "galley-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "axum app: routes, websockets, embedded SPA"
+build = "build.rs"
+
+[dependencies]
+reqwest = { workspace = true, features = ["json"] }
+regex.workspace = true
+galley-build.workspace = true
+galley-index.workspace = true
+galley-lit.workspace = true
+galley-history.workspace = true
+galley-sync.workspace = true
+
+argon2.workspace = true
+axum.workspace = true
+axum-extra.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+getrandom.workspace = true
+r2d2.workspace = true
+r2d2_sqlite.workspace = true
+rusqlite.workspace = true
+mime_guess.workspace = true
+rust-embed.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+yrs.workspace = true
+
+[dev-dependencies]
+http-body-util.workspace = true
+tempfile.workspace = true
+tokio-tungstenite.workspace = true
+tower.workspace = true

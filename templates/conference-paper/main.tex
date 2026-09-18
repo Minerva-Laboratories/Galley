@@ -1,0 +1,61 @@
+% Two-column conference paper. Swap \documentclass for the venue's own class when you have it:
+% the structure below survives the change.
+\documentclass[10pt,twocolumn,letterpaper]{article}
+\usepackage[margin=0.75in]{geometry}
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage[hidelinks]{hyperref}
+\usepackage[capitalise]{cleveref}
+
+\title{A title that states the result}
+\author{First Author\\ Affiliation\\ \texttt{first@example.edu}
+  \and Second Author\\ Affiliation\\ \texttt{second@example.edu}}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+One sentence on the problem, one on what is new, one on the evidence, one on why it matters.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+
+\section{Related work}
+\label{sec:related}
+
+\section{Method}
+\label{sec:method}
+
+\begin{equation}
+  \label{eq:objective}
+  \mathcal{L}(\theta) = \mathbb{E}_{x \sim \mathcal{D}} \left[ \ell(f_\theta(x), y) \right].
+\end{equation}
+
+\section{Experiments}
+\label{sec:experiments}
+
+\begin{table}[t]
+  \centering
+  \caption{Results. Bold is best.}
+  \label{tab:main}
+  \begin{tabular}{lrr}
+    \toprule
+    Method & Accuracy & Runtime (s) \\
+    \midrule
+    Baseline & 00.0 & 0.0 \\
+    Ours     & \textbf{00.0} & 0.0 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\Cref{tab:main} reports the main comparison; \cref{eq:objective} is the objective it optimises.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+\bibliographystyle{plain}
+\bibliography{refs}
+\end{document}

@@ -1,0 +1,60 @@
+/* Design tokens, ported from mockup/galley-prototype.html. Do not add colours here without a
+   recorded decision; both themes must keep 4.5:1 text contrast. */
+:root {
+  --ink: #1b1a17;
+  --paper: #f6f3ec;
+  --vellum: #ece7dc;
+  --panel: #fbf9f4;
+  --red: #c6402a;
+  --red-soft: #f6dcd5;
+  --slate: #5b6470;
+  --moss: #3e7c59;
+  --moss-soft: #ddebe2;
+  --amber: #c98a1b;
+  --amber-soft: #f7e8c8;
+  --line: #d9d3c6;
+  --line-strong: #b9b2a3;
+  --text: var(--ink);
+  --text-2: var(--slate);
+  --text-3: #8a8f98;
+  --bg: var(--paper);
+  --bg-panel: var(--panel);
+  --bg-sunk: var(--vellum);
+  --sel: #e8e1d2;
+  --cmd: #7a3e9d;
+  --math: #1f5f8b;
+  --cmt: #8a8f98;
+  --add: #ddebe2;
+  --add-t: #26573a;
+  --del: #f6dcd5;
+  --del-t: #8a2a1a;
+  --warn-t: #6b4300;
+  --err-t: #8a2a1a;
+  --font: 'Inter Variable', Inter, system-ui, sans-serif;
+  --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --serif: 'Source Serif 4 Variable', 'Source Serif 4', Georgia, serif;
+}
+
+[data-theme='dark'] {
+  --text: #eae6dc;
+  --text-2: #b4afa4;
+  --text-3: #7e7a72;
+  --bg: #1b1a17;
+  --bg-panel: #23221e;
+  --bg-sunk: #181714;
+  --line: #34322c;
+  --line-strong: #4a473f;
+  --sel: #2e2c26;
+  --cmd: #c9a0e8;
+  --math: #8dbce0;
+  --cmt: #7e7a72;
+  --add: #1f3a2a;
+  --add-t: #9ed4b0;
+  --del: #4a2018;
+  --del-t: #f0a090;
+  --red-soft: #4a2018;
+  --moss-soft: #1f3a2a;
+  --amber-soft: #3e2e10;
+  --warn-t: #f0c060;
+  --err-t: #f0a090;
+}

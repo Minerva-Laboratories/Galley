@@ -1,0 +1,8 @@
+# Venue preset (SPEC §13.8). Copy and edit to add your own.
+id = "acl"
+name = "ACL Rolling Review"
+short = "ACL"
+pages = 8
+font_size = "11pt"
+anonymous = true
+engine = "TeX Live 2024"

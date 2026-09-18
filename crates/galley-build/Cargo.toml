@@ -1,0 +1,25 @@
+[package]
+name = "galley-build"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Sandboxed compiles: engines, log parser, hints, SyncTeX, build queue"
+
+[dependencies]
+chrono.workspace = true
+flate2.workspace = true
+futures-util.workspace = true
+galley-index.workspace = true
+svg2pdf = "0.13"
+regex.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml_ng.workspace = true
+tar.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

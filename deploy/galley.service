@@ -1,0 +1,32 @@
+[Unit]
+Description=Galley collaborative LaTeX editor
+Documentation=https://github.com/your-org/galley
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=galley
+Group=galley
+# The binary embeds the web app. `cargo build --release` builds it.
+ExecStart=/usr/local/bin/galley --config /etc/galley/galley.toml --data-dir /var/lib/galley serve
+Restart=on-failure
+RestartSec=2
+
+# The state lives here. systemd creates it as the galley user on the first start.
+StateDirectory=galley
+WorkingDirectory=/var/lib/galley
+
+# Hardening. bubblewrap needs unprivileged user namespaces. We therefore do NOT
+# set NoNewPrivileges or RestrictNamespaces. They would break the compile sandbox.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/galley
+ProtectHome=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

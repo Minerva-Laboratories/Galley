@@ -1,0 +1,58 @@
+% Conference talk. One idea per slide; the notes stay in the source.
+\documentclass[aspectratio=169]{beamer}
+\usetheme{default}
+\usecolortheme{seahorse}
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{footline}[frame number]
+\usepackage{graphicx}
+\usepackage{booktabs}
+
+\title{A title that states the result}
+\subtitle{Venue, Year}
+\author{First Author}
+\institute{Affiliation}
+\date{\today}
+
+\begin{document}
+
+\begin{frame}
+  \titlepage
+\end{frame}
+
+\begin{frame}{The problem}
+  \begin{itemize}
+    \item What is broken today.
+    \item Why the obvious fix does not work.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{What we do}
+  \begin{itemize}
+    \item One sentence.
+    \item The picture that makes it obvious.
+  \end{itemize}
+\end{frame}
+
+\begin{frame}{Results}
+  \begin{table}
+    \centering
+    \begin{tabular}{lr}
+      \toprule
+      Method & Accuracy \\
+      \midrule
+      Baseline & 00.0 \\
+      Ours & \textbf{00.0} \\
+      \bottomrule
+    \end{tabular}
+  \end{table}
+\end{frame}
+
+\begin{frame}{Takeaway}
+  \begin{enumerate}
+    \item The claim.
+    \item The evidence.
+    \item What it lets you do next.
+  \end{enumerate}
+\end{frame}
+
+\end{document}

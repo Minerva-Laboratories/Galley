@@ -1,0 +1,67 @@
+[workspace]
+resolver = "2"
+default-members = ["crates/galley-cli"]
+members = [
+    "crates/galley-server",
+    "crates/galley-sync",
+    "crates/galley-history",
+    "crates/galley-build",
+    "crates/galley-index",
+    "crates/galley-lit",
+    "crates/galley-agents",
+    "crates/galley-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+repository = "https://github.com/galley/galley"
+
+[workspace.dependencies]
+galley-server = { path = "crates/galley-server" }
+galley-sync = { path = "crates/galley-sync" }
+galley-history = { path = "crates/galley-history" }
+galley-build = { path = "crates/galley-build" }
+galley-agents = { path = "crates/galley-agents" }
+galley-index = { path = "crates/galley-index" }
+galley-lit = { path = "crates/galley-lit" }
+
+anyhow = "1"
+argon2 = { version = "0.6", features = ["alloc", "password-hash", "getrandom"] }
+axum-extra = { version = "0.12", features = ["cookie"] }
+flate2 = "1"
+getrandom = "0.4"
+r2d2 = "0.8"
+r2d2_sqlite = "0.35"
+regex = "1"
+rusqlite = { version = "0.40", features = ["bundled", "chrono"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2"] }
+serde_yaml_ng = "0.10"
+tar = "0.4"
+axum = { version = "0.8", features = ["ws", "macros"] }
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+futures-util = "0.3"
+git2 = { version = "0.21", default-features = false }
+mime_guess = "2"
+rust-embed = { version = "8", features = ["include-exclude"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+time = "0.3"
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.30"
+toml = "1"
+tower-http = { version = "0.7", features = ["trace", "cors"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+yrs = { version = "0.27", features = ["sync"] }
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

@@ -1,0 +1,211 @@
+# Error hints. First matching entry wins; `match` is a regex over the parsed message.
+# Fix kinds: add_package (inserts \usepackage after the preamble's last one),
+# replace_on_line (regex replace on the diagnostic's own line).
+
+- code: undefined-control-sequence-natbib
+  match: '^Undefined control sequence \\cite[pt]\*?$'
+  hint: '\citep and \citet come from the natbib package. Add \usepackage{natbib} to the preamble, or use \cite.'
+  explain: 'LaTeX met a command it has never seen. \citep and \citet are defined by natbib, which is not loaded.'
+  fix: { kind: add_package, package: natbib, label: 'Add natbib' }
+
+- code: undefined-control-sequence-booktabs
+  match: '^Undefined control sequence \\(toprule|midrule|bottomrule|cmidrule)$'
+  hint: 'The rule commands come from booktabs. Add \usepackage{booktabs} to the preamble.'
+  explain: 'LaTeX met a command it has never seen. \toprule, \midrule, and \bottomrule are defined by booktabs.'
+  fix: { kind: add_package, package: booktabs, label: 'Add booktabs' }
+
+- code: undefined-control-sequence-graphicx
+  match: '^Undefined control sequence \\includegraphics$'
+  hint: '\includegraphics needs the graphicx package. Add \usepackage{graphicx} to the preamble.'
+  explain: 'Images are inserted by graphicx; without it LaTeX does not know \includegraphics.'
+  fix: { kind: add_package, package: graphicx, label: 'Add graphicx' }
+
+- code: undefined-control-sequence-amsmath
+  match: '^Undefined control sequence \\(text|boldsymbol|dfrac|tfrac|operatorname|eqref|numberwithin)$'
+  hint: 'This command comes from amsmath. Add \usepackage{amsmath} to the preamble.'
+  explain: 'amsmath defines most of the math conveniences (\text, \dfrac, \eqref, …).'
+  fix: { kind: add_package, package: amsmath, label: 'Add amsmath' }
+
+- code: undefined-control-sequence-amssymb
+  match: '^Undefined control sequence \\(mathbb|mathfrak|leqslant|geqslant|square|blacksquare)$'
+  hint: 'This symbol comes from amssymb. Add \usepackage{amssymb} to the preamble.'
+  explain: 'amssymb provides the blackboard-bold and fraktur alphabets and extra relation symbols.'
+  fix: { kind: add_package, package: amssymb, label: 'Add amssymb' }
+
+- code: undefined-control-sequence-siunitx
+  match: '^Undefined control sequence \\(SI|si|num|qty|unit|ang|numrange)$'
+  hint: 'Units and numbers come from siunitx. Add \usepackage{siunitx} to the preamble.'
+  explain: 'siunitx typesets numbers and units consistently; its commands are undefined without it.'
+  fix: { kind: add_package, package: siunitx, label: 'Add siunitx' }
+
+- code: undefined-control-sequence-hyperref
+  match: '^Undefined control sequence \\(href|url|autoref|hyperref|texorpdfstring)$'
+  hint: 'Links come from hyperref. Add \usepackage{hyperref} near the end of the preamble.'
+  explain: 'hyperref makes references and URLs clickable and defines \href, \url, and \autoref.'
+  fix: { kind: add_package, package: hyperref, label: 'Add hyperref' }
+
+- code: undefined-control-sequence-xcolor
+  match: '^Undefined control sequence \\(textcolor|color|colorbox|definecolor)$'
+  hint: 'Colour commands come from xcolor. Add \usepackage{xcolor} to the preamble.'
+  explain: 'xcolor provides \textcolor, \definecolor, and friends.'
+  fix: { kind: add_package, package: xcolor, label: 'Add xcolor' }
+
+- code: undefined-control-sequence-cleveref
+  match: '^Undefined control sequence \\(cref|Cref|crefrange|namecref)$'
+  hint: '\cref comes from cleveref. Add \usepackage{cleveref} as the last package in the preamble.'
+  explain: 'cleveref must be loaded after hyperref and most other packages.'
+  fix: { kind: add_package, package: cleveref, label: 'Add cleveref' }
+
+- code: undefined-control-sequence-todonotes
+  match: '^Undefined control sequence \\(todo|missingfigure|listoftodos)$'
+  hint: '\todo comes from todonotes. Add \usepackage{todonotes} to the preamble.'
+  explain: 'todonotes draws margin notes for open items.'
+  fix: { kind: add_package, package: todonotes, label: 'Add todonotes' }
+
+- code: undefined-control-sequence
+  match: '^Undefined control sequence'
+  hint: 'LaTeX met a command it has never seen. Check the spelling, or add the package that defines it.'
+  explain: 'Every \command must be defined by the class, a package, or your own \newcommand before it is used. Usually the package that defines it is not loaded, or there is a typo.'
+
+- code: file-not-found-graphic
+  match: "^LaTeX Error: File `([^']+)' not found$"
+  when_context: '\\includegraphics'
+  hint: 'The image is not in the project. Upload it to figures/ or fix the path in \includegraphics.'
+  explain: 'graphicx looked for the file with the usual image extensions and found nothing.'
+
+- code: file-not-found-package
+  match: "^LaTeX Error: File `([^']+)\\.(sty|cls|clo|def|fd)' not found$"
+  hint: 'The package is not in the TeX bundle. Check its name, or remove the \usepackage line.'
+  explain: 'Tectonic looks packages up in its bundle. If the name is right and it is still missing, the package is not part of the bundle and would need TeX Live.'
+
+- code: file-not-found
+  match: "^LaTeX Error: File `([^']+)' not found$"
+  hint: 'No such file in the project. Check the path in \input or \include; paths are relative to main.tex.'
+  explain: '\input and \include look for files relative to the project root.'
+
+- code: missing-math
+  match: '^Missing \$ inserted$'
+  hint: 'A math-only symbol (like _ or ^) appears in text. Wrap it in $…$, or escape it as \_ or \^{}.'
+  explain: 'Subscripts, superscripts, and Greek letters only work in math mode. TeX inserted a $ to recover, which usually moves the problem further down.'
+
+- code: lonely-item
+  match: '^LaTeX Error: Lonely \\item'
+  hint: 'An \item is outside any list. Wrap it in \begin{itemize} … \end{itemize} or \begin{enumerate} … \end{enumerate}.'
+  explain: '\item only works inside list environments.'
+
+- code: extra-end
+  match: '^Extra \\endgroup$|^LaTeX Error: \\begin\{document\} ended by'
+  hint: 'There is an \end without a matching \begin. Remove it, or add the missing \begin above it.'
+  explain: 'TeX found more closing groups than open ones.'
+
+- code: env-mismatch
+  match: '^LaTeX Error: \\begin\{(\w+)\} (?:on input line \d+ )?ended by \\end\{(\w+)\}$'
+  hint: 'Every \begin needs a matching \end with the same name, in nesting order. Change \end{$2} to \end{$1} or fix the nesting.'
+  explain: 'Environments nest like brackets; the innermost open one must close first.'
+  fix: { kind: replace_on_line, find: '\\end\{$2\}', text: '\end{$1}', label: 'Use \end{$1}' }
+
+- code: env-undefined
+  match: '^LaTeX Error: Environment (\w+) undefined$'
+  hint: 'No package defines the $1 environment. Check the spelling, or load the package that provides it (for example amsmath for align).'
+  explain: 'Like commands, environments come from packages.'
+
+- code: missing-begin-document
+  match: '^LaTeX Error: Missing \\begin\{document\}$'
+  hint: 'Text appears before \begin{document}. Move it after, or check for a stray character in the preamble.'
+  explain: 'Only package loading and definitions belong in the preamble; any typeset text there triggers this.'
+
+- code: runaway-argument
+  match: '^Runaway argument|^Paragraph ended before .* was complete$'
+  hint: 'An argument is missing its closing brace, or a blank line sits inside a command argument. Close the brace or remove the blank line.'
+  explain: 'Most commands cannot span a paragraph break; a missing } makes TeX read until it hits one.'
+
+- code: missing-brace
+  match: '^Missing \} inserted$|^Too many \}''s$|^Missing \{ inserted$'
+  hint: 'Braces are unbalanced on or before this line. Count { and }.'
+  explain: 'TeX matches braces strictly; an extra or missing one derails everything after it.'
+
+- code: misplaced-alignment
+  match: '^Misplaced alignment tab character &$'
+  hint: 'An & outside a table or alignment. Escape it as \& in text.'
+  explain: '& separates columns; in prose it must be written \&.'
+
+- code: extra-alignment-tab
+  match: '^Extra alignment tab has been changed to \\cr$'
+  hint: 'A table row has more & than the column spec allows. Add a column to the tabular spec or remove the extra &.'
+  explain: 'Rows must match the number of columns declared in \begin{tabular}{…}.'
+
+- code: unicode-not-set-up
+  match: '^Package inputenc Error: Unicode character|^Unicode character .* not set up'
+  hint: 'The engine cannot typeset that character with the current font. Use a Unicode-capable font (fontspec) or replace the character.'
+  explain: 'The default fonts cover Latin scripts; other scripts need a matching font.'
+
+- code: font-not-found
+  match: '^Package fontspec Error: The font "([^"]+)" cannot be found|^Font .* not loadable'
+  hint: 'The font is not available in the sandbox. Pick a font that Tectonic bundles, or drop the \setmainfont line.'
+  explain: 'Compiles run without the host fonts; only fonts in the TeX bundle are visible.'
+
+- code: emergency-stop
+  match: '^Emergency stop$'
+  hint: 'TeX gave up after an earlier error. Fix the first error above and build again.'
+  explain: 'Emergency stop is a consequence, not a cause; the real problem is the first error in the list.'
+
+- code: undefined-reference
+  match: "^Reference `([^']+)' on page \\d+ undefined$"
+  hint: 'No \label{$1} exists anywhere in the project. Add it, or fix the key in \ref.'
+  explain: '\ref looks up a \label from the previous pass. If the label does not exist, the PDF shows ??.'
+
+- code: undefined-citation
+  match: "^(?:natbib: |biblatex: )?Citation `([^']+)' on page \\d+ undefined$"
+  hint: 'The key $1 is not in any .bib file listed in \bibliography. Add the entry, or fix the key.'
+  explain: 'BibTeX could not find that key, so the citation prints as [?].'
+
+- code: multiply-defined-label
+  match: "^Label `([^']+)' multiply defined$"
+  hint: 'Two \label{$1} exist. Rename one of them.'
+  explain: 'Labels must be unique across the whole project.'
+
+- code: label-changed
+  match: '^Label\(s\) may have changed'
+  hint: 'Cross-references updated; Tectonic re-runs automatically.'
+  explain: 'Informational. It disappears once references settle.'
+
+- code: overfull-hbox
+  match: '^Overfull \\hbox'
+  hint: 'A line sticks into the margin, usually an unbreakable word or URL. Add a hyphenation point, rephrase, or allow breaking with \sloppy or \url.'
+  explain: 'TeX could not find a line break that fits; the excess width is in the message.'
+
+- code: underfull-hbox
+  match: '^Underfull \\hbox'
+  hint: 'A line is stretched with too much space, often from \\\\ or \linebreak. Usually harmless.'
+  explain: 'Underfull boxes are cosmetic and never affect the PDF structure.'
+
+- code: overfull-vbox
+  match: '^Overfull \\vbox|^Underfull \\vbox'
+  hint: 'A page or box is too full or too empty. Usually a large float or a forced page break; often harmless.'
+  explain: 'Vertical box warnings come from page building rather than text.'
+
+- code: float-too-large
+  match: '^Float too large for page'
+  hint: 'The figure or table does not fit on a page. Constrain its width, for example \includegraphics[width=\linewidth]{…}.'
+  explain: 'A float taller than the text height can never be placed, so LaTeX shrinks or drops it.'
+
+- code: empty-bibliography
+  match: "^Empty `thebibliography' environment|^No file .*\\.bbl"
+  level: info
+  hint: 'Nothing is cited yet, so the bibliography is empty. This goes away after the first \cite.'
+  explain: 'BibTeX only emits entries that are cited; an empty list is expected in a fresh project.'
+
+- code: hyperref-token
+  match: '^hyperref: Token not allowed in a PDF string'
+  hint: 'A command in a section title cannot go into PDF bookmarks. Wrap it with \texorpdfstring{…}{plain text}.'
+  explain: 'PDF bookmarks are plain text; hyperref warns when it has to drop a command.'
+
+- code: svg-no-shell-escape
+  match: '^shellesc: Shell escape disabled'
+  level: info
+  hint: 'Galley never enables shell escape. SVG figures still work: Galley converts them to PDF itself before each build.'
+
+- code: svg-transparent-xetex
+  match: '^transparent: Loading aborted, because pdfTeX is not running in PDF mode'
+  level: info
+  hint: 'The svg package loads transparent, which only works under pdfTeX. Galley''s SVG conversion does not need it.'
