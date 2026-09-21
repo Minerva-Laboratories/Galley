@@ -174,8 +174,16 @@ impl Sandbox {
                 argv.extend(["--ro-bind", dir, dir].map(String::from));
             }
         }
+        // The CA bundle is mounted even without network. Tectonic builds an HTTPS client as soon
+        // as it consults the bundle, and a client with no roots panics before it reports which file
+        // it wanted, which hides the missing package that would trigger the fetch pass.
+        for f in ["/etc/ssl", "/etc/ca-certificates"] {
+            if Path::new(f).exists() {
+                argv.extend(["--ro-bind", f, f].map(String::from));
+            }
+        }
         if spec.network {
-            for f in ["/etc/resolv.conf", "/etc/ssl", "/etc/ca-certificates", "/etc/hosts"] {
+            for f in ["/etc/resolv.conf", "/etc/hosts"] {
                 if Path::new(f).exists() {
                     argv.extend(["--ro-bind", f, f].map(String::from));
                 }
@@ -217,12 +225,12 @@ impl Sandbox {
         c.args(["--pids-limit", "512", "--security-opt", "no-new-privileges", "--cap-drop", "ALL"]);
         c.args(["--read-only", "--tmpfs", "/tmp:rw,exec,size=512m"]);
         c.args(["--user", &format!("{}:{}", uid(), gid())]);
-        if spec.network {
-            // A package fetch needs TLS. A slim image has no CA bundle, so mount the host bundle.
-            for certs in ["/etc/ssl/certs", "/etc/ca-certificates"] {
-                if Path::new(certs).is_dir() {
-                    c.args(["-v", &format!("{certs}:{certs}:ro")]);
-                }
+        // A package fetch needs TLS, and a slim image has no CA bundle, so mount the host bundle.
+        // It is mounted for offline compiles too: Tectonic panics when it builds an HTTPS client
+        // with no roots, which hides the missing file that would trigger the fetch pass.
+        for certs in ["/etc/ssl/certs", "/etc/ca-certificates"] {
+            if Path::new(certs).is_dir() {
+                c.args(["-v", &format!("{certs}:{certs}:ro")]);
             }
         }
         c.args(["-v", &format!("{}:{GUEST_WORK}:ro", spec.project_dir.display())]);
@@ -360,7 +368,9 @@ mod tests {
         assert!(fetch.contains("-v /cache:/galley/cache "));
         if Path::new("/etc/ssl/certs").is_dir() {
             assert!(fetch.contains("-v /etc/ssl/certs:/etc/ssl/certs:ro"));
-            assert!(!joined.contains("/etc/ssl/certs"), "no certs without network");
+            // Certs travel with both passes. Without them Tectonic panics instead of naming the
+            // file it could not find, and the fetch pass never runs.
+            assert!(joined.contains("-v /etc/ssl/certs:/etc/ssl/certs:ro"));
         }
     }
 

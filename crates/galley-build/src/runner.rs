@@ -299,13 +299,26 @@ impl Builder {
             })
             .collect();
         if diags.is_empty() && !run.exit_ok {
+            // The engine needs the CA bundle to reach the package bundle. Without it Tectonic
+            // panics before it names the file it wanted, so say what is actually wrong.
+            let no_certs = run.stderr.contains("No CA certificates were loaded");
             diags.push(Diagnostic {
                 level: Level::Error,
                 file: None,
                 line: None,
-                code: "engine-failed".into(),
-                message: run.stderr_summary.clone().unwrap_or_else(|| "The engine exited with an error".into()),
-                hint: Some("The log has no LaTeX error; the raw output below may explain it.".into()),
+                code: if no_certs { "engine-no-certs".into() } else { "engine-failed".into() },
+                message: if no_certs {
+                    "The engine could not read the system certificates".into()
+                } else {
+                    run.stderr_summary.clone().unwrap_or_else(|| "The engine exited with an error".into())
+                },
+                hint: Some(if no_certs {
+                    "Install ca-certificates on the host, then build again. Galley mounts the host \
+                     bundle into the sandbox, and the engine needs it to download packages."
+                        .into()
+                } else {
+                    "The log has no LaTeX error; the raw output below may explain it.".to_string()
+                }),
                 explain: None,
                 fix: None,
                 raw: run.stderr.clone(),
