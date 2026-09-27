@@ -268,6 +268,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/auth/signup", post(auth_routes::signup))
         .route("/api/auth/login", post(auth_routes::login))
         .route("/api/auth/logout", post(auth_routes::logout))
+        .route("/api/auth/name", post(auth_routes::rename))
         .route("/api/auth/landing", post(auth_routes::landing))
         .route("/api/auth/tokens", get(token_routes::list).post(token_routes::create))
         .route("/api/auth/tokens/{tid}", axum::routing::delete(token_routes::revoke))
@@ -291,6 +292,7 @@ pub fn router(state: AppState) -> Router {
                 .layer(axum::extract::DefaultBodyLimit::max(file_routes::MAX_UPLOAD)),
         )
         .route("/api/projects/{id}/bib", get(bib_routes::library).post(bib_routes::add))
+        .route("/api/projects/{id}/bib/search", get(bib_routes::search))
         .route(
             "/api/projects/{id}/bib/{key}",
             axum::routing::patch(bib_routes::edit).delete(bib_routes::delete),

@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::app::{AppError, AppState};
-use crate::auth::current::{csrf_cookie, expired, session_cookie, MaybeUser, CSRF_COOKIE, SESSION_COOKIE};
+use crate::auth::current::{csrf_cookie, expired, session_cookie, CurrentUser, MaybeUser, CSRF_COOKIE, SESSION_COOKIE};
 use crate::auth::{random_token, Role};
 use crate::store::User;
 
@@ -175,6 +175,30 @@ fn sign_in(app: &AppState, jar: CookieJar, user: &User) -> (CookieJar, Json<Valu
         .add(session_cookie(token, app.secure))
         .add(csrf_cookie(random_token(), app.secure));
     (jar, Json(json!({ "user": public_user(user.clone()) })))
+}
+
+#[derive(Deserialize)]
+pub struct NewName {
+    name: String,
+}
+
+/// POST /api/auth/name. Change the display name of the signed-in user, guest or not. The server
+/// attributes commits, comments and the member list to this name, so a rename in the UI has to
+/// reach it. A user renames only themselves: the handler takes the id from the session.
+pub async fn rename(
+    State(app): State<AppState>,
+    CurrentUser(user): CurrentUser,
+    Json(body): Json<NewName>,
+) -> Result<Json<Value>, AppError> {
+    let store = app.store.clone();
+    let id = user.id.clone();
+    let name = body.name.clone();
+    let name = tokio::task::spawn_blocking(move || store.set_user_name(&id, &name))
+        .await
+        .map_err(internal)?
+        .map_err(internal)?;
+    app.store.audit(None, Some(&user), "user.rename", Some(&name));
+    Ok(Json(public_user(User { name, ..user })))
 }
 
 fn public_user(u: User) -> Value {

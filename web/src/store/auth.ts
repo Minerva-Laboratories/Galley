@@ -8,7 +8,8 @@ export async function loadMe(): Promise<void> {
     currentUser.value = me.user;
     needsSetup.value = me.needs_setup;
     publicSignup.value = me.public_signup;
-    if (me.user && !me.user.is_guest) setDisplayName(me.user.name);
+    // The server holds the chosen name for guests too, so it is authoritative for both.
+    if (me.user) setDisplayName(me.user.name);
   } catch {
     // Leave the SPA on the sign-in screen. The server may be starting.
     currentUser.value = null;
@@ -37,6 +38,13 @@ export async function logout(): Promise<void> {
     // Even if the call fails, drop the local identity.
   }
   currentUser.value = null;
+}
+
+/** Rename the signed-in user, guest or not, so commits, comments and the member list follow. */
+export async function renameMe(name: string): Promise<void> {
+  const user = await api.setName(name);
+  currentUser.value = user;
+  setDisplayName(user.name);
 }
 
 export function messageOf(e: unknown, fallback: string): string {

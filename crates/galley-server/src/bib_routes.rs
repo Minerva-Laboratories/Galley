@@ -174,6 +174,30 @@ pub struct NewEntry {
 
 /// Add an entry from a pasted identifier or from pasted BibTeX. A pasted identifier makes one
 /// catalogue call, because the author asked for it. Pasted BibTeX makes no network call.
+#[derive(serde::Deserialize)]
+pub struct SearchQuery {
+    q: String,
+}
+
+/// GET /api/projects/{id}/bib/search?q=... Search the catalogue by title or author. It returns
+/// candidates only. Nothing enters the file until a person picks one, so a wrong match cannot be
+/// added silently. Asking for a search is itself the consent, as with pasting an identifier.
+pub async fn search(
+    State(app): State<AppState>,
+    Path(id): Path<String>,
+    CurrentUser(user): CurrentUser,
+    axum::extract::Query(q): axum::extract::Query<SearchQuery>,
+) -> Result<Json<Value>, AppError> {
+    app.require(&user, &id, Role::can_edit, "searching for a reference").await?;
+    let project = app.registry.open(&id).await?;
+    let client = galley_lit::Client::new(&project.workdir().join(".galley").join("lit"), app.contact_email.clone());
+    let hits = galley_lit::search(&client, &q.q).await.map_err(|e| match e {
+        galley_lit::Error::Shape(why) => AppError::BadRequest(why),
+        other => AppError::BadRequest(other.to_string()),
+    })?;
+    Ok(Json(json!({ "hits": hits })))
+}
+
 pub async fn add(
     State(app): State<AppState>,
     Path(id): Path<String>,

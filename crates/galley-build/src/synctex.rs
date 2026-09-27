@@ -164,8 +164,25 @@ impl SyncTex {
     pub fn inverse(&self, page: u32, x: f64, y: f64) -> Option<SourceLocation> {
         let x_sp = x / self.scale;
         let y_sp = y / self.scale;
+        // The page, the text frame and the column are boxes too, and TeX attributes them to
+        // whatever line closed the document. They contain every click, so ranking by containment
+        // alone sends the whole page to \\end{document}. Keep boxes near the height of a line of
+        // text, which is what a reader is pointing at, and fall back to everything if that leaves
+        // nothing.
+        let page_records: Vec<&Record> = self.records.iter().filter(|r| r.page == page).collect();
+        let mut heights: Vec<i64> =
+            page_records.iter().filter(|r| r.is_box).map(|r| r.height + r.depth).filter(|h| *h > 0).collect();
+        heights.sort_unstable();
+        let line_height = heights.get(heights.len() / 2).copied().unwrap_or(0);
+        let tall = line_height.saturating_mul(4);
+        let kept: Vec<&Record> = page_records
+            .iter()
+            .copied()
+            .filter(|r| !r.is_box || tall == 0 || r.height + r.depth <= tall)
+            .collect();
+        let candidates = if kept.is_empty() { page_records } else { kept };
         let mut best: Option<(&Record, f64)> = None;
-        for r in self.records.iter().filter(|r| r.page == page) {
+        for r in candidates {
             let score = if r.is_box {
                 let top = (r.v - r.height) as f64;
                 let bottom = (r.v + r.depth) as f64;

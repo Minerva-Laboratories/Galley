@@ -302,6 +302,17 @@ impl Store {
         Ok(self.list_users()?.into_iter().filter(|u| u.is_admin).collect())
     }
 
+    /// Rename a user. A guest joins a share link with a name, and may change it later, so the
+    /// name the server attributes commits and comments to has to follow.
+    pub fn set_user_name(&self, user_id: &str, name: &str) -> Result<String, StoreError> {
+        let name = name.trim();
+        let name = if name.is_empty() { "Anonymous" } else { name };
+        let name: String = name.chars().take(40).collect();
+        let conn = self.db.conn()?;
+        conn.execute("UPDATE users SET name = ?2 WHERE id = ?1", params![user_id, name])?;
+        Ok(name)
+    }
+
     pub fn user_by_id(&self, id: &str) -> Result<Option<User>, DbError> {
         let conn = self.db.conn()?;
         conn.query_row(

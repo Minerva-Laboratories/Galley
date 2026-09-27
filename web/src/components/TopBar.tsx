@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
-import { logout } from '../store/auth';
+import { logout, messageOf, renameMe } from '../store/auth';
 import { daysLeft, setDeadline } from '../store/settings';
 import { colorFor, initials } from '../sync/colors';
 import { setUserName } from '../sync/docs';
@@ -16,6 +16,7 @@ import {
   quietMode,
   setDisplayName,
   shareOpen,
+  showToast,
   theme,
   toggleQuietMode,
   toggleTheme,
@@ -117,12 +118,20 @@ function NamePopover({ onClose }: { onClose: () => void }) {
   const [value, setValue] = useState(displayName.value);
   useEffect(() => input.current?.focus(), []);
 
-  const save = () => {
+  const save = async () => {
     const name = value.trim();
     if (!name) return;
+    // Show it at once, then make it stick. The server owns the name that commits, comments and the
+    // member list use, so a rename that only lived in this tab used to revert.
     setDisplayName(name);
     setUserName(name);
     onClose();
+    try {
+      await renameMe(name);
+      setUserName(name);
+    } catch (e) {
+      showToast(messageOf(e, 'That name could not be saved. Try again.'));
+    }
   };
 
   return (

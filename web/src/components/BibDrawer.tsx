@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'preact/hooks';
-import { api, ApiError, type BibEntry, type Library } from '../api';
+import { api, ApiError, type BibEntry, type BibHit, type Library } from '../api';
 import { goToLine } from '../editor/Editor';
 import { saveSettings } from '../store/settings';
 import { canEdit, graphOpen, project, requestGoto, showToast } from '../store/store';
@@ -25,6 +25,7 @@ export function BibDrawer() {
   const [adding, setAdding] = useState('');
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState<string | null>(null);
+  const [hits, setHits] = useState<BibHit[] | null>(null);
 
   const reload = async (projectId: string) => {
     try {
@@ -43,19 +44,42 @@ export function BibDrawer() {
   const entries = library?.entries ?? [];
   const withIssues = entries.filter((e) => e.issues.length > 0).length;
 
-  const add = async () => {
-    const text = adding.trim();
-    if (!text) return;
+  const addById = async (text: string) => {
     setBusy(true);
     try {
       const looksLikeBibtex = text.startsWith('@');
       const r = await api.addEntry(id, looksLikeBibtex ? { bibtex: text } : { identifier: text });
       setAdding('');
+      setHits(null);
       await reload(id);
       setOpen(r.key);
       showToast(`Added ${r.key} to ${r.file}. Cite it with \\cite{${r.key}}.`);
     } catch (e) {
       showToast(message(e, 'Could not add that entry.'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // An identifier is added straight away. Anything else is a search, and the person picks the
+  // result, so Galley never guesses which work was meant.
+  const looksLikeIdentifier = (t: string) => /10\.\d{4,9}\//.test(t) || /arxiv/i.test(t) || /^\d{4}\.\d{4,5}(v\d+)?$/.test(t);
+
+  const add = async () => {
+    const text = adding.trim();
+    if (!text) return;
+    if (text.startsWith('@') || looksLikeIdentifier(text)) {
+      await addById(text);
+      return;
+    }
+    setBusy(true);
+    setHits(null);
+    try {
+      const r = await api.searchBib(id, text);
+      setHits(r.hits);
+      if (r.hits.length === 0) showToast('Nothing matched that. Try the DOI, or paste the BibTeX.');
+    } catch (e) {
+      showToast(message(e, 'Could not search for that.'));
     } finally {
       setBusy(false);
     }
@@ -82,15 +106,31 @@ export function BibDrawer() {
             }}
           >
             <input
-              placeholder="DOI, arXiv id, or pasted BibTeX"
+              placeholder="Title, DOI, arXiv id, or pasted BibTeX"
               value={adding}
               onInput={(e) => setAdding((e.target as HTMLInputElement).value)}
               aria-label="Add a bibliography entry"
             />
             <button class="tb primary" type="submit" disabled={busy || !adding.trim()}>
-              {busy ? 'Adding…' : 'Add'}
+              {busy ? 'Working…' : looksLikeIdentifier(adding.trim()) || adding.trim().startsWith('@') ? 'Add' : 'Search'}
             </button>
           </form>
+        )}
+        {hits && hits.length > 0 && (
+          <div class="bibhits">
+            <div class="hint">
+              {hits.length} match{hits.length === 1 ? '' : 'es'} from Crossref and arXiv. Pick the right one.
+            </div>
+            {hits.map((h) => (
+              <button key={h.id} class="bibhit" onClick={() => void addById(h.id)} disabled={busy}>
+                <b>{h.title}</b>
+                <span>
+                  {[h.authors, h.year, h.venue].filter(Boolean).join(' · ')}
+                </span>
+                <code>{h.source} · {h.id}</code>
+              </button>
+            ))}
+          </div>
         )}
         {!library && !error && <div class="hint">Reading the bibliography…</div>}
         {library && entries.length === 0 && (

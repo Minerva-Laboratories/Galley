@@ -25,6 +25,7 @@ impl Lookup {
 
 static ARXIV_ID: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)(?:arxiv[:/]|abs/|pdf/)?(\d{4}\.\d{4,5}(?:v\d+)?|[a-z-]+(?:\.[A-Z]{2})?/\d{7})").unwrap());
+static AUTHOR_NAME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<name>(.*?)</name>").unwrap());
 static DOI: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(10\.\d{4,9}/[^\s"<>]+)"#).unwrap());
 
 /// Which catalogue an identifier belongs to.
@@ -61,6 +62,128 @@ pub async fn lookup(client: &Client, input: &str) -> Result<Lookup, Error> {
         }
         None => Err(Error::Shape("that is not a DOI or an arXiv id".into())),
     }
+}
+
+/// One result of a title search, enough for a person to recognise the work before adding it.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SearchHit {
+    /// What to paste back to add it: a DOI, or an arXiv id.
+    pub id: String,
+    pub source: &'static str,
+    pub title: String,
+    pub authors: String,
+    pub year: Option<String>,
+    pub venue: Option<String>,
+}
+
+/// Search the catalogue by title, author or any bibliographic text. Galley never adds a result on
+/// its own: the caller shows these and a person picks, so a wrong match cannot enter the file.
+pub async fn search(client: &Client, query: &str) -> Result<Vec<SearchHit>, Error> {
+    let query = query.trim();
+    if query.len() < 4 {
+        return Err(Error::Shape("type a few more words to search".into()));
+    }
+    let mut hits = crossref_hits(client, query).await.unwrap_or_default();
+    // Crossref does not hold most preprints or several conference series, which is where a lot of
+    // computing work lives, so arXiv is searched as well and the results are merged.
+    match arxiv_hits(client, query).await {
+        Ok(mut from_arxiv) => {
+            let seen: Vec<String> = hits.iter().map(|h| normalise(&h.title)).collect();
+            from_arxiv.retain(|h| !seen.contains(&normalise(&h.title)));
+            hits.append(&mut from_arxiv);
+        }
+        Err(e) => tracing::warn!(error = %e, "arXiv search failed"),
+    }
+    if hits.is_empty() {
+        return Err(Error::NotFound("Crossref and arXiv"));
+    }
+    hits.truncate(8);
+    Ok(hits)
+}
+
+/// Words that carry no signal in a title and that arXiv will not match on their own. Requiring
+/// them in the query returns nothing at all, which is worse than ignoring them.
+const STOPWORDS: &[&str] = &[
+    "for", "the", "and", "with", "from", "into", "that", "this", "via", "using", "based", "are",
+    "was", "its", "our", "how", "can", "does", "toward", "towards",
+];
+
+/// Search arXiv by title and abstract. arXiv returns an Atom feed, so the entries are split on the
+/// entry tag and read one at a time.
+async fn arxiv_hits(client: &Client, query: &str) -> Result<Vec<SearchHit>, Error> {
+    // Every word has to appear in the title. A phrase search would only match a title written
+    // exactly as typed, which is rarely how a paper is remembered.
+    let terms: String = query
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_string())
+        .filter(|w| w.len() > 2 && !STOPWORDS.contains(&w.to_lowercase().as_str()))
+        .map(|w| format!("ti:{w}"))
+        .collect::<Vec<_>>()
+        .join("+AND+");
+    if terms.is_empty() {
+        return Ok(Vec::new());
+    }
+    let url = format!("https://export.arxiv.org/api/query?search_query={terms}&max_results=5");
+    let xml = client.text("arXiv", &url).await?;
+    let flat: String = xml.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out = Vec::new();
+    for chunk in flat.split("<entry>").skip(1) {
+        let tag = |name: &str| -> Option<String> {
+            let re = Regex::new(&format!(r"(?s)<{0}[^>]*>(.*?)</{0}>", regex::escape(name))).ok()?;
+            re.captures(chunk).map(|c| c[1].split_whitespace().collect::<Vec<_>>().join(" "))
+        };
+        let Some(title) = tag("title") else { continue };
+        let Some(link) = tag("id") else { continue };
+        let Some(id) = ARXIV_ID.captures(&link).map(|c| c[1].to_string()) else { continue };
+        let authors: Vec<String> = AUTHOR_NAME.captures_iter(chunk).map(|c| c[1].trim().to_string()).collect();
+        let family: Vec<String> = authors
+            .iter()
+            .take(3)
+            .map(|a| a.rsplit(' ').next().unwrap_or(a).to_string())
+            .collect();
+        out.push(SearchHit {
+            id: format!("arXiv:{id}"),
+            source: "arXiv",
+            title,
+            authors: family.join(", "),
+            year: tag("published").and_then(|p| p.get(..4).map(str::to_string)),
+            venue: tag("arxiv:journal_ref"),
+        });
+    }
+    Ok(out)
+}
+
+fn normalise(title: &str) -> String {
+    title.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect()
+}
+
+async fn crossref_hits(client: &Client, query: &str) -> Result<Vec<SearchHit>, Error> {
+    let v = client.json("Crossref", &crate::client::crossref_search(query)).await?;
+    let items = v["message"]["items"].as_array().cloned().unwrap_or_default();
+    Ok(items
+        .iter()
+        .filter_map(|it| {
+            let doi = it["DOI"].as_str()?.to_string();
+            let title = it["title"].get(0).and_then(Value::as_str)?.to_string();
+            let authors = it["author"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|p| p["family"].as_str())
+                        .take(3)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            let year = it["issued"]["date-parts"]
+                .get(0)
+                .and_then(|p| p.get(0))
+                .and_then(Value::as_i64)
+                .map(|y| y.to_string());
+            let venue = it["container-title"].get(0).and_then(Value::as_str).map(str::to_string);
+            Some(SearchHit { id: doi, source: "Crossref", title, authors, year, venue })
+        })
+        .collect())
 }
 
 /// Convert a Crossref record into BibTeX fields.

@@ -76,6 +76,15 @@ export interface CitationEdge {
 }
 
 /** One bibliography entry, with every field the file holds. */
+export interface BibHit {
+  id: string;
+  source: string;
+  title: string;
+  authors: string;
+  year: string | null;
+  venue: string | null;
+}
+
 export interface BibEntry {
   key: string;
   kind: string;
@@ -398,6 +407,8 @@ export const api = {
   login: (email: string, password: string) =>
     request<{ user: AuthUser }>('/api/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) }),
   logout: () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
+  setName: (name: string) =>
+    request<AuthUser>('/api/auth/name', { method: 'POST', body: JSON.stringify({ name }) }),
   sharePreview: (token: string) =>
     request<{ project_name: string; role: Role2 }>(`/api/share/${encodeURIComponent(token)}`),
   landing: (token: string, name: string) =>
@@ -542,6 +553,8 @@ export const api = {
     ),
   pdfUrl: (id: string, version: number) => `/api/projects/${encodeURIComponent(id)}/build/pdf?v=${version}`,
   library: (id: string) => request<Library>(`/api/projects/${encodeURIComponent(id)}/bib`),
+  searchBib: (id: string, q: string) =>
+    request<{ hits: BibHit[] }>(`/api/projects/${encodeURIComponent(id)}/bib/search?q=${encodeURIComponent(q)}`),
   addEntry: (id: string, body: { identifier?: string; bibtex?: string; file?: string }) =>
     request<{ key: string; file: string; kind: string; fields: [string, string][] }>(
       `/api/projects/${encodeURIComponent(id)}/bib`,

@@ -1995,3 +1995,45 @@ a.tb {
   align-self: flex-start;
   margin-top: 4px;
 }
+
+/* Catalogue search results in the bibliography drawer. One row per candidate, so the author reads
+   the title and the authors before anything enters the .bib file. */
+.bibhits {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0 4px 8px;
+}
+.bibhit {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.bibhit:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+.bibhit:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.bibhit b {
+  font-weight: 500;
+  font-size: 12.5px;
+  line-height: 1.35;
+}
+.bibhit span {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.bibhit code {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+}

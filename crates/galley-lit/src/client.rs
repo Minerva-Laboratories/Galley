@@ -125,7 +125,7 @@ pub fn crossref_work(doi: &str) -> String {
 /// A bibliographic search, for finding the published version of a preprint.
 pub fn crossref_search(title: &str) -> String {
     format!(
-        "https://api.crossref.org/works?query.bibliographic={}&rows=5&select=DOI,title,type,container-title,issued",
+        "https://api.crossref.org/works?query.bibliographic={}&rows=5&select=DOI,title,type,container-title,issued,author",
         urlencode(title)
     )
 }

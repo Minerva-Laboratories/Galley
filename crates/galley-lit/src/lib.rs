@@ -14,7 +14,7 @@ mod lookup;
 pub use client::{Client, Error};
 pub use coverage::{coverage, render as coverage_report, Candidate};
 pub use enrich::{enrich, render as enrich_report, Suggestion};
-pub use lookup::{lookup, parse_id, Id, Lookup};
+pub use lookup::{lookup, parse_id, search, Id, Lookup, SearchHit};
 
 /// Contact details go in the User-Agent and the `mailto` parameter. Both catalogues ask for them.
 /// Both give better service in return.

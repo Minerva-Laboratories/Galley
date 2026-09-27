@@ -96,7 +96,9 @@ export function Preview() {
     const top = target.y * scale;
     host.current.scrollTo({ top: pageEl.offsetTop + top - host.current.clientHeight / 3, behavior: 'smooth' });
     setHighlight({ page: target.page, top, height: Math.max(12, target.height * scale) });
-    const t = setTimeout(() => setHighlight(null), 1800);
+    // The mark is the only sign that a forward jump landed, and the page often does not move
+    // because the target was already on screen, so it stays long enough to be seen.
+    const t = setTimeout(() => setHighlight(null), 3200);
     return () => clearTimeout(t);
   }, [target?.nonce, scale, pageCount]);
 
@@ -139,7 +141,12 @@ export function Preview() {
         <button class={`tb ${invertPdf.value ? 'on' : ''}`} title="Dark page" onClick={toggleInvert}>
           Invert
         </button>
-        <button class="tb" title="Show the cursor line in the PDF (Ctrl+click in the editor)" onClick={() => void showInPdf()} disabled={showEmpty}>
+        <button
+          class="tb"
+          title="Show the cursor line in the PDF. Ctrl+click a line in the editor does the same, and clicking the page jumps back to the source."
+          onClick={() => void showInPdf()}
+          disabled={showEmpty}
+        >
           Sync
         </button>
         <button class="tb" title="Zoom out" aria-label="Zoom out" onClick={() => setZoom((z) => Math.max(0.4, (z === 'fit' ? scale : z) - 0.15))} disabled={showEmpty}>
