@@ -25,6 +25,9 @@ struct Record {
     depth: i64,
     /// A box has an extent. A point record such as a kern, glue or the current position has none.
     is_box: bool,
+    /// An opening `[` or `(`: a box that encloses other material. TeX can attribute such a box to a
+    /// line that typeset nothing itself, such as `\\begin{document}`, and place it on any page.
+    container: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -103,7 +106,7 @@ impl SyncTex {
                 '{' => page = line[1..].trim().parse().unwrap_or(page + 1),
                 '}' | ']' | ')' | '!' => {}
                 '[' | '(' | 'h' | 'v' | '$' | 'r' | 'x' | 'k' | 'g' | 'f' => {
-                    if let Some(r) = parse_record(&line[1..], page, matches!(kind, '[' | '(' | 'h' | 'v' | '$' | 'r')) {
+                    if let Some(r) = parse_record(&line[1..], page, matches!(kind, '[' | '(' | 'h' | 'v' | '$' | 'r'), matches!(kind, '[' | '(')) {
                         records.push(r);
                     }
                 }
@@ -133,10 +136,19 @@ impl SyncTex {
         if ids.is_empty() {
             return None;
         }
+        // A line counts only if it typeset something itself: glyphs, glue, kerns, math, a rule or an
+        // empty box. The preamble typesets nothing, and the nearest following line with any record
+        // can be \\begin{document}, whose only record is an enclosing box that TeX may place on the
+        // last page. Skipping such lines sends a click on \\usepackage or \\author to the title block.
+        let content_lines: std::collections::HashSet<u32> =
+            self.records.iter().filter(|r| ids.contains(&r.file) && !r.container).map(|r| r.line).collect();
         // Take the exact line first, then the nearest line after it. A blank line has no record.
         let mut best: Option<&Record> = None;
         for r in &self.records {
             if !ids.contains(&r.file) || r.line < line {
+                continue;
+            }
+            if !content_lines.is_empty() && !content_lines.contains(&r.line) {
                 continue;
             }
             let better = match best {
@@ -207,7 +219,7 @@ impl SyncTex {
 }
 
 /// `file,line[,col]:h,v[:w,h,d]`
-fn parse_record(body: &str, page: u32, is_box: bool) -> Option<Record> {
+fn parse_record(body: &str, page: u32, is_box: bool, container: bool) -> Option<Record> {
     let mut sections = body.split(':');
     let link = sections.next()?;
     let pos = sections.next()?;
@@ -235,6 +247,7 @@ fn parse_record(body: &str, page: u32, is_box: bool) -> Option<Record> {
         height,
         depth,
         is_box,
+        container,
     })
 }
 
@@ -265,5 +278,47 @@ mod tests {
         assert!((9..=19).contains(&back.line), "{back:?}");
         assert!(st.forward("other.tex", 1).is_none());
         assert!(st.forward("main", 10).is_some());
+    }
+
+    /// The shape of a real report: the preamble (lines 1 to 4) typesets nothing, line 5 is
+    /// \\begin{document} with only an enclosing box that TeX put on the last page, and the title
+    /// block starts at line 7 on page 1.
+    const PREAMBLE_CASE: &str = "SyncTeX Version:1
+Input:1:/work/main.tex
+Output:pdf
+Magnification:1000
+Unit:1
+X Offset:0
+Y Offset:0
+Content:
+!100
+{1
+[1,7:4736286,4736286:26673152,40000000,0
+(1,7:4736286,6000000:26673152,700000,0
+x1,7:4736286,6000000
+g1,7:5000000,6000000
+)
+]
+}1
+{2
+[1,9:4736286,4736286:26673152,40000000,0
+(1,9:4736286,9000000:26673152,700000,0
+x1,9:4736286,9000000
+)
+(1,5:4736286,40000000:26673152,700000,0
+)
+]
+}2
+Postamble:
+";
+
+    #[test]
+    fn a_preamble_line_goes_to_the_title_and_not_to_a_stray_box() {
+        let st = SyncTex::parse(PREAMBLE_CASE, Path::new("/work")).unwrap();
+        for line in [1, 3, 4, 5, 6] {
+            let loc = st.forward("main.tex", line).unwrap();
+            assert_eq!(loc.page, 1, "line {line} went to {loc:?}");
+        }
+        assert_eq!(st.forward("main.tex", 9).unwrap().page, 2);
     }
 }
