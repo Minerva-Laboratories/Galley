@@ -2063,3 +2063,19 @@ a.tb {
   font-family: var(--mono);
   font-size: 12px;
 }
+
+/* The way out of a project. It sits under the file list for every role, viewers included, because
+   anyone who can read a project should be able to keep a copy of it. */
+.export-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 2px 12px 10px;
+  color: var(--text-2);
+  font-size: 12px;
+  text-decoration: none;
+}
+.export-link:hover {
+  color: var(--text);
+  text-decoration: underline;
+}

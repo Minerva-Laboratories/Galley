@@ -292,6 +292,46 @@ fn warnings_for(files: &[(String, Vec<u8>)]) -> Vec<String> {
     out
 }
 
+/// Pack a project's files into a zip, the reverse of `read_zip`. It leaves out `.git` and
+/// `.galley`, so the archive holds the project as an author sees it and imports cleanly into Galley
+/// or Overleaf.
+pub fn write_zip(workdir: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Write;
+    let mut files = Vec::new();
+    collect(workdir, workdir, &mut files)?;
+    files.sort();
+    let mut buf = Cursor::new(Vec::new());
+    {
+        let mut w = zip::ZipWriter::new(&mut buf);
+        let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        for rel in files {
+            w.start_file(rel.as_str(), opts).map_err(std::io::Error::other)?;
+            w.write_all(&std::fs::read(workdir.join(&rel))?)?;
+        }
+        w.finish().map_err(std::io::Error::other)?;
+    }
+    Ok(buf.into_inner())
+}
+
+fn collect(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<String>) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let Ok(rel) = path.strip_prefix(root) else { continue };
+        let rel = rel.to_string_lossy().replace('\\', "/");
+        if rel == ".git" || rel == ".galley" {
+            continue;
+        }
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            collect(root, &path, out)?;
+        } else if kind.is_file() {
+            out.push(rel);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,6 +422,23 @@ mod tests {
     fn no_document_is_an_error() {
         assert!(matches!(read_zip(&zip_of(&[("a.tex", b"just text")])), Err(ImportError::NoMain)));
         assert!(matches!(read_zip(b"not a zip"), Err(ImportError::NotZip)));
+    }
+
+    #[test]
+    fn an_export_imports_back_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("sections")).unwrap();
+        std::fs::create_dir_all(dir.path().join(".git")).unwrap();
+        std::fs::create_dir_all(dir.path().join(".galley/build")).unwrap();
+        std::fs::write(dir.path().join("main.tex"), DOC).unwrap();
+        std::fs::write(dir.path().join("sections/intro.tex"), b"Intro").unwrap();
+        std::fs::write(dir.path().join(".git/HEAD"), b"ref").unwrap();
+        std::fs::write(dir.path().join(".galley/build/main.pdf"), b"%PDF").unwrap();
+        let zip = write_zip(dir.path()).unwrap();
+        let back = read_zip(&zip).unwrap();
+        let paths: Vec<&str> = back.files.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(paths, vec!["main.tex", "sections/intro.tex"]);
+        assert_eq!(back.report.main_file, "main.tex");
     }
 
     #[test]

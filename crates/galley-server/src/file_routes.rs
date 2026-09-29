@@ -45,6 +45,28 @@ pub async fn upload(
 }
 
 /// GET /api/projects/{id}/files/content?path=...[&inline=true]. It returns the text as the authors see it now.
+/// GET /api/projects/{id}/export. The whole project as a zip, the way an author sees it, with the
+/// edits of the last few seconds included. It imports back into Galley or into Overleaf unchanged.
+pub async fn export(State(app): State<AppState>, Path(id): Path<String>, CurrentUser(user): CurrentUser) -> Result<Response, AppError> {
+    app.require(&user, &id, Role::can_view, "downloading the project").await?;
+    let project = app.registry.open(&id).await?;
+    let _ = project.flush_now().await;
+    let dir = project.workdir().to_path_buf();
+    let bytes = tokio::task::spawn_blocking(move || crate::import::write_zip(&dir))
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    app.store.audit(Some(&id), Some(&user), "project.export", None);
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/zip".to_string()),
+            (header::CONTENT_DISPOSITION, format!("attachment; filename=\"{id}.zip\"")),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
 pub async fn download(
     State(app): State<AppState>,
     Path(id): Path<String>,

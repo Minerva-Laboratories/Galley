@@ -327,6 +327,11 @@ export function FilesDrawer() {
           </div>
         ))}
         {editable && list.length > 0 && <div class="hint">Drop files or folders here to upload them, up to 25 MB each.</div>}
+        {id && list.length > 0 && (
+          <a class="export-link" href={`/api/projects/${encodeURIComponent(id)}/export`} download>
+            <Icon name="download" size={13} /> Download the project as a zip
+          </a>
+        )}
         {dragging && <div class="dropzone">Drop to upload</div>}
       </div>
     </>

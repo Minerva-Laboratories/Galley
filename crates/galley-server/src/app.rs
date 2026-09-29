@@ -290,6 +290,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/{id}/submitted", post(pack_routes::freeze))
         .route("/api/projects/{id}/files", get(routes::list_files).post(routes::create_file).delete(file_routes::delete))
         .route("/api/projects/{id}/files/rename", post(file_routes::rename))
+        .route("/api/projects/{id}/export", get(file_routes::export))
         .route(
             "/api/projects/{id}/files/content",
             get(file_routes::download)
