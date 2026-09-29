@@ -32,12 +32,16 @@ export function applyFix(fix: Fix): FixOutcome {
   } catch {
     return { ok: false, message: 'The fix pattern is invalid. Apply the change by hand.' };
   }
+  // `find` is a regular expression. A producer that forgot to escape a literal would leave a button
+  // that never works, so the literal text is the fallback before giving up.
   const m = re.exec(range.text);
-  if (!m) return { ok: false, message: `Line ${fix.line} of ${fix.file} changed since the build. Build again and retry.` };
-  const from = range.from + m.index;
+  const at = m ? m.index : range.text.indexOf(fix.find);
+  const found = m ? m[0] : at >= 0 ? fix.find : null;
+  if (found === null) return { ok: false, message: `Line ${fix.line} of ${fix.file} changed since the build. Build again and retry.` };
+  const from = range.from + at;
   session.ydoc.transact(() => {
-    session.ytext.delete(from, m[0].length);
+    session.ytext.delete(from, found.length);
     session.ytext.insert(from, fix.text);
   });
-  return { ok: true, message: `Replaced ${m[0]} with ${fix.text}` };
+  return { ok: true, message: `Replaced ${found} with ${fix.text}` };
 }

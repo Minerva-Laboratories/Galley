@@ -118,7 +118,7 @@ pub fn lint(files: &[(String, String)], disabled: &[String]) -> Vec<Diagnostic> 
                         "doubled-word",
                         format!("Doubled word \"{pair}\""),
                         "Probably a typo.",
-                        Some(Fix::Replace { label: "Remove duplicate".into(), file: path.clone(), line: n, find: pair.clone(), text: first }),
+                        Some(Fix::Replace { label: "Remove duplicate".into(), file: path.clone(), line: n, find: regex::escape(&pair), text: first }),
                     ));
                 }
             }
@@ -135,7 +135,7 @@ pub fn lint(files: &[(String, String)], disabled: &[String]) -> Vec<Diagnostic> 
                             label: "Insert ~".into(),
                             file: path.clone(),
                             line: n,
-                            find: format!("{word} \\{cmd}{{"),
+                            find: regex::escape(&format!("{word} \\{cmd}{{")),
                             text: format!("{word}~\\{cmd}{{"),
                         }),
                     ));
@@ -267,7 +267,7 @@ mod tests {
         let codes: Vec<&str> = d.iter().map(|d| d.code.as_str()).collect();
         assert_eq!(codes, vec!["breakable-ref", "long-bold"]);
         match &d[0].fix {
-            Some(Fix::Replace { find, text, .. }) => assert_eq!((find.as_str(), text.as_str()), ("Section \\ref{", "Section~\\ref{")),
+            Some(Fix::Replace { find, text, .. }) => assert_eq!((find.as_str(), text.as_str()), (r"Section \\ref\{", "Section~\\ref{")),
             other => panic!("unexpected fix {other:?}"),
         }
     }

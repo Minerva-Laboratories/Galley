@@ -4,7 +4,7 @@ import { goToLine } from '../editor/Editor';
 import { build as runBuild } from '../editor/commands';
 import { applyFix } from '../editor/fixes';
 import { clearFigureCache, toggleFigureCache } from '../store/settings';
-import { build, canCompile, canEdit, currentFile, problemsOpen, project, requestGoto, showToast } from '../store/store';
+import { build, canCompile, canEdit, connectOpen, currentFile, problemsOpen, project, requestGoto, showToast } from '../store/store';
 
 export function Problems() {
   const [grammar, setGrammar] = useState<Diagnostic[]>([]);
@@ -86,8 +86,12 @@ export function Problems() {
             </button>
           )}
           {d.level === 'error' && !d.fix && (
-            <button class="tb" title="Agents arrive in a later milestone" onClick={() => showToast('The fix-build agent arrives in a later milestone.')}>
-              Ask Galley
+            <button
+              class="tb"
+              title="Connect Claude Code or another assistant. It can read this error, propose a fix as a suggestion, and build again."
+              onClick={() => (connectOpen.value = true)}
+            >
+              Ask your AI
             </button>
           )}
         </div>

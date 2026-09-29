@@ -209,3 +209,8 @@
   match: '^transparent: Loading aborted, because pdfTeX is not running in PDF mode'
   level: info
   hint: 'The svg package loads transparent, which only works under pdfTeX. Galley''s SVG conversion does not need it.'
+
+- code: cleveref-order
+  match: '^Package cleveref Error: cleveref must be loaded after (\w+)!'
+  hint: 'cleveref has to be the last package in the preamble. Move \usepackage{cleveref} below \usepackage{$1}, just before \begin{document}.'
+  explain: 'cleveref redefines commands that $1 also defines, so it only works when it loads after $1.'

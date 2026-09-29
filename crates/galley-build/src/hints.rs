@@ -95,7 +95,7 @@ impl Hints {
                     Some(Fix::Insert {
                         label: label.clone(),
                         file: project.main_file.to_string(),
-                        after_line: preamble_insert_line(project.main_text)?,
+                        after_line: preamble_insert_line(project.main_text, package)?,
                         text: format!("\\usepackage{{{package}}}"),
                     })
                 }
@@ -155,29 +155,86 @@ fn package_loaded(main: &str, package: &str) -> bool {
     re.is_match(main)
 }
 
-/// The 1-based line after which a new `\usepackage` goes. This is the line of the last
-/// `\usepackage`, or the line of `\documentclass`.
-fn preamble_insert_line(main: &str) -> Option<u32> {
+/// Packages that have to load after every other one, in this order. Both redefine commands that
+/// ordinary packages define, and cleveref refuses to load before hyperref or amsmath.
+const LOAD_LAST: &[&str] = &["hyperref", "cleveref"];
+
+fn loads(line: &str, package: &str) -> bool {
+    let code = line.split('%').next().unwrap_or("");
+    code.contains("\\usepackage")
+        && code
+            .split('{')
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .is_some_and(|list| list.split(',').any(|p| p.trim() == package))
+}
+
+/// The 1-based line after which `\usepackage{package}` goes. An ordinary package goes after the last
+/// `\usepackage`, but before hyperref and cleveref when they are loaded, since those two must come
+/// last. hyperref goes before cleveref. Without any `\usepackage`, it goes after `\documentclass`.
+fn preamble_insert_line(main: &str, package: &str) -> Option<u32> {
     let mut last_pkg = None;
     let mut docclass = None;
+    // The first line that loads a package this one has to precede.
+    let mut must_precede: Option<u32> = None;
+    let rank = LOAD_LAST.iter().position(|p| *p == package);
     for (i, line) in main.lines().enumerate() {
+        let n = i as u32 + 1;
         let code = line.split('%').next().unwrap_or("");
         if code.contains("\\begin{document}") {
             break;
         }
         if code.contains("\\usepackage") {
-            last_pkg = Some(i as u32 + 1);
+            last_pkg = Some(n);
+            let later = LOAD_LAST.iter().enumerate().any(|(r, p)| rank.is_none_or(|mine| r > mine) && loads(line, p));
+            if later && must_precede.is_none() {
+                must_precede = Some(n);
+            }
         }
         if code.contains("\\documentclass") && docclass.is_none() {
-            docclass = Some(i as u32 + 1);
+            docclass = Some(n);
         }
     }
-    last_pkg.or(docclass)
+    match must_precede {
+        Some(line) => Some(line - 1),
+        None => last_pkg.or(docclass),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Apply `\usepackage{p}` the way the client does, after the chosen line.
+    fn add(main: &str, p: &str) -> String {
+        let after = preamble_insert_line(main, p).unwrap() as usize;
+        let mut lines: Vec<String> = main.lines().map(str::to_string).collect();
+        lines.insert(after, format!("\\usepackage{{{p}}}"));
+        lines.join("\n") + "\n"
+    }
+
+    fn order(main: &str) -> Vec<String> {
+        main.lines()
+            .filter(|l| l.starts_with("\\usepackage"))
+            .map(|l| l.rsplit('{').next().unwrap_or(l).trim_end_matches('}').to_string())
+            .collect()
+    }
+
+    #[test]
+    fn packages_added_in_any_order_leave_hyperref_then_cleveref_last() {
+        // The order the errors appeared in a real document: \cref came first in the text.
+        let mut main = "\\documentclass{article}\n\\begin{document}\nx\n\\end{document}\n".to_string();
+        for p in ["cleveref", "booktabs", "amsmath", "hyperref", "siunitx"] {
+            main = add(&main, p);
+        }
+        assert_eq!(order(&main), vec!["booktabs", "amsmath", "siunitx", "hyperref", "cleveref"]);
+    }
+
+    #[test]
+    fn an_ordinary_package_goes_before_an_existing_hyperref() {
+        let main = "\\documentclass{article}\n\\usepackage{graphicx}\n\\usepackage[colorlinks]{hyperref}\n\\begin{document}\n\\end{document}\n";
+        assert_eq!(order(&add(main, "booktabs")), vec!["graphicx", "booktabs", "hyperref"]);
+    }
 
     fn raw(level: Level, message: &str, file: &str, line: u32) -> RawDiag {
         RawDiag {

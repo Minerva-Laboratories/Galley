@@ -28,6 +28,8 @@ pub enum Fix {
         label: String,
         file: String,
         line: u32,
+        /// A regular expression over the line. A producer with a literal must escape it, or a
+        /// sequence such as `\\r` in `Section \\ref{` reads as a control character and never matches.
         find: String,
         text: String,
     },
