@@ -108,6 +108,10 @@ pub struct Builder {
     /// Compiles running at once across the whole server. One compile can take most of a small
     /// machine's memory, so the rest wait for a slot instead of all starting and being killed.
     slots: tokio::sync::Semaphore,
+    /// Tickets handed to builds that had to wait, and how many of those have started. The semaphore
+    /// is first in, first out, so the difference is how many builds are ahead of a given ticket.
+    tickets: std::sync::atomic::AtomicU64,
+    served: std::sync::atomic::AtomicU64,
 }
 
 impl Builder {
@@ -128,6 +132,8 @@ impl Builder {
             data_dir: data_dir.to_path_buf(),
             configured_path,
             slots: tokio::sync::Semaphore::new(max_concurrent.max(1)),
+            tickets: std::sync::atomic::AtomicU64::new(0),
+            served: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -155,6 +161,36 @@ impl Builder {
         Ok(found)
     }
 
+    /// Wait for a free compile slot, telling the author where they are in the queue. A number that
+    /// counts down reads as progress, and a bare "waiting" reads as a hang.
+    async fn wait_for_slot(&self, progress: &(dyn Fn(String) + Send + Sync)) -> Option<tokio::sync::SemaphorePermit<'_>> {
+        use std::sync::atomic::Ordering::SeqCst;
+        let ticket = self.tickets.fetch_add(1, SeqCst);
+        let acquire = self.slots.acquire();
+        tokio::pin!(acquire);
+        let mut tick = tokio::time::interval(Duration::from_millis(700));
+        let mut shown = u64::MAX;
+        let permit = loop {
+            tokio::select! {
+                p = &mut acquire => break p.ok(),
+                _ = tick.tick() => {
+                    let ahead = ticket.saturating_sub(self.served.load(SeqCst)) + 1;
+                    if ahead != shown {
+                        shown = ahead;
+                        progress(if ahead == 1 {
+                            "Next in line. Starting in a moment…".to_string()
+                        } else {
+                            let n = ahead - 1;
+                            format!("In line: {n} build{} ahead of yours…", if n == 1 { "" } else { "s" })
+                        });
+                    }
+                }
+            }
+        };
+        self.served.fetch_add(1, SeqCst);
+        permit
+    }
+
     /// Compile `main_file` inside `project_dir`. Bad input never causes a panic. Every failure
     /// becomes a `BuildResult` that the UI can show.
     pub async fn run(
@@ -168,10 +204,7 @@ impl Builder {
         // Wait for a slot before timing starts, so the profile shows compile time and not queue time.
         let _slot = match self.slots.try_acquire() {
             Ok(permit) => Some(permit),
-            Err(_) => {
-                progress("Waiting for another build to finish…".into());
-                self.slots.acquire().await.ok()
-            }
+            Err(_) => self.wait_for_slot(progress).await,
         };
         let started = Instant::now();
         let out_dir = project_dir.join(".galley").join("build");
@@ -983,6 +1016,47 @@ fn own_failures(n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn one_slot_builder() -> Builder {
+        let sandbox = crate::sandbox::Sandbox {
+            kind: crate::sandbox::SandboxKind::None,
+            docker_image: String::new(),
+            memory_mb: 512,
+            cpus: 1.0,
+            systemd_scope: false,
+        };
+        let dir = std::env::temp_dir();
+        Builder::new(sandbox, Hints::bundled().unwrap(), Duration::from_secs(5), &dir, None, 1)
+    }
+
+    #[tokio::test]
+    async fn a_waiting_build_is_told_its_place_and_starts_when_a_slot_frees() {
+        let b = std::sync::Arc::new(one_slot_builder());
+        let running = b.slots.try_acquire().unwrap();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+
+        // Two builds queue behind the running one.
+        let (b1, s1) = (b.clone(), seen.clone());
+        let first = tokio::spawn(async move {
+            let log = move |m: String| s1.lock().unwrap().push(format!("first: {m}"));
+            b1.wait_for_slot(&log).await.map(|_| ())
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let (b2, s2) = (b.clone(), seen.clone());
+        let second = tokio::spawn(async move {
+            let log = move |m: String| s2.lock().unwrap().push(format!("second: {m}"));
+            b2.wait_for_slot(&log).await.map(|_| ())
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        {
+            let seen = seen.lock().unwrap();
+            assert!(seen.iter().any(|m| m == "first: Next in line. Starting in a moment…"), "{seen:?}");
+            assert!(seen.iter().any(|m| m == "second: In line: 1 build ahead of yours…"), "{seen:?}");
+        }
+        drop(running);
+        assert!(first.await.unwrap().is_some());
+        assert!(second.await.unwrap().is_some());
+    }
 
     #[test]
     fn resolves_log_file_names() {
