@@ -433,6 +433,14 @@ Self-hosters get the complete feature set by design. That is a stated principle,
 ### 8.2 Screens
 1. **Sign in**: email and password, or "Continue with <OIDC provider>", or a share-link landing that asks only for a display name.
 2. **Projects**: a card grid with title, last edited, collaborators' avatars and a build status dot. Buttons: *New project* (blank, template, import zip or clone git). Search. Archive.
+   *Import zip* configures the project by itself. It strips a wrapping folder, drops build output
+   (`.aux`, `.log`, a stale `main.pdf` beside `main.tex`) and system files (`__MACOSX`, `.DS_Store`),
+   converts Latin-1 text to UTF-8, and picks the main file: the one `.tex` with `\documentclass`
+   outside a comment, preferring `main.tex`, then the top level, then a file that begins the
+   document. The name comes from `\title{}`, then the zip's file name. The project starts with one
+   commit. A clean import opens at once; a zip with several documents, or with minted, pythontex,
+   `\write18` or LuaTeX code, shows a summary first so the choice is seen. Limits: 60 MB compressed,
+   300 MB expanded, 5,000 files, 25 MB per file.
 3. **Editor**: see above.
 4. **History** (drawer and full-screen mode): a vertical timeline of checkpoints with auto-commits collapsed, a scrubber, a file diff, *Compare PDFs*, *Restore*, *Create checkpoint* and *Push to remote*.
 5. **Share** (modal): a members list with roles, a link generator (role, expiry, label), a copy button and an "Anyone with link" toggle.

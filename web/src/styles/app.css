@@ -2037,3 +2037,29 @@ a.tb {
   font-family: var(--mono);
   font-size: 11px;
 }
+
+/* What an import chose, shown only when there was a choice to make or something that will not
+   compile here. A clean import opens the project directly. */
+.import-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 0 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg-panel);
+  font-size: 13px;
+}
+.import-summary p {
+  margin: 0;
+  color: var(--text-2);
+  line-height: 1.45;
+}
+.import-summary p.warn {
+  color: var(--amber);
+}
+.import-summary code {
+  font-family: var(--mono);
+  font-size: 12px;
+}

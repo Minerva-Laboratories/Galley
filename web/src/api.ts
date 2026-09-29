@@ -76,6 +76,17 @@ export interface CitationEdge {
 }
 
 /** One bibliography entry, with every field the file holds. */
+export interface ImportReport {
+  main_file: string;
+  main_reason: string;
+  other_candidates: string[];
+  file_count: number;
+  skipped: string[];
+  converted: string[];
+  warnings: string[];
+  title: string | null;
+}
+
 export interface BibHit {
   id: string;
   source: string;
@@ -467,6 +478,12 @@ export const api = {
   listTemplates: () => request<Template[]>('/api/templates'),
   checkGrammar: (id: string, path: string) =>
     request<Diagnostic[]>(`/api/projects/${encodeURIComponent(id)}/grammar`, { method: 'POST', body: JSON.stringify({ path }) }),
+  importProject: (file: File) =>
+    request<{ project: ProjectMeta; report: ImportReport }>(`/api/projects/import?filename=${encodeURIComponent(file.name)}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/zip' },
+      body: file,
+    }),
   createProject: (name: string, template?: string) =>
     request<ProjectMeta>('/api/projects', { method: 'POST', body: JSON.stringify({ name, template }) }),
   getProject: (id: string) => request<ProjectMeta & { role: Role2 }>(`/api/projects/${encodeURIComponent(id)}`),

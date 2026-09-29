@@ -275,6 +275,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/{id}/agent-runs", get(mcp_routes::runs))
         .route("/api/share/{token}", get(share_routes::preview))
         .route("/api/projects", get(routes::list_projects).post(routes::create_project))
+        .route(
+            "/api/projects/import",
+            post(routes::import_project).layer(axum::extract::DefaultBodyLimit::max(crate::import::MAX_ZIP)),
+        )
         .route("/api/projects/{id}", get(routes::get_project))
         .route("/api/projects/{id}/settings", axum::routing::patch(routes::update_settings))
         .route("/api/venues", get(pack_routes::list_venues))

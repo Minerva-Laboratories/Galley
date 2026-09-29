@@ -153,6 +153,65 @@ impl Registry {
         Ok(meta)
     }
 
+    /// Create a project from imported files, such as an unpacked zip. It mirrors `create_from`: the
+    /// files land on disk first and the project commits them once, so history starts with the
+    /// project as it arrived rather than one commit per file.
+    pub async fn create_imported(
+        &self,
+        name: &str,
+        files: Vec<(String, Vec<u8>)>,
+        main_file: &str,
+    ) -> Result<ProjectMeta, RegistryError> {
+        let name = name.trim();
+        let base = slugify(name);
+        if base.is_empty() {
+            return Err(RegistryError::BadName);
+        }
+        let mut id = base.clone();
+        let mut n = 2;
+        while self.root.join(&id).exists() {
+            id = format!("{base}-{n}");
+            n += 1;
+        }
+        let dir = self.root.join(&id);
+        std::fs::create_dir_all(dir.join(".galley"))?;
+        let count = files.len();
+        let mut text_paths = Vec::new();
+        for (path, bytes) in &files {
+            let file = dir.join(path);
+            if let Some(parent) = file.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(file, bytes)?;
+            if galley_sync::paths::is_text_path(path) {
+                text_paths.push(path.clone());
+            }
+        }
+        let now = Utc::now();
+        let meta = ProjectMeta {
+            lint_disabled: Vec::new(),
+            deadline: None,
+            venue: None,
+            budgets: Default::default(),
+            submitted_checkpoint: None,
+            literature: false,
+            figure_cache: true,
+            id: id.clone(),
+            name: name.to_string(),
+            main_file: main_file.to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        write_meta(&dir, &meta)?;
+
+        let project = self.open(&id).await?;
+        for path in &text_paths {
+            project.doc(path).await?;
+        }
+        project.flush_with(Some(format!("import: {count} files from a zip"))).await?;
+        Ok(meta)
+    }
+
     pub async fn open(&self, id: &str) -> Result<Arc<ProjectSync>, RegistryError> {
         if let Some(p) = self.open.read().await.get(id) {
             return Ok(Arc::clone(p));
@@ -221,10 +280,25 @@ pub fn is_valid_id(id: &str) -> bool {
         && !id.starts_with('-')
 }
 
+/// Fold an accented Latin letter to its base, so "robóticos" becomes "roboticos" in a URL rather
+/// than "rob-ticos". Letters outside this set still become a dash.
+fn fold_accent(c: char) -> char {
+    match c {
+        'á' | 'à' | 'ä' | 'â' | 'ã' | 'å' | 'Á' | 'À' | 'Ä' | 'Â' | 'Ã' | 'Å' => 'a',
+        'é' | 'è' | 'ë' | 'ê' | 'É' | 'È' | 'Ë' | 'Ê' => 'e',
+        'í' | 'ì' | 'ï' | 'î' | 'Í' | 'Ì' | 'Ï' | 'Î' => 'i',
+        'ó' | 'ò' | 'ö' | 'ô' | 'õ' | 'Ó' | 'Ò' | 'Ö' | 'Ô' | 'Õ' => 'o',
+        'ú' | 'ù' | 'ü' | 'û' | 'Ú' | 'Ù' | 'Ü' | 'Û' => 'u',
+        'ñ' | 'Ñ' => 'n',
+        'ç' | 'Ç' => 'c',
+        other => other,
+    }
+}
+
 fn slugify(name: &str) -> String {
     let mut out = String::new();
     let mut dash = false;
-    for c in name.chars() {
+    for c in name.chars().map(fold_accent) {
         if c.is_ascii_alphanumeric() {
             out.push(c.to_ascii_lowercase());
             dash = false;
@@ -252,6 +326,8 @@ mod tests {
         assert_eq!(slugify("Sparse attention (thesis)"), "sparse-attention-thesis");
         assert_eq!(slugify("  Hello,   World!  "), "hello-world");
         assert_eq!(slugify("***"), "");
+        assert_eq!(slugify("Control predictivo para brazos robóticos"), "control-predictivo-para-brazos-roboticos");
+        assert_eq!(slugify("Año de Señales"), "ano-de-senales");
         assert!(is_valid_id("sparse-attention"));
         assert!(!is_valid_id("../x"));
         assert!(!is_valid_id("Caps"));

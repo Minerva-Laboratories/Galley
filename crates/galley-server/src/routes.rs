@@ -110,6 +110,57 @@ pub async fn create_project(
     Ok((StatusCode::CREATED, Json(ProjectView { meta, role: Role::Admin })))
 }
 
+#[derive(Deserialize)]
+pub struct ImportQuery {
+    /// The project name. Without one, the import uses the document's `\title{}`, then the zip's
+    /// file name.
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    filename: Option<String>,
+}
+
+/// POST /api/projects/import. The body is a zip archive, such as an Overleaf download. The project
+/// configures itself: the main file, the text files and the history all come from the archive, and
+/// the reply says what was chosen and what was left out.
+pub async fn import_project(
+    State(app): State<AppState>,
+    CurrentUser(user): CurrentUser,
+    axum::extract::Query(q): axum::extract::Query<ImportQuery>,
+    body: axum::body::Bytes,
+) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
+    if user.is_guest {
+        return Err(AppError::Forbidden("Guests from a share link can't create projects. Sign up for an account.".into()));
+    }
+    // Unpacking is CPU work on a buffer that can reach tens of megabytes, so it stays off the runtime.
+    let imported = tokio::task::spawn_blocking(move || crate::import::read_zip(&body))
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let from_file = q
+        .filename
+        .as_deref()
+        .map(|f| f.trim_end_matches(".zip").trim_end_matches(".ZIP").replace(['_', '-'], " "))
+        .filter(|f| !f.trim().is_empty());
+    let name = q
+        .name
+        .filter(|n| !n.trim().is_empty())
+        .or_else(|| imported.report.title.clone())
+        .or(from_file)
+        .unwrap_or_else(|| "Imported project".into());
+    let name: String = name.chars().take(120).collect();
+    let meta = app.registry.create_imported(&name, imported.files, &imported.report.main_file).await?;
+    let store = app.store.clone();
+    let (pid, uid) = (meta.id.clone(), user.id.clone());
+    tokio::task::spawn_blocking(move || store.set_member(&pid, &uid, Role::Admin))
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    app.store.audit(Some(&meta.id), Some(&user), "project.import", Some(&meta.name));
+    let project = ProjectView { meta, role: Role::Admin };
+    Ok((StatusCode::CREATED, Json(serde_json::json!({ "project": project, "report": imported.report }))))
+}
+
 pub async fn get_project(
     State(app): State<AppState>,
     Path(id): Path<String>,

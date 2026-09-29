@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
-import { api, ApiError, type ProjectMeta, type Template } from '../api';
+import { api, ApiError, type ImportReport, type ProjectMeta, type Template } from '../api';
 import { ago } from '../util/time';
 import { logout } from '../store/auth';
-import { currentUser, navigate, theme, toggleTheme } from '../store/store';
+import { currentUser, navigate, showToast, theme, toggleTheme } from '../store/store';
 import { Icon } from './Icon';
 
 export function ProjectsPage() {
@@ -14,6 +14,9 @@ export function ProjectsPage() {
   const [name, setName] = useState('');
   const [query, setQuery] = useState('');
   const input = useRef<HTMLInputElement>(null);
+  const zipInput = useRef<HTMLInputElement>(null);
+  const [importing, setImporting] = useState(false);
+  const [imported, setImported] = useState<{ id: string; report: ImportReport } | null>(null);
 
   useEffect(() => {
     document.title = 'Projects — Galley';
@@ -38,6 +41,40 @@ export function ProjectsPage() {
       setError(e instanceof ApiError ? e.message : 'Could not create the project.');
     }
   };
+
+  // An import opens straight away when there is nothing to decide. When the zip had several
+  // documents, or something that will not compile here, the summary stays up so the choice is seen.
+  const importZip = async (file: File) => {
+    setImporting(true);
+    setError(null);
+    try {
+      const { project, report } = await api.importProject(file);
+      if (report.warnings.length > 0 || report.other_candidates.length > 0) {
+        setImported({ id: project.id, report });
+      } else {
+        showToast(`Imported ${report.file_count} files. Compiling ${report.main_file}.`);
+        navigate(`/p/${project.id}`);
+      }
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : 'Could not import that zip.');
+    } finally {
+      setImporting(false);
+      if (zipInput.current) zipInput.current.value = '';
+    }
+  };
+
+  const zipPicker = (
+    <input
+      ref={zipInput}
+      type="file"
+      accept=".zip,application/zip"
+      style={{ display: 'none' }}
+      onChange={(e) => {
+        const f = (e.target as HTMLInputElement).files?.[0];
+        if (f) void importZip(f);
+      }}
+    />
+  );
 
   const start = (template: string) => {
     setPicked(template);
@@ -90,6 +127,37 @@ export function ProjectsPage() {
         <h1>Projects</h1>
         <p class="sub">Every project is a git repository on this server. Open one, or start a new one.</p>
         {error && <div class="err">{error}</div>}
+        {zipPicker}
+        {imported && (
+          <div class="import-summary">
+            <b>Imported {imported.report.file_count} files</b>
+            <p>
+              Galley will compile <code>{imported.report.main_file}</code>. {imported.report.main_reason}
+            </p>
+            {imported.report.other_candidates.length > 0 && (
+              <p>
+                Other files that start a document: {imported.report.other_candidates.join(', ')}. To compile another one,
+                open its menu in the file list and choose Set as main file.
+              </p>
+            )}
+            {imported.report.warnings.map((w) => (
+              <p key={w} class="warn">
+                {w}
+              </p>
+            ))}
+            {imported.report.converted.length > 0 && (
+              <p>Converted from Latin-1 to UTF-8: {imported.report.converted.join(', ')}. Check accented characters.</p>
+            )}
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button class="tb primary" onClick={() => navigate(`/p/${imported.id}`)}>
+                Open project
+              </button>
+              <button class="tb" onClick={() => setImported(null)}>
+                Close
+              </button>
+            </div>
+          </div>
+        )}
 
         {!empty && (
           <div class="bar">
@@ -127,9 +195,19 @@ export function ProjectsPage() {
                 </button>
               </form>
             ) : (
-              <button class="tb primary" onClick={() => start('blank-article')}>
-                <Icon name="plus" size={14} /> New project
-              </button>
+              <>
+                <button class="tb primary" onClick={() => start('blank-article')}>
+                  <Icon name="plus" size={14} /> New project
+                </button>
+                <button
+                  class="tb"
+                  onClick={() => zipInput.current?.click()}
+                  disabled={importing}
+                  title="Upload a zip, such as Overleaf's Menu, Download, Source. The main file is found for you."
+                >
+                  {importing ? 'Importing…' : 'Import zip'}
+                </button>
+              </>
             )}
             {(projects?.length ?? 0) > 6 && (
               <input placeholder="Search projects" value={query} onInput={(e) => setQuery((e.target as HTMLInputElement).value)} aria-label="Search projects" />
@@ -168,9 +246,9 @@ export function ProjectsPage() {
                   </button>
                 ),
               )}
-              <button class="choice" disabled title="Not available yet">
-                <b>Import Overleaf zip</b>
-                <span>Bring a project over with its history intact. Not available yet.</span>
+              <button class="choice" onClick={() => zipInput.current?.click()} disabled={importing}>
+                <b>{importing ? 'Importing…' : 'Import Overleaf zip'}</b>
+                <span>In Overleaf, use Menu, then Download, then Source. Galley finds the main file for you.</span>
               </button>
             </div>
           </>
