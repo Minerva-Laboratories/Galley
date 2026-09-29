@@ -72,7 +72,7 @@ export function BuildBar() {
           </select>
         )}
         {canCompile.value && (
-          <button class="tb primary" onClick={() => void runBuild()} disabled={state.phase === 'running'}>
+          <button class="tb primary" data-tour="build" onClick={() => void runBuild()} disabled={state.phase === 'running'}>
             Build <kbd>Ctrl ↵</kbd>
           </button>
         )}

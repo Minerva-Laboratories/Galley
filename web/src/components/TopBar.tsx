@@ -5,6 +5,7 @@ import { colorFor, initials } from '../sync/colors';
 import { setUserName } from '../sync/docs';
 import {
   canEdit,
+  connectOpen,
   connection,
   currentUser,
   displayName,
@@ -20,6 +21,7 @@ import {
   theme,
   toggleQuietMode,
   toggleTheme,
+  tourOpen,
 } from '../store/store';
 import { Icon } from './Icon';
 
@@ -68,8 +70,18 @@ export function TopBar() {
       >
         <Icon name={quietMode.value ? 'eye-off' : 'eye'} size={16} />
       </button>
+      {currentUser.value && !currentUser.value.is_guest && (
+        <button
+          class="tb primary"
+          data-tour="connect"
+          onClick={() => (connectOpen.value = true)}
+          title="Let Claude Code, Cursor or another AI client work on this paper. Its edits arrive as suggestions."
+        >
+          <Icon name="agents" size={14} /> Connect AI
+        </button>
+      )}
       {isAdmin.value && (
-        <button class="tb" onClick={() => (shareOpen.value = true)}>
+        <button class="tb" data-tour="share" onClick={() => (shareOpen.value = true)}>
           <Icon name="share" size={14} /> Share
         </button>
       )}
@@ -104,6 +116,16 @@ function UserMenu() {
         <div class="name-pop" style={{ width: 220 }} onClick={(e) => e.stopPropagation()}>
           <div style={{ fontWeight: 500 }}>{user?.name}</div>
           <div class="hint" style={{ padding: '2px 0 8px' }}>{user?.is_guest ? 'Guest (via share link)' : user?.email}</div>
+          <button
+            class="tb"
+            style={{ width: '100%', justifyContent: 'center', marginBottom: 6 }}
+            onClick={() => {
+              setOpen(false);
+              tourOpen.value = true;
+            }}
+          >
+            Welcome tour
+          </button>
           <button class="tb" style={{ width: '100%', justifyContent: 'center' }} onClick={() => void logout().then(() => navigate('/'))}>
             Sign out
           </button>

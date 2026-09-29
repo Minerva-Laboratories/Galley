@@ -163,6 +163,16 @@ export const latexdiffAvailable = signal<boolean>(false);
 export const wordCount = signal<number>(0);
 export const paletteOpen = signal<boolean>(false);
 export const shareOpen = signal<boolean>(false);
+export const connectOpen = signal<boolean>(false);
+/** The welcome tour opens by itself once per browser, and again from the account menu. */
+export const tourOpen = signal<boolean>(false);
+export function tourSeen(): boolean {
+  return readPref('galley.tour') === 'done';
+}
+export function finishTour() {
+  tourOpen.value = false;
+  writePref('galley.tour', 'done');
+}
 export const toast = signal<ToastState | null>(null);
 /** The live document behind the active tab, and the CodeMirror view showing it. */
 export const currentSession = signal<DocSession | null>(null);

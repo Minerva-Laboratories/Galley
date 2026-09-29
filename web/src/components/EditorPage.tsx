@@ -33,6 +33,9 @@ import {
   project,
   projectRole,
   resetProject,
+  connectOpen,
+  tourOpen,
+  tourSeen,
   shareOpen,
   sharingNonce,
   showToast,
@@ -46,6 +49,8 @@ import { Preview } from './Preview';
 import { Problems } from './Problems';
 import { Rail } from './Rail';
 import { ShareModal } from './Share';
+import { ConnectAiModal } from './ConnectAi';
+import { Tour } from './Tour';
 import { Tabs } from './Tabs';
 import { TopBar } from './TopBar';
 
@@ -86,6 +91,8 @@ export function EditorPage({ id }: { id: string }) {
         }
         const first = list.find((f) => f.path === meta.main_file) ?? list.find((f) => f.kind === 'text');
         if (first) openFile(first.path);
+        // The tour points at the editor and the preview, so it waits for them to exist.
+        if (!tourSeen()) setTimeout(() => !cancelled && (tourOpen.value = true), 900);
       } catch (e) {
         if (!cancelled) setError(e instanceof ApiError ? e.message : 'Could not load the project.');
       }
@@ -277,6 +284,8 @@ export function EditorPage({ id }: { id: string }) {
       {graphOpen.value && <CitationGraph id={id} />}
       {paletteOpen.value && <Palette />}
       {shareOpen.value && <ShareModal />}
+      {connectOpen.value && <ConnectAiModal />}
+      {tourOpen.value && <Tour />}
     </div>
   );
 }

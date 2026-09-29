@@ -7,6 +7,8 @@ import { renameLabel } from '../store/labels';
 import { clearFigureCache, setDeadline, toggleFigureCache } from '../store/settings';
 import {
   build as buildState,
+  connectOpen,
+  tourOpen,
   currentSession,
   draftMode,
   drawer,
@@ -37,6 +39,8 @@ export const commands: Command[] = [
   { id: 'problems', title: 'Toggle problems', keys: 'Ctrl ⇧ M', run: toggleProblems },
   { id: 'preview', title: 'Toggle preview', keys: 'Ctrl ⇧ P', run: togglePreview },
   { id: 'sync', title: 'Show cursor line in PDF', run: () => void showInPdf() },
+  { id: 'connect', title: 'Connect an AI client', run: () => (connectOpen.value = true) },
+  { id: 'tour', title: 'Show the welcome tour', run: () => (tourOpen.value = true) },
   { id: 'draft', title: 'Toggle draft mode', run: () => (toggleDraft(), void build()) },
   { id: 'drawer', title: 'Toggle drawer', keys: 'Ctrl B', run: () => toggleDrawer(drawer.value ?? 'files') },
   { id: 'files', title: 'Show files', run: () => showDrawer('files') },

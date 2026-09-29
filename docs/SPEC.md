@@ -444,6 +444,16 @@ Self-hosters get the complete feature set by design. That is a stated principle,
 3. **Editor**: see above.
 4. **History** (drawer and full-screen mode): a vertical timeline of checkpoints with auto-commits collapsed, a scrubber, a file diff, *Compare PDFs*, *Restore*, *Create checkpoint* and *Push to remote*.
 5. **Share** (modal): a members list with roles, a link generator (role, expiry, label), a copy button and an "Anyone with link" toggle.
+6. **Connect AI** (top bar, primary button, every signed-in author): a numbered panel that creates a
+   device token, shows the `claude mcp add` command and the MCP address, offers the local runner
+   command, and lists the person's tokens with Revoke. It left the Share modal because connecting an
+   assistant is a main feature and a token belongs to a person, not to a project's admins. Share keeps
+   a one-line pointer to it.
+7. **Welcome tour**: opens once per browser on the first project, marks each part of the screen in
+   turn (editor, Build, preview, History, Bibliography, Comments, Connect AI, Files), and ends with
+   what the beta does not do yet. Skip tour ends it at any step; Esc, the arrow keys and Enter drive
+   it; the account menu and the palette reopen it. Keys pressed during the tour never reach the
+   document.
 6. **Settings**: Project has engine, main file, build options, `.galleyignore` and remote. User has theme, keymap (default, Vim or Emacs), font size and editor options. Admin has users, OIDC, agent backends, limits and backups.
 
 ### 8.2.1 Files drawer: file operations

@@ -2,7 +2,6 @@ import { useEffect, useState } from 'preact/hooks';
 import {
   api,
   ApiError,
-  type DeviceToken,
   type GovernanceMode,
   type GovernResult,
   type Member,
@@ -10,7 +9,7 @@ import {
   type RoleRequest,
   type ShareLink,
 } from '../api';
-import { currentUser, project, shareOpen, sharingNonce, showToast } from '../store/store';
+import { connectOpen, currentUser, project, shareOpen, sharingNonce, showToast } from '../store/store';
 import { initials } from '../sync/colors';
 
 const ROLES: Role2[] = ['admin', 'editor', 'commenter', 'viewer'];
@@ -29,14 +28,8 @@ function outcomeToast(r: GovernResult, appliedMsg: string) {
 }
 
 /** The one-liner that registers this project in Claude Code. Other clients take the same URL and header. */
-function mcpAddCommand(projectId: string, token: string): string {
-  return `claude mcp add --transport http galley ${api.mcpUrl(projectId)} --header "Authorization: Bearer ${token}"`;
-}
 
 /** The same project driven by a local model with no client. The `galley` binary is the runner. */
-function runnerCommand(projectId: string, token: string): string {
-  return `galley agent run --url ${api.mcpUrl(projectId)} --token ${token} --model qwen2.5-coder:14b`;
-}
 
 export function ShareModal() {
   const id = project.value?.id;
@@ -50,18 +43,14 @@ export function ShareModal() {
   const [linkRole, setLinkRole] = useState<Role2>('commenter');
   const [linkExpiry, setLinkExpiry] = useState(30);
   const [madeLink, setMadeLink] = useState<string | null>(null);
-  const [tokens, setTokens] = useState<DeviceToken[]>([]);
-  const [tokenLabel, setTokenLabel] = useState('Claude Code');
-  const [madeToken, setMadeToken] = useState<string | null>(null);
   const nonce = sharingNonce.value;
 
   const refresh = async () => {
     if (!id) return;
     try {
-      const [m, l, g, t] = await Promise.all([api.members(id), api.shares(id), api.governance(id), api.tokens().catch(() => [])]);
+      const [m, l, g] = await Promise.all([api.members(id), api.shares(id), api.governance(id)]);
       setMembers(m);
       setLinks(l);
-      setTokens(t);
       setMode(g.mode);
       setRequests(g.requests);
     } catch (e) {
@@ -74,30 +63,6 @@ export function ShareModal() {
 
   const close = () => (shareOpen.value = false);
 
-  const copyText = (text: string) => {
-    void navigator.clipboard.writeText(text).then(
-      () => showToast('Copied'),
-      () => showToast('Could not copy. Select the text and copy it by hand.'),
-    );
-  };
-  const createToken = async () => {
-    try {
-      const r = await api.createToken(tokenLabel.trim());
-      setMadeToken(r.token);
-      setTokens((prev) => [{ id: r.id, label: r.label, created_at: new Date().toISOString(), last_used_at: null }, ...prev]);
-    } catch (e) {
-      setError(e instanceof ApiError ? e.message : 'Could not create the token.');
-    }
-  };
-  const revokeToken = async (t: DeviceToken) => {
-    try {
-      await api.revokeToken(t.id);
-      setTokens((prev) => prev.filter((x) => x.id !== t.id));
-      if (madeToken) setMadeToken(null);
-    } catch (e) {
-      setError(e instanceof ApiError ? e.message : 'Could not revoke the token.');
-    }
-  };
   const adminCount = members.filter((m) => m.role === 'admin' && !m.is_guest).length;
 
   const invite = async (e: Event) => {
@@ -289,58 +254,17 @@ export function ShareModal() {
 
           <div style={{ marginTop: 16, fontWeight: 500 }}>AI clients</div>
           <div class="hint" style={{ paddingLeft: 0 }}>
-            Connect Claude Code, Cursor or any MCP client, or run a local model with the galley binary alone. Either way it
-            runs on your machine with your model; its edits arrive here as suggestions marked “via” the agent, for the
-            authors to accept or reject.
-          </div>
-          <div class="link">
-            <span>{api.mcpUrl(id!)}</span>
-            <button class="tb" onClick={() => copyText(api.mcpUrl(id!))}>
-              Copy URL
+            Claude Code, Cursor and other MCP clients connect from their own panel.{' '}
+            <button
+              class="linkish"
+              onClick={() => {
+                shareOpen.value = false;
+                connectOpen.value = true;
+              }}
+            >
+              Open Connect AI
             </button>
           </div>
-          <div class="field">
-            <input placeholder="Client name" value={tokenLabel} onInput={(e) => setTokenLabel((e.target as HTMLInputElement).value)} />
-            <button class="tb" onClick={() => void createToken()} disabled={!tokenLabel.trim()}>
-              Create token
-            </button>
-          </div>
-          {madeToken && (
-            <>
-              <div class="link">
-                <span>{madeToken}</span>
-                <button class="tb" onClick={() => copyText(madeToken)}>
-                  Copy token
-                </button>
-              </div>
-              <div class="link">
-                <span style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{mcpAddCommand(id!, madeToken)}</span>
-                <button class="tb" onClick={() => copyText(mcpAddCommand(id!, madeToken))}>
-                  Copy command
-                </button>
-              </div>
-              <div class="link">
-                <span style={{ fontFamily: 'var(--mono)', fontSize: 11 }}>{runnerCommand(id!, madeToken)}</span>
-                <button class="tb" onClick={() => copyText(runnerCommand(id!, madeToken))}>
-                  Copy command
-                </button>
-              </div>
-              <div class="hint" style={{ paddingLeft: 0 }}>
-                This token is shown once. It works on every project you can open. The second command needs Ollama (or any
-                OpenAI-compatible endpoint) and a tool-capable model of about 7B or more; smaller ones tend to stop early.
-              </div>
-            </>
-          )}
-          {tokens.map((t) => (
-            <div class="link" key={t.id}>
-              <span>
-                {t.label} · {t.last_used_at ? `used ${new Date(t.last_used_at).toLocaleDateString()}` : 'never used'}
-              </span>
-              <button class="tb" onClick={() => void revokeToken(t)}>
-                Revoke
-              </button>
-            </div>
-          ))}
         </div>
       </div>
     </div>

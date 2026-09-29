@@ -39,7 +39,7 @@ export function AgentsDrawer() {
   const copy = (t: (typeof TASKS)[number]) => {
     const cmd = command(t);
     void navigator.clipboard?.writeText(cmd).then(
-      () => showToast('Command copied. Set GALLEY_TOKEN once from Share → AI clients, then paste it in a terminal.'),
+      () => showToast('Command copied. Set GALLEY_TOKEN once from Connect AI in the top bar, then paste it in a terminal.'),
       () => showToast(cmd),
     );
   };
