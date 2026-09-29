@@ -79,16 +79,20 @@ export async function build() {
 }
 
 /** Forward SyncTeX: scroll the PDF to the line under the cursor (or a given line). */
-export async function showInPdf(line?: number) {
+export async function showInPdf(line?: number, quiet = false) {
   const id = project.value?.id;
   const session = currentSession.value;
   const view = editorView.value;
   if (!id || !session) return;
+  // A click that follows the cursor must stay silent. Without a PDF, or on a line that produced no
+  // output, it would otherwise complain on every click.
+  if (quiet && !buildState.value.last?.pdf_available) return;
   const target = line ?? (view ? view.state.doc.lineAt(view.state.selection.main.head).number : 1);
   try {
     const loc = await api.synctexForward(id, session.path, target);
     syncTarget.value = { ...loc, nonce: Date.now() };
   } catch (e) {
+    if (quiet) return;
     showToast(e instanceof ApiError ? e.message : 'Nothing to show for that line.');
   }
 }

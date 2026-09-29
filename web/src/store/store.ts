@@ -60,6 +60,13 @@ export function setDisplayName(name: string) {
   writePref('galley.name', clean);
 }
 
+/** Plain click in the editor shows that line in the PDF. Ctrl+click always does, toggle or not. */
+export const followCursor = signal<boolean>(readPref('galley.follow') !== 'off');
+export function toggleFollow() {
+  followCursor.value = !followCursor.value;
+  writePref('galley.follow', followCursor.value ? 'on' : 'off');
+}
+
 export const previewVisible = signal<boolean>(readPref('galley.preview') !== 'off');
 export function togglePreview() {
   previewVisible.value = !previewVisible.value;

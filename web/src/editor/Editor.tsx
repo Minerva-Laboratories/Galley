@@ -17,21 +17,34 @@ import { stex } from '@codemirror/legacy-modes/mode/stex';
 import { yCollab, yUndoManagerKeymap } from 'y-codemirror.next';
 import * as Y from 'yjs';
 import type { DocSession } from '../sync/docs';
-import { build, canEdit, comments, editorView, pendingGoto, quietMode, suggestions, suggestMode } from '../store/store';
+import {
+  build,
+  canEdit,
+  comments,
+  editorView,
+  followCursor,
+  pendingGoto,
+  quietMode,
+  suggestions,
+  suggestMode,
+} from '../store/store';
 import { buildCollabDeco, collabField, setCollabDeco } from './collabExt';
 import { galleyHighlighting, galleyTheme } from './theme';
 import { globalKeymap, showInPdf } from './commands';
 import { autoLabels, expandSnippet } from './snippets';
 import { diagField, diagGutter, pushDiagnostics } from './diagGutter';
 
-/** Ctrl/Cmd+click on a line shows it in the PDF (forward SyncTeX). */
+/** A click on a line shows it in the PDF (forward SyncTeX). Ctrl or Cmd always does this, and a
+ * plain click does too while Follow is on, which mirrors clicking the PDF to reach the source. */
 const syncOnClick = EditorView.domEventHandlers({
   click(event, view) {
-    if (!(event.ctrlKey || event.metaKey)) return false;
+    const forced = event.ctrlKey || event.metaKey;
+    if (!forced && !followCursor.value) return false;
     const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
     if (pos === null) return false;
-    void showInPdf(view.state.doc.lineAt(pos).number);
-    return true;
+    void showInPdf(view.state.doc.lineAt(pos).number, !forced);
+    // A plain click still places the cursor. Only the forced gesture consumes the event.
+    return forced;
   },
 });
 

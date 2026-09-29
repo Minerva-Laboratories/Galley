@@ -11,10 +11,12 @@ import {
   invertPdf,
   pdfVersion,
   project,
+  followCursor,
   requestGoto,
   showToast,
   syncTarget,
   toggleDraft,
+  toggleFollow,
   toggleInvert,
 } from '../store/store';
 import { Icon } from './Icon';
@@ -94,7 +96,11 @@ export function Preview() {
     const pageEl = host.current.querySelector<HTMLElement>(`[data-page="${target.page}"]`);
     if (!pageEl) return;
     const top = target.y * scale;
-    host.current.scrollTo({ top: pageEl.offsetTop + top - host.current.clientHeight / 3, behavior: 'smooth' });
+    const absolute = pageEl.offsetTop + top;
+    const seen = absolute > host.current.scrollTop + 40 && absolute < host.current.scrollTop + host.current.clientHeight - 60;
+    if (!seen) {
+      host.current.scrollTo({ top: absolute - host.current.clientHeight / 3, behavior: 'smooth' });
+    }
     setHighlight({ page: target.page, top, height: Math.max(12, target.height * scale) });
     // The mark is the only sign that a forward jump landed, and the page often does not move
     // because the target was already on screen, so it stays long enough to be seen.
@@ -122,7 +128,7 @@ export function Preview() {
       const loc = await api.synctexInverse(id, page, x, y);
       const hit = requestGoto(loc.file, loc.line);
       if (hit) goToLine(hit.view, hit.line);
-      showToast(`Jumped to ${loc.file}:${loc.line}`);
+      showToast(`Jumped to ${loc.file}:${loc.line}. Click a line in the editor to come back here.`);
     } catch (err) {
       showToast(err instanceof ApiError ? err.message : 'No source location for that spot.');
     }
@@ -142,8 +148,20 @@ export function Preview() {
           Invert
         </button>
         <button
+          class={`tb ${followCursor.value ? 'on' : ''}`}
+          title={
+            followCursor.value
+              ? 'Following the cursor: click a line in the editor to find it here. Click the page to jump back to the source.'
+              : 'Not following the cursor. Ctrl+click a line in the editor to find it here.'
+          }
+          onClick={toggleFollow}
+          disabled={showEmpty}
+        >
+          Follow
+        </button>
+        <button
           class="tb"
-          title="Show the cursor line in the PDF. Ctrl+click a line in the editor does the same, and clicking the page jumps back to the source."
+          title="Show the cursor line in the PDF. Clicking the page jumps back to the source."
           onClick={() => void showInPdf()}
           disabled={showEmpty}
         >

@@ -488,7 +488,10 @@ Self-hosters get the complete feature set by design. That is a stated principle,
 
 ### 8.4 Preview behavior
 - The preview keeps the last good PDF when a build fails. The failed state is a red stripe over the build bar, and the pane never goes blank.
-- Clicking in the PDF jumps the editor to that place (SyncTeX). `Ctrl+click` in the editor jumps the PDF.
+- Clicking in the PDF jumps the editor to that place (SyncTeX). Clicking a line in the editor jumps
+  the PDF, while **Follow** is on in the preview bar, and `Ctrl+click` always does. The PDF scrolls
+  only when the target is off screen, and the mark stays about three seconds. Both directions are
+  named in the preview bar, because a gesture nobody can see is a feature nobody uses.
 - Zoom presets, page-fit, dark-invert mode, text search, download.
 
 ### 8.5 Keyboard (default keymap)
