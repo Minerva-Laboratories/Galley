@@ -28,6 +28,9 @@ engine = "tectonic"
 sandbox = "auto"
 timeout_s = 120
 memory_mb = 2048
+# Compiles that may run at once across the server. Keep this many times memory_mb within the
+# machine's memory, with room for Galley itself. The rest wait for a slot.
+max_concurrent = 2
 cpus = 1.0
 # Allow public mode with no sandbox. This is off by default, because an
 # unsandboxed compiler must not face the internet. Turn it on ONLY for a group

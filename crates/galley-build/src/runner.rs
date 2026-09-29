@@ -105,10 +105,20 @@ pub struct Builder {
     engine: RwLock<Option<Tectonic>>,
     data_dir: PathBuf,
     configured_path: Option<String>,
+    /// Compiles running at once across the whole server. One compile can take most of a small
+    /// machine's memory, so the rest wait for a slot instead of all starting and being killed.
+    slots: tokio::sync::Semaphore,
 }
 
 impl Builder {
-    pub fn new(sandbox: Sandbox, hints: Hints, timeout: Duration, data_dir: &Path, configured_path: Option<String>) -> Builder {
+    pub fn new(
+        sandbox: Sandbox,
+        hints: Hints,
+        timeout: Duration,
+        data_dir: &Path,
+        configured_path: Option<String>,
+        max_concurrent: usize,
+    ) -> Builder {
         let engine = Tectonic::locate(data_dir, configured_path.as_deref());
         Builder {
             sandbox,
@@ -117,6 +127,7 @@ impl Builder {
             engine: RwLock::new(engine),
             data_dir: data_dir.to_path_buf(),
             configured_path,
+            slots: tokio::sync::Semaphore::new(max_concurrent.max(1)),
         }
     }
 
@@ -154,6 +165,14 @@ impl Builder {
         req: &BuildRequest,
         progress: &(dyn Fn(String) + Send + Sync),
     ) -> BuildResult {
+        // Wait for a slot before timing starts, so the profile shows compile time and not queue time.
+        let _slot = match self.slots.try_acquire() {
+            Ok(permit) => Some(permit),
+            Err(_) => {
+                progress("Waiting for another build to finish…".into());
+                self.slots.acquire().await.ok()
+            }
+        };
         let started = Instant::now();
         let out_dir = project_dir.join(".galley").join("build");
         let mut result = BuildResult {

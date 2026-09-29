@@ -79,6 +79,9 @@ pub struct BuildConfig {
     /// only for a deployment whose users you trust, such as a private test group. Understand the
     /// risk before you set it.
     pub allow_unsandboxed: bool,
+    /// Compiles that may run at once across the whole server. Set it so that this many times
+    /// `memory_mb` fits in the machine's memory with room for the server itself.
+    pub max_concurrent: usize,
 }
 
 impl Default for BuildConfig {
@@ -94,6 +97,7 @@ impl Default for BuildConfig {
             sandbox: "auto".into(),
             docker_image: "debian:bookworm-slim".into(),
             allow_unsandboxed: false,
+            max_concurrent: 2,
         }
     }
 }

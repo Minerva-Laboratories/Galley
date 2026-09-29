@@ -99,6 +99,7 @@ impl AppState {
             Duration::from_secs(b.timeout_s),
             data_dir,
             Some(b.tectonic_path.clone()).filter(|s| !s.is_empty()),
+            b.max_concurrent,
         ));
         match builder.engine_path().await {
             Some(p) => tracing::info!(path = %p.display(), "tectonic found"),

@@ -24,7 +24,7 @@ fn builder(data_dir: &std::path::Path, bin: &std::path::Path, cache: &std::path:
         cpus: 2.0,
         systemd_scope: false,
     };
-    Arc::new(Builder::new(sandbox, Hints::bundled().unwrap(), Duration::from_secs(120), data_dir, Some(bin.to_string_lossy().into_owned())))
+    Arc::new(Builder::new(sandbox, Hints::bundled().unwrap(), Duration::from_secs(120), data_dir, Some(bin.to_string_lossy().into_owned()), 2))
 }
 
 #[tokio::test]
