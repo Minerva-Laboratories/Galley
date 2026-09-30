@@ -808,14 +808,28 @@ a {
   gap: 12px;
 }
 .pcard {
-  display: block;
+  display: flex;
+  align-items: center;
   text-align: left;
   background: var(--bg-panel);
   border: 1px solid var(--line);
   border-radius: 10px;
-  padding: 14px 16px;
   min-height: 96px;
   width: 100%;
+  min-width: 0;
+}
+.pcard-open {
+  flex: 1;
+  min-width: 0;
+  min-height: 96px;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  padding: 14px 16px;
+  border-radius: 10px;
+}
+.pcard-rename {
+  margin-right: 12px;
 }
 .pcard:hover {
   border-color: var(--line-strong);
@@ -1198,6 +1212,22 @@ a {
 .modal .mb {
   padding: 0 18px 16px;
   overflow: auto;
+}
+.rename-project {
+  padding: 0;
+  color: var(--text);
+}
+.rename-project:not([open]) {
+  display: none;
+}
+.rename-project::backdrop {
+  background: rgba(27, 26, 23, 0.35);
+}
+.rename-project-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
 }
 .field {
   display: flex;

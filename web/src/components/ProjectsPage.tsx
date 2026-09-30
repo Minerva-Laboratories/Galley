@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
-import { api, ApiError, type ImportReport, type ProjectMeta, type Template } from '../api';
+import { api, ApiError, type ImportReport, type ProjectView, type Template } from '../api';
 import { ago } from '../util/time';
 import { logout } from '../store/auth';
 import { currentUser, navigate, showToast, theme, toggleTheme } from '../store/store';
 import { Icon } from './Icon';
+import { RenameProject } from './RenameProject';
 
 export function ProjectsPage() {
-  const [projects, setProjects] = useState<ProjectMeta[] | null>(null);
+  const [projects, setProjects] = useState<ProjectView[] | null>(null);
+  const [renaming, setRenaming] = useState<ProjectView | null>(null);
   const [templates, setTemplates] = useState<Template[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -257,12 +259,19 @@ export function ProjectsPage() {
         {shown.length > 0 && (
           <div class="grid">
             {shown.map((p) => (
-              <button key={p.id} class="pcard" onClick={() => navigate(`/p/${p.id}`)}>
-                <div class="t">{p.name}</div>
-                <div class="d">
-                  <span class="dot" /> edited {ago(p.updated_at)}
-                </div>
-              </button>
+              <div key={p.id} class="pcard">
+                <button class="pcard-open" onClick={() => navigate(`/p/${p.id}`)}>
+                  <div class="t">{p.name}</div>
+                  <div class="d">
+                    <span class="dot" /> edited {ago(p.updated_at)}
+                  </div>
+                </button>
+                {p.role === 'admin' && (
+                  <button class="tb pcard-rename" aria-label={`Rename ${p.name}`} onClick={() => setRenaming(p)}>
+                    <Icon name="edit" size={14} /> Rename
+                  </button>
+                )}
+              </div>
             ))}
           </div>
         )}
@@ -270,6 +279,15 @@ export function ProjectsPage() {
           <div class="empty">No project matches “{query}”.</div>
         )}
       </div>
+      {renaming && (
+        <RenameProject
+          project={renaming}
+          onClose={() => setRenaming(null)}
+          onRenamed={(updated) => setProjects((prev) =>
+            (prev ?? []).map((p) => p.id === updated.id ? updated : p).sort((a, b) => b.updated_at.localeCompare(a.updated_at)),
+          )}
+        />
+      )}
     </div>
   );
 }

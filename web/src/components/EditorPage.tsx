@@ -59,6 +59,10 @@ const AUTO_BUILD_DELAY_MS = 1500;
 export function EditorPage({ id }: { id: string }) {
   const [error, setError] = useState<string | null>(null);
 
+  useEffect(() => {
+    if (project.value?.id === id) document.title = `${project.value.name} — Galley`;
+  }, [id, project.value?.name]);
+
   // Load the project, its files, history, and last build, then subscribe to events.
   // Tasks follow the project and its file list through signals. One watcher per mounted page.
   useEffect(() => watchTasks(), []);
@@ -99,6 +103,11 @@ export function EditorPage({ id }: { id: string }) {
     })();
     const unsubscribe = subscribeEvents(id, (ev) => {
       switch (ev.type) {
+        case 'project_renamed':
+          if (project.value?.id === id) {
+            project.value = { ...project.value, name: ev.name, updated_at: ev.updated_at };
+          }
+          break;
         case 'commit': {
           const commit = { sha: ev.sha, short_sha: ev.short_sha, message: ev.message, author: ev.author, time: ev.time };
           commits.value = [commit, ...commits.value.filter((c) => c.sha !== commit.sha)];

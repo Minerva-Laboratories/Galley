@@ -24,9 +24,11 @@ import {
   tourOpen,
 } from '../store/store';
 import { Icon } from './Icon';
+import { RenameProject } from './RenameProject';
 
 export function TopBar() {
   const [editing, setEditing] = useState(displayName.value === '');
+  const [renaming, setRenaming] = useState(false);
   const me = displayName.value || 'Anonymous';
   const others = peers.value;
   const online = others.length + 1;
@@ -39,6 +41,11 @@ export function TopBar() {
       <button class="proj" title="Switch project" onClick={() => navigate('/')}>
         {project.value?.name ?? '…'} <Icon name="chevron" size={12} />
       </button>
+      {isAdmin.value && project.value && (
+        <button class="tb icon" title="Rename project" aria-label="Rename project" onClick={() => setRenaming(true)}>
+          <Icon name="edit" size={14} />
+        </button>
+      )}
       <button class="tb search" onClick={() => (paletteOpen.value = true)}>
         <Icon name="search" size={14} />
         <span>Search files, commands, sections</span>
@@ -94,6 +101,17 @@ export function TopBar() {
         <Icon name="theme" size={16} />
       </button>
       <UserMenu />
+      {renaming && project.value && (
+        <RenameProject
+          project={project.value}
+          onClose={() => setRenaming(false)}
+          onRenamed={(updated) => {
+            if (project.value?.id === updated.id) {
+              project.value = { ...project.value, name: updated.name, updated_at: updated.updated_at };
+            }
+          }}
+        />
+      )}
     </header>
   );
 }

@@ -433,6 +433,10 @@ Self-hosters get the complete feature set by design. That is a stated principle,
 ### 8.2 Screens
 1. **Sign in**: email and password, or "Continue with <OIDC provider>", or a share-link landing that asks only for a display name.
 2. **Projects**: a card grid with title, last edited, collaborators' avatars and a build status dot. Buttons: *New project* (blank, template, import zip or clone git). Search. Archive.
+   Project admins can rename a project from its card or the button beside its title in the editor.
+   Both open the same dialog with the current name selected. Names are trimmed, nonempty and limited
+   to 120 Unicode characters. Renaming changes the display name while preserving the project ID,
+   URLs, files, history, memberships and share links. Open editors receive the new name immediately.
    *Import zip* configures the project by itself. It strips a wrapping folder, drops build output
    (`.aux`, `.log`, a stale `main.pdf` beside `main.tex`) and system files (`__MACOSX`, `.DS_Store`),
    converts Latin-1 text to UTF-8, and picks the main file: the one `.tex` with `\documentclass`
@@ -785,4 +789,3 @@ How it works, as built (M6):
 - Galley suggests archiving after 60 days without edits. It never archives a project on its own.
 - Archived projects are excluded from build budgets and agent runs.
 - Audit log records archive/unarchive with actor and timestamp.
-

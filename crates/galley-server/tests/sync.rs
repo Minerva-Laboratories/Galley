@@ -117,6 +117,56 @@ async fn signup(state: &AppState, email: &str, name: &str) -> Auth {
     auth
 }
 
+#[tokio::test]
+async fn project_rename_preserves_identity_and_notifies_open_editors() {
+    let server = start().await;
+    let admin = signup(&server.state, "admin@uni.edu", "Admin").await;
+    let editor = signup(&server.state, "editor@uni.edu", "Editor").await;
+    let outsider = signup(&server.state, "outsider@uni.edu", "Outsider").await;
+    let (status, created, admin) = rest(&server.state, &admin, "POST", "/api/projects", Some(json!({"name":"Original"}))).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let id = created["id"].as_str().unwrap();
+    let created_at = created["created_at"].clone();
+    let (status, _, admin) = rest(&server.state, &admin, "POST", &format!("/api/projects/{id}/members"), Some(json!({"email":"editor@uni.edu","role":"editor"}))).await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let path = format!("/api/projects/{id}");
+    for (auth, expected) in [(&editor, StatusCode::FORBIDDEN), (&outsider, StatusCode::NOT_FOUND)] {
+        let (status, _, _) = rest(&server.state, auth, "PATCH", &path, Some(json!({"name":"Denied"}))).await;
+        assert_eq!(status, expected);
+    }
+    for name in ["   ".to_string(), "a".repeat(121)] {
+        let (status, _, _) = rest(&server.state, &admin, "PATCH", &path, Some(json!({"name":name}))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+    let (status, boundary, _) = rest(&server.state, &admin, "PATCH", &path, Some(json!({"name":"界".repeat(120)}))).await;
+    assert_eq!(status, StatusCode::OK, "{boundary}");
+
+    // The event socket subscribes to this project channel for every open editor.
+    let mut events = server.state.collab_channel(id).await.subscribe();
+    let (status, renamed, _) = rest(&server.state, &admin, "PATCH", &path, Some(json!({"name":"  研究計画 📝  "}))).await;
+    assert_eq!(status, StatusCode::OK, "{renamed}");
+    assert_eq!(renamed["id"], id);
+    assert_eq!(renamed["name"], "研究計画 📝");
+    assert_eq!(renamed["created_at"], created_at);
+    assert_eq!(renamed["role"], "admin");
+
+    let frame = tokio::time::timeout(Duration::from_secs(5), events.recv()).await.unwrap().unwrap();
+    let event: Value = serde_json::from_str(&frame).unwrap();
+    assert_eq!(event["type"], "project_renamed");
+    assert_eq!(event["name"], renamed["name"]);
+    assert_eq!(event["updated_at"], renamed["updated_at"]);
+
+    server.state.registry.touch(id);
+    let (status, persisted, _) = rest(&server.state, &editor, "GET", &path, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(persisted["id"], id);
+    assert_eq!(persisted["name"], "研究計画 📝");
+    let (status, files, _) = rest(&server.state, &editor, "GET", &format!("{path}/files"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(files.as_array().unwrap().iter().any(|f| f["path"] == "main.tex"));
+}
+
 /// A y-protocol client over a real WebSocket, authenticated by cookie.
 struct Client {
     doc: Doc,

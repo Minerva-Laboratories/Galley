@@ -27,6 +27,8 @@ export interface ProjectMeta {
   figure_cache?: boolean;
 }
 
+export type ProjectView = ProjectMeta & { role: Role2 };
+
 /** How the build used the persistent figure cache (SPEC §13.1). */
 export interface FigureStats {
   mode: 'cached' | 'plain' | 'off';
@@ -262,6 +264,7 @@ export interface SourceLocation {
 
 export type ProjectEvent =
   | { type: 'commit'; sha: string; short_sha: string; message: string; author: string; time: string }
+  | { type: 'project_renamed'; name: string; updated_at: string }
   | { type: 'file_created'; path: string }
   | { type: 'file_deleted'; path: string }
   | { type: 'file_renamed'; from: string; to: string }
@@ -474,7 +477,7 @@ export const api = {
       body: JSON.stringify({ status }),
     }),
 
-  listProjects: () => request<(ProjectMeta & { role: Role2 })[]>('/api/projects'),
+  listProjects: () => request<ProjectView[]>('/api/projects'),
   listTemplates: () => request<Template[]>('/api/templates'),
   checkGrammar: (id: string, path: string) =>
     request<Diagnostic[]>(`/api/projects/${encodeURIComponent(id)}/grammar`, { method: 'POST', body: JSON.stringify({ path }) }),
@@ -487,6 +490,11 @@ export const api = {
   createProject: (name: string, template?: string) =>
     request<ProjectMeta>('/api/projects', { method: 'POST', body: JSON.stringify({ name, template }) }),
   getProject: (id: string) => request<ProjectMeta & { role: Role2 }>(`/api/projects/${encodeURIComponent(id)}`),
+  renameProject: (id: string, name: string) =>
+    request<ProjectView>(`/api/projects/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ name }),
+    }),
   updateSettings: (id: string, patch: SettingsPatch) =>
     request<ProjectMeta & { role: Role2 }>(`/api/projects/${encodeURIComponent(id)}/settings`, {
       method: 'PATCH',

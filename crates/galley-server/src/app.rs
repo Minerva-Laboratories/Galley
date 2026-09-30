@@ -52,6 +52,7 @@ impl FromRef<AppState> for Store {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CollabEvent {
+    ProjectRenamed { name: String, updated_at: chrono::DateTime<chrono::Utc> },
     CommentAdded { comment: crate::store::Comment },
     CommentResolved { id: String, resolved: bool },
     SuggestionAdded { suggestion: crate::store::Suggestion },
@@ -280,7 +281,7 @@ pub fn router(state: AppState) -> Router {
             "/api/projects/import",
             post(routes::import_project).layer(axum::extract::DefaultBodyLimit::max(crate::import::MAX_ZIP)),
         )
-        .route("/api/projects/{id}", get(routes::get_project))
+        .route("/api/projects/{id}", get(routes::get_project).patch(routes::rename_project))
         .route("/api/projects/{id}/settings", axum::routing::patch(routes::update_settings))
         .route("/api/venues", get(pack_routes::list_venues))
         .route("/api/templates", get(routes::list_templates))

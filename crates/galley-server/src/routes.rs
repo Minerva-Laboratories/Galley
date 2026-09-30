@@ -4,7 +4,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::app::{AppError, AppState};
+use crate::app::{AppError, AppState, CollabEvent};
 use crate::auth::current::CurrentUser;
 use crate::auth::Role;
 use crate::registry::ProjectMeta;
@@ -168,6 +168,32 @@ pub async fn get_project(
 ) -> Result<Json<ProjectView>, AppError> {
     let role = app.require(&user, &id, Role::can_view, "opening this project").await?;
     Ok(Json(ProjectView { meta: app.registry.meta(&id)?, role }))
+}
+
+#[derive(Deserialize)]
+pub struct RenameProject {
+    name: String,
+}
+
+/// Change the display name while preserving the project ID and everything keyed by it.
+pub async fn rename_project(
+    State(app): State<AppState>,
+    Path(id): Path<String>,
+    CurrentUser(user): CurrentUser,
+    Json(body): Json<RenameProject>,
+) -> Result<Json<ProjectView>, AppError> {
+    let role = app.require(&user, &id, Role::is_admin, "renaming this project").await?;
+    let name = body.name.trim();
+    if name.is_empty() {
+        return Err(AppError::BadRequest("Enter a project name.".into()));
+    }
+    if name.chars().count() > 120 {
+        return Err(AppError::BadRequest("Project names are limited to 120 characters.".into()));
+    }
+    let meta = app.registry.update_meta(&id, |m| m.name = name.to_string())?;
+    app.store.audit(Some(&id), Some(&user), "project.rename", Some(&meta.name));
+    app.emit(&id, CollabEvent::ProjectRenamed { name: meta.name.clone(), updated_at: meta.updated_at }).await;
+    Ok(Json(ProjectView { meta, role }))
 }
 
 #[derive(Deserialize, Default)]

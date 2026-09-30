@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
 use galley_sync::{ProjectSync, SyncConfig};
@@ -62,6 +62,7 @@ pub struct Registry {
     root: PathBuf,
     sync_config: SyncConfig,
     open: RwLock<HashMap<String, Arc<ProjectSync>>>,
+    metadata_lock: Mutex<()>,
 }
 
 impl Registry {
@@ -72,6 +73,7 @@ impl Registry {
             root,
             sync_config,
             open: RwLock::new(HashMap::new()),
+            metadata_lock: Mutex::new(()),
         })
     }
 
@@ -228,6 +230,7 @@ impl Registry {
 
     /// Read-modify-write the project's metadata file.
     pub fn update_meta(&self, id: &str, f: impl FnOnce(&mut ProjectMeta)) -> Result<ProjectMeta, RegistryError> {
+        let _guard = self.metadata_lock.lock().unwrap_or_else(|e| e.into_inner());
         let dir = self.dir_for(id)?;
         let mut meta = read_meta(&dir)?;
         f(&mut meta);
@@ -237,6 +240,7 @@ impl Registry {
     }
 
     pub fn touch(&self, id: &str) {
+        let _guard = self.metadata_lock.lock().unwrap_or_else(|e| e.into_inner());
         if let Ok(dir) = self.dir_for(id) {
             if let Ok(mut meta) = read_meta(&dir) {
                 meta.updated_at = Utc::now();
@@ -269,7 +273,10 @@ fn read_meta(dir: &Path) -> Result<ProjectMeta, RegistryError> {
 fn write_meta(dir: &Path, meta: &ProjectMeta) -> Result<(), RegistryError> {
     let text = toml::to_string(meta).expect("metadata serialises");
     std::fs::create_dir_all(dir.join(".galley"))?;
-    std::fs::write(dir.join(".galley/project.toml"), text)?;
+    // Readers always see a complete file, even during a rename or a history touch.
+    let temporary = dir.join(".galley/project.toml.tmp");
+    std::fs::write(&temporary, text)?;
+    std::fs::rename(temporary, dir.join(".galley/project.toml"))?;
     Ok(())
 }
 
