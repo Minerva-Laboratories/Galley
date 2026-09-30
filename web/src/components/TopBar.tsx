@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { logout, messageOf, renameMe } from '../store/auth';
-import { daysLeft, setDeadline } from '../store/settings';
+import { daysLeft, saveSettings, setDeadline } from '../store/settings';
 import { colorFor, initials } from '../sync/colors';
 import { setUserName } from '../sync/docs';
 import {
@@ -23,6 +23,7 @@ import {
   toggleTheme,
   tourOpen,
 } from '../store/store';
+import { EditableName } from './EditableName';
 import { Icon } from './Icon';
 
 export function TopBar() {
@@ -36,9 +37,23 @@ export function TopBar() {
       <a class="wordmark" href="/" aria-label="Galley" onClick={(e) => (e.preventDefault(), navigate('/'))}>
         galley<span class="caret">^</span>
       </a>
-      <button class="proj" title="Switch project" onClick={() => navigate('/')}>
-        {project.value?.name ?? '…'} <Icon name="chevron" size={12} />
-      </button>
+      <span class="proj">
+        <EditableName
+          value={project.value?.name ?? '…'}
+          canEdit={canEdit.value && !!project.value}
+          onSave={async (name) => {
+            const ok = await saveSettings({ name });
+            if (ok) {
+              document.title = `${name} — Galley`;
+              showToast(`Renamed to ${name}.`);
+            }
+            return ok;
+          }}
+        />
+        <button class="tb icon proj-switch" title="Switch project" aria-label="Switch project" onClick={() => navigate('/')}>
+          <Icon name="chevron" size={12} />
+        </button>
+      </span>
       <button class="tb search" onClick={() => (paletteOpen.value = true)}>
         <Icon name="search" size={14} />
         <span>Search files, commands, sections</span>

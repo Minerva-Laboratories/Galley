@@ -1,7 +1,7 @@
 import { useEffect } from 'preact/hooks';
 import { build as runBuild } from '../editor/commands';
 import { wordCount as countWords } from '../editor/latex';
-import { autoBuild, build, canCompile, canEdit, currentSession, project, setAutoBuild, toggleProblems, wordCount } from '../store/store';
+import { autoBuild, build, canCompile, canEdit, currentSession, narrowPane, project, setAutoBuild, toggleProblems, wordCount } from '../store/store';
 
 function plural(n: number, word: string): string {
   return `${n} ${word}${n === 1 ? '' : 's'}`;
@@ -11,12 +11,13 @@ export function statusText(state: typeof build.value): string {
   if (state.phase === 'running') return state.progress ?? 'Building…';
   const last = state.last;
   if (!last) return 'Not built yet';
-  const secs = (last.profile.total_ms / 1000).toFixed(1);
+  // A result loaded from disk after a restart has no timing, and "0.0 s" would be wrong.
+  const secs = last.profile.total_ms > 0 ? ` ${(last.profile.total_ms / 1000).toFixed(1)} s` : '';
   const lints = last.errors.filter((d) => d.level === 'lint').length;
   const lint = lints ? ` · ${lints} lint` : '';
   if (last.status === 'ok') {
     const w = last.warning_count ? plural(last.warning_count, 'warning') : 'no warnings';
-    return `Compiled ${secs} s · ${w}${lint}${last.stale ? ' · out of date' : ''}`;
+    return `Compiled${secs} · ${w}${lint}${last.stale ? ' · out of date' : ''}`;
   }
   if (last.status === 'timeout') return 'Build timed out';
   if (last.status === 'error') return 'Build could not run';
@@ -63,6 +64,14 @@ export function BuildBar() {
         </span>
       )}
       <div class="r">
+        <span class="pane-switch narrow-only" role="group" aria-label="Show source or PDF">
+          <button class={`tb ${narrowPane.value === 'source' ? 'on' : ''}`} aria-pressed={narrowPane.value === 'source'} onClick={() => (narrowPane.value = 'source')}>
+            Source
+          </button>
+          <button class={`tb ${narrowPane.value === 'pdf' ? 'on' : ''}`} aria-pressed={narrowPane.value === 'pdf'} onClick={() => (narrowPane.value = 'pdf')}>
+            PDF
+          </button>
+        </span>
         {!canEdit.value && <span class="pill wait" title="Your role is read-only">Read-only</span>}
         <span class="eng" title="Building the file you're viewing">Tectonic · {currentSession.value?.path ?? project.value?.main_file ?? 'main.tex'}</span>
         {canEdit.value && (

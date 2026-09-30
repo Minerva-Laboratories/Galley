@@ -68,7 +68,18 @@ export function toggleFollow() {
 }
 
 export const previewVisible = signal<boolean>(readPref('galley.preview') !== 'off');
+/** Below 1100 px the editor and the PDF share one pane. This says which of the two is showing. */
+export const narrowPane = signal<'source' | 'pdf'>('source');
+export function isNarrow(): boolean {
+  return typeof window !== 'undefined' && window.matchMedia('(max-width: 1100px)').matches;
+}
+
 export function togglePreview() {
+  // On a narrow screen there is no room for both, so the same command swaps them instead.
+  if (isNarrow()) {
+    narrowPane.value = narrowPane.value === 'pdf' ? 'source' : 'pdf';
+    return;
+  }
   previewVisible.value = !previewVisible.value;
   writePref('galley.preview', previewVisible.value ? 'on' : 'off');
 }

@@ -21,6 +21,12 @@ export function ConnectAiModal() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && (connectOpen.value = false);
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  useEffect(() => {
     api
       .tokens()
       .then(setTokens)

@@ -142,6 +142,7 @@ export interface SettingsPatch {
   figure_cache?: boolean;
   main_file?: string;
   literature?: boolean;
+  name?: string;
 }
 
 export interface FileEntry {

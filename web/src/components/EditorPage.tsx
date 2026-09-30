@@ -28,6 +28,7 @@ import {
   paletteOpen,
   pdfVersion,
   peers,
+  narrowPane,
   previewVisible,
   problemsOpen,
   project,
@@ -244,7 +245,7 @@ export function EditorPage({ id }: { id: string }) {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
-  const mainClass = `main ${previewVisible.value ? '' : 'no-preview'}`;
+  const mainClass = `main ${previewVisible.value ? '' : 'no-preview'} ${previewVisible.value && narrowPane.value === 'pdf' ? 'show-preview' : ''}`;
 
   if (error) {
     return (

@@ -61,6 +61,12 @@ export function ShareModal() {
     void refresh();
   }, [id, nonce]);
 
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && (shareOpen.value = false);
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
   const close = () => (shareOpen.value = false);
 
   const adminCount = members.filter((m) => m.role === 'admin' && !m.is_guest).length;

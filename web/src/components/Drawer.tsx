@@ -35,7 +35,10 @@ import { TasksDrawer } from './TasksDrawer';
 
 export function Drawer() {
   const which = drawer.value;
-  if (!which) return null;
+  // The main grid has a fixed column for the drawer. Removing the element would shift the editor,
+  // the divider and the preview one column left and squeeze the PDF into the 6 px divider slot, so a
+  // closed drawer keeps an empty, zero-width placeholder in its column.
+  if (!which) return <aside class="drawer closed" aria-hidden="true" />;
   return (
     <aside class="drawer" aria-label={TITLES[which]}>
       {which === 'files' && <FilesDrawer />}

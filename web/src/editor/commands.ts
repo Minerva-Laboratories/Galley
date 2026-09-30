@@ -8,6 +8,7 @@ import { clearFigureCache, setDeadline, toggleFigureCache } from '../store/setti
 import {
   build as buildState,
   connectOpen,
+  narrowPane,
   tourOpen,
   currentSession,
   draftMode,
@@ -95,6 +96,9 @@ export async function showInPdf(line?: number, quiet = false) {
   try {
     const loc = await api.synctexForward(id, session.path, target);
     syncTarget.value = { ...loc, nonce: Date.now() };
+    // On a narrow screen an explicit jump has to bring the PDF into view. A click that only follows
+    // the cursor must not, or every click in the editor would swap the pane away from the text.
+    if (!quiet) narrowPane.value = 'pdf';
   } catch (e) {
     if (quiet) return;
     showToast(e instanceof ApiError ? e.message : 'Nothing to show for that line.');

@@ -183,6 +183,8 @@ pub struct SettingsPatch {
     literature: Option<bool>,
     /// A .tex file in the project that builds should compile.
     main_file: Option<String>,
+    /// The display name. The project's id, and so its links, stay the same.
+    name: Option<String>,
 }
 
 /// PATCH /api/projects/{id}/settings. It sets the deadline, venue, word budgets and lint toggles
@@ -218,10 +220,20 @@ pub async fn update_settings(
             }
         }
     };
+    let name = match body.name.as_deref().map(str::trim) {
+        None => None,
+        Some("") => return Err(AppError::BadRequest("A project needs a name.".into())),
+        Some(n) if n.chars().count() > 120 => return Err(AppError::BadRequest("Project names are limited to 120 characters.".into())),
+        Some(n) => Some(n.to_string()),
+    };
     if let (Some(m), Ok(builds)) = (&main_file, app.builds(&id).await) {
         builds.set_main_file(m).await;
     }
+    let renamed = name.clone();
     let meta = app.registry.update_meta(&id, |m| {
+        if let Some(n) = name {
+            m.name = n;
+        }
         if let Some(f) = main_file {
             m.main_file = f;
         }
@@ -244,7 +256,10 @@ pub async fn update_settings(
             m.literature = l;
         }
     })?;
-    app.store.audit(Some(&id), Some(&user), "project.settings", None);
+    match renamed {
+        Some(n) => app.store.audit(Some(&id), Some(&user), "project.rename", Some(&n)),
+        None => app.store.audit(Some(&id), Some(&user), "project.settings", None),
+    }
     Ok(Json(ProjectView { meta, role }))
 }
 

@@ -9,6 +9,7 @@ import {
   build,
   draftMode,
   invertPdf,
+  narrowPane,
   pdfVersion,
   project,
   followCursor,
@@ -126,6 +127,7 @@ export function Preview() {
     const y = (e.clientY - rect.top) / scale;
     try {
       const loc = await api.synctexInverse(id, page, x, y);
+      narrowPane.value = 'source';
       const hit = requestGoto(loc.file, loc.line);
       if (hit) goToLine(hit.view, hit.line);
       showToast(`Jumped to ${loc.file}:${loc.line}. Click a line in the editor to come back here.`);

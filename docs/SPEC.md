@@ -433,6 +433,9 @@ Self-hosters get the complete feature set by design. That is a stated principle,
 ### 8.2 Screens
 1. **Sign in**: email and password, or "Continue with <OIDC provider>", or a share-link landing that asks only for a display name.
 2. **Projects**: a card grid with title, last edited, collaborators' avatars and a build status dot. Buttons: *New project* (blank, template, import zip or clone git). Search. Archive.
+   A project's name renames in place wherever it appears: click it in the top bar or on its card,
+   type, press Enter; Escape cancels. The id and its links stay the same. Editors and admins can
+   rename; for others the name is plain text. The chevron beside the top-bar name switches project.
    *Import zip* configures the project by itself. It strips a wrapping folder, drops build output
    (`.aux`, `.log`, a stale `main.pdf` beside `main.tex`) and system files (`__MACOSX`, `.DS_Store`),
    converts Latin-1 text to UTF-8, and picks the main file: the one `.tex` with `\documentclass`
@@ -444,6 +447,9 @@ Self-hosters get the complete feature set by design. That is a stated principle,
 3. **Editor**: see above.
 4. **History** (drawer and full-screen mode): a vertical timeline of checkpoints with auto-commits collapsed, a scrubber, a file diff, *Compare PDFs*, *Restore*, *Create checkpoint* and *Push to remote*.
 5. **Share** (modal): a members list with roles, a link generator (role, expiry, label), a copy button and an "Anyone with link" toggle.
+   Below 1100 px the editor and the PDF share one pane, and a Source / PDF switch in the build bar
+   picks which one shows. Ctrl+Shift+P swaps them. Clicking the PDF shows the source; the Sync button
+   shows the PDF; a click that only follows the cursor leaves the pane alone.
 6. **Connect AI** (top bar, primary button, every signed-in author): a numbered panel that creates a
    device token, shows the `claude mcp add` command and the MCP address, offers the local runner
    command, and lists the person's tokens with Revoke. It left the Share modal because connecting an

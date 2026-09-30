@@ -3,10 +3,11 @@ import { api, ApiError, type ImportReport, type ProjectMeta, type Template } fro
 import { ago } from '../util/time';
 import { logout } from '../store/auth';
 import { currentUser, navigate, showToast, theme, toggleTheme } from '../store/store';
+import { EditableName } from './EditableName';
 import { Icon } from './Icon';
 
 export function ProjectsPage() {
-  const [projects, setProjects] = useState<ProjectMeta[] | null>(null);
+  const [projects, setProjects] = useState<(ProjectMeta & { role?: string })[] | null>(null);
   const [templates, setTemplates] = useState<Template[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -257,12 +258,34 @@ export function ProjectsPage() {
         {shown.length > 0 && (
           <div class="grid">
             {shown.map((p) => (
-              <button key={p.id} class="pcard" onClick={() => navigate(`/p/${p.id}`)}>
-                <div class="t">{p.name}</div>
+              <div
+                key={p.id}
+                class="pcard"
+                role="link"
+                tabIndex={0}
+                onClick={() => navigate(`/p/${p.id}`)}
+                onKeyDown={(e) => e.key === 'Enter' && e.target === e.currentTarget && navigate(`/p/${p.id}`)}
+              >
+                <div class="t">
+                  <EditableName
+                    value={p.name}
+                    canEdit={p.role === 'admin' || p.role === 'editor'}
+                    onSave={async (name) => {
+                      try {
+                        const meta = await api.updateSettings(p.id, { name });
+                        setProjects((prev) => (prev ?? []).map((x) => (x.id === p.id ? { ...x, name: meta.name } : x)));
+                        return true;
+                      } catch (e) {
+                        setError(e instanceof ApiError ? e.message : 'Could not rename the project.');
+                        return false;
+                      }
+                    }}
+                  />
+                </div>
                 <div class="d">
                   <span class="dot" /> edited {ago(p.updated_at)}
                 </div>
-              </button>
+              </div>
             ))}
           </div>
         )}
