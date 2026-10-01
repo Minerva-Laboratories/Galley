@@ -176,9 +176,43 @@ edit → flusher commit → build request → queue (per-project, latest-wins) �
 - **Draft mode**: passes the `draft` class option and replaces figures with boxes, for 3–5× faster iteration. Toggle it in the build bar.
 - **Timeout**: 120 s by default (config), memory 2 GB, no network. Tectonic package fetches go through the host-side cache, not from inside the sandbox.
 
+### 6.1.1 Compiler selection and requests
+
+`EngineKind` is `tectonic`, `pdflatex`, `xelatex`, `lualatex` or `latex`. Tectonic is the default
+for existing projects without metadata. `[build].engine` initializes new projects; the configuration
+alias `texlive` means `pdflatex`. Each request snapshots the chosen engine and receives its ID when
+enqueued. Replacing a pending request emits `build_superseded` for that ID; MCP waits for its own
+request's completion or cancellation.
+
+TeX Live uses controlled `latexmk` commands: `-pdf`, `-xelatex`, `-lualatex` and `-pdfps` respectively.
+The last route is LaTeX → DVI → PS → PDF. Commands use non-interactive compilation, file/line errors,
+SyncTeX, disabled shell escape and `-norc`. All passes, bibliography tools and converters stay inside
+the same sandbox, without network; timeout terminates descendants too. Engine work directories are
+separate. A successful build publishes its PDF and SyncTeX together; failure retains the prior pair.
+Results persist the requested engine/version and the visible PDF's producer/version for restart.
+
+- `GET /api/projects/{id}/engines`: readers see `{selected, engines}` with availability, version and
+  missing-tool reason for each compiler.
+- `PATCH /api/projects/{id}/settings` accepts `engine`, requires editing permission, validates the
+  choice, records the change and broadcasts `engine_changed`. It affects the next request.
+- `POST /api/projects/{id}/build` accepts optional `engine`; its response includes the queued ID.
+  An override is temporary, updates the preview on success and preserves the saved choice.
+- The Compiler selector disables unavailable choices and explains why. Readers see the saved choice.
+  The preview identifies the engine that produced its PDF separately from the next-build selection.
+
+Drafts, `latexdiff` PDF comparisons and submission verification use the saved compiler. Submission
+metadata records it. Figure cache keys include engine/version for Tectonic, pdfLaTeX, XeLaTeX and
+LuaLaTeX. LaTeX/DVI accepts EPS/PS and compiles TikZ normally, but disables the PDF figure cache and
+automatic SVG conversion with a visible explanation. No engine is detected or substituted after a
+failure. TeX Live and document packages are installed by administrators, never by Galley.
+
 ### 6.2 Sandbox
 `bwrap --ro-bind /usr /usr --ro-bind $TECTONIC_CACHE /cache --bind $PROJECT /work --unshare-all --die-with-parent --new-session --chdir /work tectonic -X compile main.tex`
-Fallback: `docker run --rm --network none -v $PROJECT:/work galley/engine:tectonic`.
+Project sources are mounted read-only; only the build area and declared caches are writable.
+For TeX Live, distribution roots, configuration and fonts are mounted read-only. Tool discovery uses
+`texlive_path` as an executable directory, or `PATH` when empty, inside the actual compile environment.
+Docker probes and executes tools inside `[build].docker_image`; administrators must supply an image
+with TeX Live. The default lightweight image remains available for Tectonic.
 
 ### 6.3 Structured errors
 The log parser produces `errors.json`:
@@ -209,7 +243,8 @@ An **agent** is a named prompt, a tool set and an output contract. All agents ru
 | `read_file(path, range?)` | text files only, size-capped |
 | `search(pattern)` | ripgrep over project |
 | `read_log()` | the last build's structured errors and a log excerpt |
-| `compile()` | run a build, return errors.json (rate-limited, 3/run) |
+| `compile(engine?)` | run a build with the saved compiler or a temporary override; wait for this request and return diagnostics and engine/version |
+| `list_engines()` | selected compiler, availability, versions and missing tools; read-only |
 | `lookup_citation(query)` | Crossref/arXiv/DOI resolver via host proxy (allowlisted domains only) |
 | `propose_patch(path, edits, summary)` | the *only* write path, and a terminal action. `edits` is a list of `{find, replace}`. Each `find` must occur exactly once in `path`, and each edit lands as one anchored suggestion |
 
@@ -564,7 +599,7 @@ galley admin create-user <email>           galley admin reset-password <email>
 galley project import <zip|git-url> [--name]   galley project export <id> --zip
 galley backup [--to PATH]   galley restore <archive>
 galley doctor          # checks bwrap, tectonic, disk, ports, TLS
-galley engine install tectonic|texlive     galley agents test
+galley engine install tectonic            galley agents test
 ```
 
 ### 9.3 `galley.toml` (defaults)
@@ -576,8 +611,8 @@ data_dir = "~/.galley"
 public_signup = false
 
 [build]
-engine = "tectonic"      # or "texlive"
-texlive_path = ""
+engine = "tectonic"      # new projects: tectonic | pdflatex | xelatex | lualatex | latex
+texlive_path = ""        # executables directory in compile environment, or PATH
 timeout_s = 120
 memory_mb = 2048
 auto_build = true
@@ -791,4 +826,3 @@ How it works, as built (M6):
 - Galley suggests archiving after 60 days without edits. It never archives a project on its own.
 - Archived projects are excluded from build budgets and agent runs.
 - Audit log records archive/unarchive with actor and timestamp.
-

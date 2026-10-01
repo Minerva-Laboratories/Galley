@@ -81,7 +81,11 @@ survive the edits around them.
 
 ### Builds you can read
 
-Galley compiles with Tectonic inside a bubblewrap sandbox. The log parser turns the output into
+Galley compiles with Tectonic by default inside a sandbox. Administrators can install TeX Live to
+offer pdfLaTeX, XeLaTeX, LuaLaTeX and LaTeX (DVI → PS → PDF). Choose **Compiler** in the build bar;
+the choice is saved per project. Unavailable engines show the missing tools. The preview labels the
+compiler that produced its PDF separately from the selection for the next build.
+The log parser turns the output into
 cards: what went wrong, where, and what to do about it. Many cards carry a fix you can apply with one
 click. A failed build never replaces the PDF you already had.
 
@@ -229,7 +233,8 @@ domain = ""              # set it to serve publicly; certificates come from Let'
 public_signup = false
 
 [build]
-engine = "tectonic"
+engine = "tectonic"      # initial compiler for new projects
+texlive_path = ""        # executable directory; empty uses PATH in the compile environment
 sandbox = "auto"         # bubblewrap, then docker, then refuse in public mode
 timeout_s = 120
 memory_mb = 2048
@@ -240,6 +245,17 @@ languagetool = "off"     # off, auto, or the URL of a LanguageTool server
 
 Public mode refuses to start without a sandbox. An unsandboxed LaTeX compiler must not face the
 internet.
+
+Existing projects default to Tectonic. New projects use `[build].engine`: `tectonic`, `pdflatex`,
+`xelatex`, `lualatex` or `latex` (`texlive` is a configuration alias for `pdflatex`). TeX Live is
+optional and managed by the administrator; Galley never downloads or updates it. See
+[deployment instructions](deploy/README.md#optional-tex-live-compilers) for packages and Docker images.
+
+REST builds and MCP `compile` accept an optional `engine` for one build. A successful temporary
+build updates the preview without changing the project setting. MCP `list_engines` reports the
+selection and availability; MCP cannot save a permanent compiler choice. Failed builds never switch
+engines automatically. LaTeX/DVI supports EPS/PS and normal TikZ compilation, but disables the PDF
+figure cache and automatic SVG conversion.
 
 ## Run it for a group
 
@@ -261,8 +277,24 @@ Run all four checks before you claim something works.
 ```sh
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
-cd web && npm test
-cd web && npm run lint
+(cd web && npm test)
+(cd web && npm run lint)
+(cd web && npm run build)
+```
+
+The compiler integration matrix requires installed TeX Live tools and a warm Tectonic cache. It
+fails on missing tools when explicitly enabled:
+
+`bash scripts/test-engines.sh` prepares the Tectonic fixture and runs the Rust and MCP matrix.
+To reuse existing fixtures:
+
+```sh
+GALLEY_TEST_ENGINE_MATRIX=1 \
+GALLEY_TEST_SANDBOX=bwrap \
+GALLEY_TEST_TEXLIVE_PATH=/opt/texlive/bin/x86_64-linux \
+GALLEY_TEST_TECTONIC=/path/to/tectonic \
+GALLEY_TEST_TECTONIC_CACHE=/path/to/tectonic/cache \
+cargo test -p galley-build --test engine_matrix --test engine_workflows -- --nocapture
 ```
 
 `mockup/galley-prototype.html` is the interaction reference for the web app. Open it in a browser and

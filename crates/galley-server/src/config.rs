@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use galley_build::EngineKind;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -63,7 +64,8 @@ impl Default for ServerConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BuildConfig {
-    pub engine: String,
+    #[serde(deserialize_with = "deserialize_engine")]
+    pub engine: EngineKind,
     /// Empty = downloaded into <data_dir>/tectonic on first use, or `tectonic` on $PATH.
     pub tectonic_path: String,
     pub texlive_path: String,
@@ -87,7 +89,7 @@ pub struct BuildConfig {
 impl Default for BuildConfig {
     fn default() -> Self {
         BuildConfig {
-            engine: "tectonic".into(),
+            engine: EngineKind::Tectonic,
             tectonic_path: String::new(),
             texlive_path: String::new(),
             timeout_s: 120,
@@ -100,6 +102,16 @@ impl Default for BuildConfig {
             max_concurrent: 2,
         }
     }
+}
+
+fn deserialize_engine<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<EngineKind, D::Error> {
+    let value = String::deserialize(deserializer)?;
+    if value == "texlive" {
+        return Ok(EngineKind::PdfLatex);
+    }
+    serde_json::from_value(serde_json::Value::String(value)).map_err(serde::de::Error::custom)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -191,7 +203,7 @@ mod tests {
         let parsed: Config = toml::from_str(&text).unwrap();
         assert_eq!(parsed.server.bind, "127.0.0.1:7000");
         assert_eq!(parsed.sync.flush_quiet_ms, 4000);
-        assert_eq!(parsed.build.engine, "tectonic");
+        assert_eq!(parsed.build.engine, EngineKind::Tectonic);
     }
 
     #[test]
@@ -199,5 +211,13 @@ mod tests {
         let parsed: Config = toml::from_str("[server]\nbind = \"0.0.0.0:8080\"\n").unwrap();
         assert_eq!(parsed.server.bind, "0.0.0.0:8080");
         assert_eq!(parsed.sync.flush_max_ms, 60_000);
+    }
+
+    #[test]
+    fn legacy_texlive_config_selects_pdflatex() {
+        let parsed: Config = toml::from_str("[build]\nengine = \"texlive\"\n").unwrap();
+        assert_eq!(parsed.build.engine, EngineKind::PdfLatex);
+        let parsed: Config = toml::from_str("[build]\nengine = \"xelatex\"\n").unwrap();
+        assert_eq!(parsed.build.engine, EngineKind::XeLatex);
     }
 }

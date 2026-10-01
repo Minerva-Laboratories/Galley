@@ -21,7 +21,15 @@ data_dir = "/var/lib/galley"
 public_signup = false
 
 [build]
+# Initial selection for new projects only. Existing projects keep their own selection.
+# tectonic | pdflatex | xelatex | lualatex | latex (DVI -> PS -> PDF)
+# "texlive" is accepted as an alias for "pdflatex" in this configuration.
 engine = "tectonic"
+# Optional TeX Live executable directory. Empty uses PATH in the compile environment.
+# With Docker, this directory belongs to the configured image, not the host.
+texlive_path = ""
+# The default lightweight image has no TeX Live. Supply your own image to offer those engines.
+# docker_image = "local/galley-texlive:latest"
 # auto uses bubblewrap. If bubblewrap is missing it uses Docker. If both are
 # missing it refuses to start in public mode. Set a fixed value if you know the
 # host: "bwrap" (no daemon, preferred) or "docker".

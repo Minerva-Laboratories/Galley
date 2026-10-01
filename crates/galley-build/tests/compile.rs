@@ -46,7 +46,7 @@ async fn compiles_template_then_reports_errors() {
     let builds = ProjectBuilds::new(b, project.path(), "main.tex", None);
 
     let mut events = builds.subscribe();
-    builds.request(BuildRequest { draft: false, file: None, lint_disabled: Vec::new(), figure_cache: true }).await;
+    builds.request(BuildRequest { draft: false, file: None, lint_disabled: Vec::new(), figure_cache: true, engine: Default::default() }).await;
     let result = loop {
         match events.recv().await.unwrap() {
             galley_build::BuildEvent::BuildFinished(r) => break r,
@@ -62,7 +62,7 @@ async fn compiles_template_then_reports_errors() {
 
     // Break the document. The PDF from the good build stays.
     std::fs::write(project.path().join("main.tex"), "\\documentclass{article}\n\\begin{document}\n\\citep{x}\n\\end{document}\n").unwrap();
-    builds.request(BuildRequest { draft: false, file: None, lint_disabled: Vec::new(), figure_cache: true }).await;
+    builds.request(BuildRequest { draft: false, file: None, lint_disabled: Vec::new(), figure_cache: true, engine: Default::default() }).await;
     let result = loop {
         if let galley_build::BuildEvent::BuildFinished(r) = events.recv().await.unwrap() {
             break r;

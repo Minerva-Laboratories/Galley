@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
-import { api, ApiError, type BuildResult } from '../api';
+import { api, ApiError, type BuildResult, type EngineKind } from '../api';
 import { Editor } from '../editor/Editor';
 import { build as runBuild, handleWindowKey } from '../editor/commands';
 import { loadCollab, upsertComment, upsertSuggestion, markSuggestion } from '../store/collab';
@@ -18,6 +18,8 @@ import {
   latexdiffAvailable,
   currentFile,
   currentSession,
+  engineAvailability,
+  engineAvailabilityError,
   displayName,
   files,
   forgetFile,
@@ -27,6 +29,7 @@ import {
   openTabs,
   paletteOpen,
   pdfVersion,
+  pdfProducer,
   peers,
   narrowPane,
   previewVisible,
@@ -68,6 +71,9 @@ export function EditorPage({ id }: { id: string }) {
     resetProject();
     setError(null);
     let cancelled = false;
+    // The event socket starts while project metadata and compiler probes are loading.
+    // Keep the newest event so a slow GET cannot replace a change made in another tab.
+    let eventEngine: EngineKind | null = null;
     (async () => {
       try {
         const [meta, list, log, cps, status] = await Promise.all([
@@ -78,7 +84,13 @@ export function EditorPage({ id }: { id: string }) {
           api.buildStatus(id).catch(() => null),
         ]);
         if (cancelled) return;
-        project.value = meta;
+        project.value = { ...meta, engine: eventEngine ?? meta.engine };
+        void api.listEngines(id).then((engines) => {
+          if (cancelled) return;
+          engineAvailability.value = { ...engines, selected: eventEngine ?? engines.selected };
+          engineAvailabilityError.value = false;
+          project.value = project.value?.id === id ? { ...project.value, engine: eventEngine ?? engines.selected } : project.value;
+        }).catch(() => { if (!cancelled) engineAvailabilityError.value = true; });
         projectRole.value = meta.role;
         files.value = list;
         commits.value = log;
@@ -88,6 +100,8 @@ export function EditorPage({ id }: { id: string }) {
         if (status) {
           build.value = { phase: status.running ? 'running' : status.last ? 'done' : 'idle', progress: null, last: status.last };
           if (status.last?.pdf_available) pdfVersion.value = 1;
+          const producer = status.last?.pdf_engine ?? status.pdf_engine ?? (status.last?.status === 'ok' && status.last.pdf_available ? status.last.engine : status.last?.pdf_available ? 'unknown' : null);
+          if (producer) pdfProducer.value = { engine: producer, version: status.last?.pdf_engine_version ?? status.pdf_engine_version ?? null };
           latexdiffAvailable.value = status.latexdiff;
         }
         const first = list.find((f) => f.path === meta.main_file) ?? list.find((f) => f.kind === 'text');
@@ -127,16 +141,23 @@ export function EditorPage({ id }: { id: string }) {
             .catch(() => undefined);
           break;
         case 'build_started':
-          build.value = { ...build.value, phase: 'running', progress: null };
+          build.value = { ...build.value, phase: 'running', progress: null, runningId: ev.id };
           break;
         case 'build_progress':
-          build.value = { ...build.value, phase: 'running', progress: ev.message };
+          if (!build.value.runningId || build.value.runningId === ev.id)
+            build.value = { ...build.value, phase: 'running', progress: ev.message, runningId: ev.id };
+          break;
+        case 'build_superseded':
+          if (build.value.runningId === ev.id) build.value = { ...build.value, phase: build.value.last ? 'done' : 'idle', progress: null, runningId: undefined };
           break;
         case 'build_finished': {
+          if (build.value.runningId && build.value.runningId !== ev.id) break;
           const result: BuildResult = { ...ev };
           build.value = { phase: 'done', progress: null, last: result };
           if (result.pdf_fresh) pdfVersion.value = pdfVersion.value + 1;
           else if (result.pdf_available && pdfVersion.value === 0) pdfVersion.value = 1;
+          const producer = result.pdf_engine ?? (result.pdf_fresh ? result.engine : null);
+          if (producer) pdfProducer.value = { engine: producer, version: result.pdf_engine_version ?? (result.pdf_fresh ? result.engine_version ?? null : pdfProducer.value?.version ?? null) };
           if (result.status !== 'ok') {
             if (!problemsOpen.value) problemsOpen.value = true;
             showToast(
@@ -149,6 +170,11 @@ export function EditorPage({ id }: { id: string }) {
         }
         case 'comment_added':
           upsertComment(ev.comment);
+          break;
+        case 'engine_changed':
+          eventEngine = ev.engine;
+          if (project.value?.id === id) project.value = { ...project.value, engine: ev.engine };
+          if (engineAvailability.value) engineAvailability.value = { ...engineAvailability.value, selected: ev.engine };
           break;
         case 'comment_resolved':
           comments.value = comments.value.map((c) => (c.id === ev.id ? { ...c, resolved: ev.resolved } : c));

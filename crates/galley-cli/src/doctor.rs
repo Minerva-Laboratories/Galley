@@ -158,32 +158,37 @@ async fn sandbox(config: &Config) -> Check {
 
 async fn engine(config: &Config, data_dir: &Path) -> Vec<Check> {
     let mut out = Vec::new();
-    let configured = config.build.tectonic_path.trim();
-    let candidates: Vec<PathBuf> = if configured.is_empty() {
-        vec![data_dir.join("tectonic").join("tectonic")]
-    } else {
-        vec![PathBuf::from(configured)]
-    };
-    match candidates.iter().find(|p| p.is_file()) {
-        Some(path) => {
-            let version = std::process::Command::new(path)
-                .arg("--version")
-                .output()
-                .ok()
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                .filter(|v| !v.is_empty())
-                .unwrap_or_else(|| "installed".into());
-            out.push(Check::ok("build engine", format!("{version} at {}", path.display())));
+    let b = &config.build;
+    let sandbox =
+        galley_build::Sandbox::detect(&b.sandbox, &b.docker_image, b.memory_mb, b.cpus).await;
+    let hints = match galley_build::Hints::bundled() {
+        Ok(hints) => hints,
+        Err(e) => {
+            return vec![Check::fail(
+                "build engines",
+                format!("could not read bundled hints: {e}"),
+                "reinstall Galley",
+            )];
         }
-        None => out.push(Check::warn(
-            "build engine",
-            "Tectonic is not installed yet",
-            "galley engine install tectonic   (or it downloads itself on the first build)",
-        )),
+    };
+    let builder = galley_build::Builder::new(
+        sandbox,
+        hints,
+        std::time::Duration::from_secs(b.timeout_s),
+        data_dir,
+        Some(b.tectonic_path.clone()).filter(|s| !s.trim().is_empty()),
+        b.max_concurrent,
+    )
+    .with_texlive_path(Some(b.texlive_path.clone()).filter(|s| !s.trim().is_empty()));
+    for item in builder.engine_availability().await {
+        let selected = item.engine == b.engine;
+        out.push(engine_check(item, selected));
     }
     // A warm bundle cache makes builds fast, and lets them run offline.
     let cache = data_dir.join("tectonic").join("cache");
-    let warm = std::fs::read_dir(&cache).map(|mut d| d.next().is_some()).unwrap_or(false);
+    let warm = std::fs::read_dir(&cache)
+        .map(|mut d| d.next().is_some())
+        .unwrap_or(false);
     out.push(if warm {
         Check::ok("package cache", format!("warm at {}", cache.display()))
     } else {
@@ -194,6 +199,38 @@ async fn engine(config: &Config, data_dir: &Path) -> Vec<Check> {
         )
     });
     out
+}
+
+fn engine_check(item: galley_build::EngineAvailability, selected: bool) -> Check {
+    let name = item.engine.id();
+    let label = format!("engine {name}");
+    let suffix = if selected { " (server default)" } else { "" };
+    if item.available {
+        let detail = format!(
+            "available{suffix}{}",
+            item.version.as_deref().map(|v| format!("; {v}")).unwrap_or_default()
+        );
+        return match item.reason {
+            Some(reason) => Check::warn(
+                &label,
+                format!("{detail}; {reason}"),
+                "install the named optional bibliography tools in TeX Live, or point [build] texlive_path at their bin directory",
+            ),
+            None => Check::ok(&label, detail),
+        };
+    }
+    let reason = item.reason.unwrap_or_else(|| "compiler was not found".into());
+    let detail = format!("unavailable{suffix}: {reason}");
+    let fix = if name == "tectonic" {
+        "galley engine install tectonic; it can also download on the first build".to_string()
+    } else {
+        format!("install {name} with TeX Live, then set [build] texlive_path to its bin directory if it is not on PATH")
+    };
+    if selected && name != "tectonic" {
+        Check::fail(&label, detail, fix)
+    } else {
+        Check::warn(&label, detail, fix)
+    }
 }
 
 fn port(bind: &str) -> Check {
@@ -345,5 +382,21 @@ mod tests {
         let ok = vec![Check::ok("a", "fine"), Check::warn("b", "hmm", "do this")];
         assert_eq!(report(&ok), 0);
         assert_eq!(report(&[Check::fail("c", "broken", "fix it")]), 1);
+    }
+
+    #[test]
+    fn available_engine_reports_missing_optional_bibliography_tools() {
+        let check = engine_check(
+            galley_build::EngineAvailability {
+                engine: galley_build::EngineKind::XeLatex,
+                available: true,
+                version: Some("XeTeX test".into()),
+                reason: Some("biber unavailable; documents that require it will fail".into()),
+            },
+            true,
+        );
+        assert_eq!(check.level, Level::Warn);
+        assert!(check.detail.contains("biber unavailable"));
+        assert!(check.fix.as_deref().is_some_and(|fix| fix.contains("bibliography tools")));
     }
 }

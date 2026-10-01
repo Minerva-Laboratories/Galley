@@ -181,7 +181,8 @@ pub async fn latexdiff(
     CurrentUser(user): CurrentUser,
     Json(body): Json<CompareBody>,
 ) -> Result<Json<Value>, AppError> {
-    app.require(&user, &id, Role::can_compile, "comparing versions").await?;
+    app.require(&user, &id, Role::can_compile, "comparing versions")
+        .await?;
     if !app.builder.latexdiff_available() {
         return Err(AppError::BadRequest(
             "This server has no latexdiff installed, so PDF comparison is unavailable.".into(),
@@ -190,6 +191,8 @@ pub async fn latexdiff(
     let project = app.registry.open(&id).await?;
     let meta = app.registry.meta(&id)?;
     let workdir = project.workdir().to_path_buf();
+    let engine = meta.engine;
+    app.require_engine(engine).await?;
     let file = body
         .file
         .filter(|f| safe_tex_target(&workdir, f))
@@ -202,7 +205,9 @@ pub async fn latexdiff(
     let to = body.to.as_deref().unwrap_or(WORKDIR);
     let new = if to == WORKDIR {
         project.flush_now().await?;
-        tokio::fs::read_to_string(workdir.join(&file)).await.unwrap_or_default()
+        tokio::fs::read_to_string(workdir.join(&file))
+            .await
+            .unwrap_or_default()
     } else {
         project
             .file_at(to, &file)
@@ -211,7 +216,7 @@ pub async fn latexdiff(
     };
 
     app.builder
-        .latexdiff(&workdir, &old, &new, &|_| {})
+        .latexdiff(&workdir, &old, &new, engine, &|_| {})
         .await
         .map_err(|e| AppError::BadRequest(e.to_string()))?;
     Ok(Json(json!({ "pdf_available": true, "file": file })))

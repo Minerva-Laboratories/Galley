@@ -3,6 +3,7 @@ use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use galley_build::EngineKind;
 
 use crate::app::{AppError, AppState};
 use crate::auth::current::CurrentUser;
@@ -170,6 +171,20 @@ pub async fn get_project(
     Ok(Json(ProjectView { meta: app.registry.meta(&id)?, role }))
 }
 
+pub async fn engines(
+    State(app): State<AppState>,
+    Path(id): Path<String>,
+    CurrentUser(user): CurrentUser,
+) -> Result<Json<Value>, AppError> {
+    app.require(&user, &id, Role::can_view, "seeing build engines")
+        .await?;
+    let engines = app.builder.engine_availability().await;
+    let selected = app.registry.meta(&id)?.engine;
+    Ok(Json(
+        json!({ "selected": selected, "engines": engines }),
+    ))
+}
+
 #[derive(Deserialize, Default)]
 pub struct SettingsPatch {
     /// A date as YYYY-MM-DD. An empty string clears it.
@@ -183,6 +198,7 @@ pub struct SettingsPatch {
     literature: Option<bool>,
     /// A .tex file in the project that builds should compile.
     main_file: Option<String>,
+    engine: Option<EngineKind>,
     /// The display name. The project's id, and so its links, stay the same.
     name: Option<String>,
 }
@@ -195,7 +211,12 @@ pub async fn update_settings(
     CurrentUser(user): CurrentUser,
     Json(body): Json<SettingsPatch>,
 ) -> Result<Json<ProjectView>, AppError> {
-    let role = app.require(&user, &id, Role::can_edit, "changing project settings").await?;
+    let role = app
+        .require(&user, &id, Role::can_edit, "changing project settings")
+        .await?;
+    if let Some(engine) = body.engine {
+        app.require_engine(engine).await?;
+    }
     let deadline = match body.deadline.as_deref().map(str::trim) {
         None => None,
         Some("") => Some(None),
@@ -205,9 +226,14 @@ pub async fn update_settings(
             Some(Some(d.to_string()))
         }
     };
-    let venue = body.venue.map(|v| v.trim().chars().take(60).collect::<String>()).map(|v| if v.is_empty() { None } else { Some(v) });
+    let venue = body
+        .venue
+        .map(|v| v.trim().chars().take(60).collect::<String>())
+        .map(|v| if v.is_empty() { None } else { Some(v) });
     let lint_disabled = body.lint_disabled.map(|l| {
-        l.into_iter().filter(|r| galley_build::lint::RULES.contains(&r.as_str())).collect::<Vec<_>>()
+        l.into_iter()
+            .filter(|r| galley_build::lint::RULES.contains(&r.as_str()))
+            .collect::<Vec<_>>()
     });
     let main_file = match body.main_file.as_deref() {
         None => None,
@@ -216,20 +242,29 @@ pub async fn update_settings(
             let project = app.registry.open(&id).await?;
             match rel {
                 Some(r) if project.exists(&r) => Some(r),
-                _ => return Err(AppError::BadRequest(format!("{p} is not a .tex file in this project."))),
+                _ => {
+                    return Err(AppError::BadRequest(format!(
+                        "{p} is not a .tex file in this project."
+                    )));
+                }
             }
         }
     };
     let name = match body.name.as_deref().map(str::trim) {
         None => None,
         Some("") => return Err(AppError::BadRequest("A project needs a name.".into())),
-        Some(n) if n.chars().count() > 120 => return Err(AppError::BadRequest("Project names are limited to 120 characters.".into())),
+        Some(n) if n.chars().count() > 120 => {
+            return Err(AppError::BadRequest(
+                "Project names are limited to 120 characters.".into(),
+            ));
+        }
         Some(n) => Some(n.to_string()),
     };
     if let (Some(m), Ok(builds)) = (&main_file, app.builds(&id).await) {
         builds.set_main_file(m).await;
     }
     let renamed = name.clone();
+    let changed_engine = body.engine;
     let meta = app.registry.update_meta(&id, |m| {
         if let Some(n) = name {
             m.name = n;
@@ -255,10 +290,27 @@ pub async fn update_settings(
         if let Some(l) = body.literature {
             m.literature = l;
         }
+        if let Some(engine) = body.engine {
+            m.engine = engine;
+        }
     })?;
     match renamed {
-        Some(n) => app.store.audit(Some(&id), Some(&user), "project.rename", Some(&n)),
-        None => app.store.audit(Some(&id), Some(&user), "project.settings", None),
+        Some(n) => app
+            .store
+            .audit(Some(&id), Some(&user), "project.rename", Some(&n)),
+        None => app
+            .store
+            .audit(Some(&id), Some(&user), "project.settings", None),
+    }
+    if let Some(engine) = changed_engine {
+        app.store.audit(
+            Some(&id),
+            Some(&user),
+            "project.engine",
+            Some(&format!("{engine:?}")),
+        );
+        app.emit(&id, crate::app::CollabEvent::EngineChanged { engine })
+            .await;
     }
     Ok(Json(ProjectView { meta, role }))
 }

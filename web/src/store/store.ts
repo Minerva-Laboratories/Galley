@@ -1,7 +1,7 @@
 // The only mutable state in the app. Components read signals. Actions live next to them.
 import { computed, signal } from '@preact/signals';
 import type { EditorView } from '@codemirror/view';
-import type { AuthUser, BuildResult, Checkpoint, Comment, CommitInfo, FileEntry, PdfLocation, ProjectMeta, Role2, Suggestion } from '../api';
+import type { AuthUser, BuildResult, Checkpoint, Comment, CommitInfo, EnginesResponse, FileEntry, PdfLocation, ProjectMeta, Role2, Suggestion } from '../api';
 import type { DocSession } from '../sync/docs';
 
 export type Theme = 'light' | 'dark';
@@ -143,6 +143,10 @@ export function toggleQuietMode() {
 // ---- project / editor --------------------------------------------------------------------
 
 export const project = signal<ProjectMeta | null>(null);
+export const engineAvailability = signal<EnginesResponse | null>(null);
+export const engineAvailabilityError = signal<boolean>(false);
+/** The engine of the PDF currently served, independent of the latest build attempt. */
+export const pdfProducer = signal<{ engine: string; version: string | null } | null>(null);
 /** The current user's role on the open project. */
 export const projectRole = signal<Role2 | null>(null);
 export const comments = signal<Comment[]>([]);
@@ -198,6 +202,7 @@ export interface BuildState {
   phase: 'idle' | 'running' | 'done';
   progress: string | null;
   last: BuildResult | null;
+  runningId?: number;
 }
 
 export const build = signal<BuildState>({ phase: 'idle', progress: null, last: null });
@@ -271,6 +276,9 @@ export function showToast(message: string, action?: ToastState['action']) {
 
 export function resetProject() {
   project.value = null;
+  engineAvailability.value = null;
+  engineAvailabilityError.value = false;
+  pdfProducer.value = null;
   projectRole.value = null;
   comments.value = [];
   suggestions.value = [];
