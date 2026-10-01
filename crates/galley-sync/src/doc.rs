@@ -120,7 +120,7 @@ impl DocHandle {
             }
         }
 
-        let mut awareness = Awareness::new(doc);
+        let awareness = Awareness::new(doc);
         {
             let tx = tx.clone();
             let sub = awareness.on_update(move |aw, event, _origin| {
@@ -166,7 +166,7 @@ impl DocHandle {
     /// document updates of that client. The client still receives the server state through sync
     /// step 1 and step 2, and Galley accepts its presence through awareness.
     pub async fn handle(&self, data: &[u8], apply_updates: bool) -> Result<Handled> {
-        let mut aw = self.awareness.write().await;
+        let aw = self.awareness.write().await;
         let mut decoder = DecoderV1::new(Cursor::new(data));
         let reader = MessageReader::new(&mut decoder);
         let mut replies = Vec::new();
@@ -188,7 +188,7 @@ impl DocHandle {
                 }
                 _ => {}
             }
-            if let Some(reply) = DefaultProtocol.handle_message(&mut aw, msg)? {
+            if let Some(reply) = DefaultProtocol.handle_message(&aw, msg)? {
                 replies.push(reply.encode_v1());
             }
         }
@@ -202,7 +202,7 @@ impl DocHandle {
 
     /// Remove the presence of a client that left, so others do not wait for the awareness timeout.
     pub async fn forget_client(&self, client_id: yrs::block::ClientID) {
-        let mut aw = self.awareness.write().await;
+        let aw = self.awareness.write().await;
         aw.remove_state(client_id);
     }
 
