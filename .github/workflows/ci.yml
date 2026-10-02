@@ -66,7 +66,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends bubblewrap latexdiff latexmk biber ghostscript poppler-utils \
             texlive-latex-base texlive-latex-recommended texlive-latex-extra texlive-xetex \
-            texlive-luatex texlive-fonts-recommended texlive-pstricks fonts-dejavu-core
+            texlive-luatex texlive-fonts-recommended texlive-pstricks texlive-bibtex-extra fonts-dejavu-core
           # Ubuntu's AppArmor namespace restriction otherwise prevents the real compile sandbox.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Compile the strict five-engine integration matrix
