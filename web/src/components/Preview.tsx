@@ -183,7 +183,7 @@ export function Preview() {
           title="Download PDF"
           aria-label="Download PDF"
           href={id && !showEmpty ? api.pdfUrl(id, version) : undefined}
-          download={id ? `${id}.pdf` : undefined}
+          download
         >
           <Icon name="download" size={14} />
         </a>
