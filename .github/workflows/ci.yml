@@ -50,8 +50,6 @@ jobs:
 
   engines:
     runs-on: ubuntu-24.04
-    env:
-      GALLEY_ENGINE_TEST_ROOT: ${{ runner.temp }}/galley-engines
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -72,6 +70,8 @@ jobs:
           # Ubuntu's AppArmor namespace restriction otherwise prevents the real compile sandbox.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Compile the strict five-engine integration matrix
+        env:
+          GALLEY_ENGINE_TEST_ROOT: ${{ runner.temp }}/galley-engines
         run: bash scripts/test-engines.sh
       - run: npx playwright install --with-deps chromium
         working-directory: web
