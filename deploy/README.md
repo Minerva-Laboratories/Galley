@@ -33,7 +33,7 @@ and its auxiliary tools as the administrator. For Debian/Ubuntu:
 ```sh
 sudo apt-get update
 sudo apt-get install texlive-latex-base texlive-latex-recommended texlive-latex-extra \
-  texlive-xetex texlive-luatex texlive-fonts-recommended texlive-pstricks \
+  texlive-xetex texlive-luatex texlive-fonts-recommended texlive-pstricks texlive-bibtex-extra \
   latexmk biber ghostscript latexdiff
 ```
 
@@ -54,7 +54,7 @@ unchanged. For example:
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     texlive-latex-base texlive-latex-recommended texlive-latex-extra \
-    texlive-xetex texlive-luatex texlive-fonts-recommended texlive-pstricks \
+    texlive-xetex texlive-luatex texlive-fonts-recommended texlive-pstricks texlive-bibtex-extra \
     latexmk biber ghostscript latexdiff fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 ```
