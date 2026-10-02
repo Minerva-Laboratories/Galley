@@ -1,3 +1,5 @@
+use std::hash::{DefaultHasher, Hash, Hasher};
+
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
@@ -91,7 +93,11 @@ pub async fn pdf(
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    let etag = format!("\"{}-{}\"", meta.len(), modified);
+    let filename = crate::file_routes::project_filename(&app.registry.meta(&id)?.name, "pdf");
+    let mut name_hash = DefaultHasher::new();
+    filename.hash(&mut name_hash);
+    // A rename changes the download metadata even when the PDF bytes have not changed.
+    let etag = format!("\"{}-{}-{}\"", meta.len(), modified, name_hash.finish());
     if headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()) == Some(etag.as_str()) {
         return Ok(StatusCode::NOT_MODIFIED.into_response());
     }
@@ -103,7 +109,7 @@ pub async fn pdf(
             (header::ETAG, HeaderValue::from_str(&etag).unwrap_or(HeaderValue::from_static("\"0\""))),
             (
                 header::CONTENT_DISPOSITION,
-                HeaderValue::from_str(&format!("inline; filename=\"{id}.pdf\"")).unwrap_or(HeaderValue::from_static("inline")),
+                HeaderValue::from_str(&crate::file_routes::content_disposition("inline", &filename)).unwrap_or(HeaderValue::from_static("inline")),
             ),
         ],
         Body::from(bytes),

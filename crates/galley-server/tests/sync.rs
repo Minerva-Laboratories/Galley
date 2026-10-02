@@ -102,6 +102,60 @@ async fn rest(state: &AppState, auth: &Auth, method: &str, path: &str, body: Opt
     (status, json, next)
 }
 
+#[tokio::test]
+async fn project_downloads_use_the_current_display_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = Config::default();
+    config.build.sandbox = "none".into();
+    let state = AppState::new(dir.path(), &config).await.unwrap();
+    let auth = signup(&state, "export@example.com", "Author").await;
+    let (status, meta, auth) = rest(&state, &auth, "POST", "/api/projects", Some(json!({"name":"Original project"}))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = meta["id"].as_str().unwrap();
+    let builds = state.builds(id).await.unwrap();
+    std::fs::create_dir_all(builds.out_dir()).unwrap();
+    let pdf = b"%PDF-1.4\nunchanged PDF bytes\n";
+    std::fs::write(builds.out_dir().join("last-good.pdf"), pdf).unwrap();
+    let mut previous_etag = None;
+    for (name, expected) in [
+        ("Informe final", "Informe%20final.zip"),
+        ("Artículo / revisión\\final\n\"2026\"", "Art%C3%ADculo%20_%20revisi%C3%B3n_final_%222026%22.zip"),
+    ] {
+        let (status, renamed, _) = rest(&state, &auth, "PATCH", &format!("/api/projects/{id}/settings"), Some(json!({"name":name}))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(renamed["id"], id);
+        let response = router(state.clone()).oneshot(
+            Request::builder().uri(format!("/api/projects/{id}/export"))
+                .header("cookie", auth.cookie_header().unwrap())
+                .body(Body::empty()).unwrap()
+        ).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "application/zip");
+        let disposition = response.headers()["content-disposition"].to_str().unwrap();
+        assert!(disposition.ends_with(&format!("filename*=UTF-8''{expected}")), "{disposition}");
+        assert!(!disposition.contains("original-project"));
+        assert!(!disposition.contains(['\r', '\n']));
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        assert!(archive.by_name("main.tex").is_ok());
+        assert!(archive.by_name("refs.bib").is_ok());
+        let mut request = Request::builder().uri(format!("/api/projects/{id}/build/pdf"))
+            .header("cookie", auth.cookie_header().unwrap());
+        if let Some(etag) = &previous_etag {
+            request = request.header("if-none-match", etag);
+        }
+        let response = router(state.clone()).oneshot(request.body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "rename must refresh cached download metadata");
+        assert_eq!(response.headers()["content-type"], "application/pdf");
+        let disposition = response.headers()["content-disposition"].to_str().unwrap();
+        let expected_pdf = expected.strip_suffix(".zip").unwrap();
+        assert!(disposition.ends_with(&format!("filename*=UTF-8''{expected_pdf}.pdf")), "{disposition}");
+        assert!(!disposition.contains("original-project"));
+        previous_etag = Some(response.headers()["etag"].clone());
+        assert_eq!(response.into_body().collect().await.unwrap().to_bytes().as_ref(), pdf);
+    }
+}
+
 /// Create an account and return its authenticated cookies.
 async fn signup(state: &AppState, email: &str, name: &str) -> Auth {
     let (status, _, auth) = rest(

@@ -56,11 +56,12 @@ pub async fn export(State(app): State<AppState>, Path(id): Path<String>, Current
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?
         .map_err(|e| AppError::Internal(e.to_string()))?;
+    let filename = project_filename(&app.registry.meta(&id)?.name, "zip");
     app.store.audit(Some(&id), Some(&user), "project.export", None);
     Ok((
         [
             (header::CONTENT_TYPE, "application/zip".to_string()),
-            (header::CONTENT_DISPOSITION, format!("attachment; filename=\"{id}.zip\"")),
+            (header::CONTENT_DISPOSITION, content_disposition("attachment", &filename)),
         ],
         bytes,
     )
@@ -108,7 +109,7 @@ pub async fn download(
 }
 
 /// `attachment; filename="plot.png"; filename*=UTF-8''plot.png`, safe for any file name.
-fn content_disposition(kind: &str, name: &str) -> String {
+pub(crate) fn content_disposition(kind: &str, name: &str) -> String {
     let ascii: String = name.chars().map(|c| if c.is_ascii_graphic() && c != '"' && c != '\\' { c } else { '_' }).collect();
     let mut encoded = String::new();
     for b in name.bytes() {
@@ -119,6 +120,13 @@ fn content_disposition(kind: &str, name: &str) -> String {
         }
     }
     format!("{kind}; filename=\"{ascii}\"; filename*=UTF-8''{encoded}")
+}
+
+pub(crate) fn project_filename(name: &str, extension: &str) -> String {
+    let name: String = name.chars()
+        .map(|c| if c.is_control() || matches!(c, '/' | '\\') { '_' } else { c })
+        .collect();
+    format!("{name}.{extension}")
 }
 
 /// DELETE /api/projects/{id}/files?path=...
