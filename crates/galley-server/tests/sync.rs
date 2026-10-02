@@ -117,6 +117,255 @@ async fn signup(state: &AppState, email: &str, name: &str) -> Auth {
     auth
 }
 
+#[tokio::test]
+async fn engine_selection_is_saved_and_role_gated() {
+    let dir = tempfile::tempdir().unwrap();
+    let tex_bin = dir.path().join("texlive-bin");
+    std::fs::create_dir(&tex_bin).unwrap();
+    for name in ["latexmk", "kpsewhich", "xelatex", "xdvipdfmx"] {
+        let path = tex_bin.join(name);
+        std::fs::write(&path, "#!/bin/sh\necho test-version\n").unwrap();
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+    let mut config = Config::default();
+    config.build.sandbox = "none".into();
+    config.build.texlive_path = tex_bin.to_string_lossy().into_owned();
+    config.server.public_signup = true;
+    let state = AppState::new(dir.path(), &config).await.unwrap();
+    let admin = signup(&state, "engine-admin@example.com", "Admin").await;
+    let viewer = signup(&state, "engine-viewer@example.com", "Viewer").await;
+    let commenter = signup(&state, "engine-commenter@example.com", "Commenter").await;
+    let (status, project, admin) = rest(
+        &state,
+        &admin,
+        "POST",
+        "/api/projects",
+        Some(json!({"name":"Engine paper"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(project["engine"], "tectonic");
+    let (status, inventory, _) = rest(
+        &state,
+        &admin,
+        "GET",
+        "/api/projects/engine-paper/engines",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(inventory["selected"], "tectonic");
+    assert!(
+        inventory["engines"]
+            .as_array()
+            .is_some_and(|engines| engines.len() == 5)
+    );
+    let (_, _, _) = rest(
+        &state,
+        &admin,
+        "POST",
+        "/api/projects/engine-paper/members",
+        Some(json!({"email":"engine-viewer@example.com","role":"viewer"})),
+    )
+    .await;
+    let (status, _, _) = rest(
+        &state,
+        &viewer,
+        "PATCH",
+        "/api/projects/engine-paper/settings",
+        Some(json!({"engine":"tectonic"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _, _) = rest(
+        &state,
+        &viewer,
+        "POST",
+        "/api/projects/engine-paper/build",
+        Some(json!({"engine":"tectonic"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _, _) = rest(
+        &state,
+        &viewer,
+        "GET",
+        "/api/projects/engine-paper/engines",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = rest(
+        &state,
+        &admin,
+        "PATCH",
+        "/api/projects/engine-paper/settings",
+        Some(json!({"engine":"unknown"})),
+    )
+    .await;
+    assert!(status.is_client_error());
+    assert_eq!(
+        state.registry.meta("engine-paper").unwrap().engine,
+        galley_build::EngineKind::Tectonic
+    );
+    let mut events = state.collab_channel("engine-paper").await.subscribe();
+    let (status, saved, _) = rest(
+        &state,
+        &admin,
+        "PATCH",
+        "/api/projects/engine-paper/settings",
+        Some(json!({ "engine": "xelatex" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["engine"], "xelatex");
+    let event: Value = serde_json::from_str(&events.try_recv().expect("engine event")).unwrap();
+    assert_eq!(
+        event,
+        json!({ "type": "engine_changed", "engine": "xelatex" })
+    );
+    let (_, _, _) = rest(
+        &state,
+        &admin,
+        "POST",
+        "/api/projects/engine-paper/members",
+        Some(json!({"email":"engine-commenter@example.com","role":"commenter"})),
+    )
+    .await;
+    let (status, queued, _) = rest(
+        &state,
+        &commenter,
+        "POST",
+        "/api/projects/engine-paper/build",
+        Some(json!({"draft":true,"engine":"tectonic"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(queued["queued"], true);
+    let first_id = queued["id"].as_u64().unwrap();
+    let (status, queued_again, _) = rest(
+        &state, &commenter, "POST", "/api/projects/engine-paper/build", Some(json!({"draft":true})),
+    ).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert!(queued_again["id"].as_u64().unwrap() > first_id);
+    let (status, unavailable, _) = rest(
+        &state, &admin, "PATCH", "/api/projects/engine-paper/settings", Some(json!({"engine":"pdflatex"})),
+    ).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(unavailable["error"].as_str().is_some_and(|message| message.contains("pdflatex")));
+    assert_eq!(
+        state.registry.meta("engine-paper").unwrap().engine,
+        galley_build::EngineKind::XeLatex
+    );
+    let restarted = AppState::new(dir.path(), &config).await.unwrap();
+    let (status, restored, _) = rest(&restarted, &admin, "GET", "/api/projects/engine-paper", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(restored["engine"], "xelatex");
+}
+
+#[tokio::test]
+async fn build_status_restores_pdf_producer_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = Config::default();
+    config.build.sandbox = "none".into();
+    let state = AppState::new(dir.path(), &config).await.unwrap();
+    let admin = signup(&state, "producer@example.com", "Producer").await;
+    let (status, _, admin) = rest(&state, &admin, "POST", "/api/projects", Some(json!({"name":"Producer test"}))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let build_dir = dir.path().join("data/producer-test/.galley/build");
+    std::fs::create_dir_all(&build_dir).unwrap();
+    let record = json!({
+        "id": 7, "status": "failed", "errors": [], "error_count": 1, "warning_count": 0,
+        "profile": {"total_ms": 1, "compile_ms": 1, "fetch_ms": 0, "figure_ms": 0},
+        "pages": null, "fetched_packages": false, "pdf_fresh": false, "pdf_available": true,
+        "stale": false, "draft": false, "main_file": "main.tex", "engine": "xelatex",
+        "engine_version": "XeTeX test", "pdf_engine": "pdflatex", "pdf_engine_version": "pdfTeX test",
+        "sandbox": "none", "finished_at": chrono::Utc::now(), "message": "failed with previous PDF still available"
+    });
+    std::fs::write(build_dir.join(galley_build::runner::LAST_RESULT_JSON), serde_json::to_vec(&record).unwrap()).unwrap();
+    let restarted = AppState::new(dir.path(), &config).await.unwrap();
+    let (status, build, _) = rest(&restarted, &admin, "GET", "/api/projects/producer-test/build", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(build["engine"], "tectonic");
+    assert_eq!(build["last"]["engine"], "xelatex");
+    assert_eq!(build["pdf_engine"], "pdflatex");
+    assert_eq!(build["pdf_engine_version"], "pdfTeX test");
+}
+
+/// Opt in after provisioning all compilers and a warm Tectonic cache. This exercises the same
+/// HTTP MCP route that a client uses, with compiler probing inside bubblewrap.
+#[tokio::test]
+async fn real_mcp_engine_matrix_preserves_project_selection() {
+    if std::env::var("GALLEY_TEST_ENGINE_MATRIX").as_deref() != Ok("1") { return; }
+    let tectonic = std::env::var("GALLEY_TEST_TECTONIC").expect("GALLEY_TEST_TECTONIC is required");
+    let cache = std::env::var("GALLEY_TEST_TECTONIC_CACHE").expect("GALLEY_TEST_TECTONIC_CACHE is required");
+    let texlive = std::env::var("GALLEY_TEST_TEXLIVE_PATH").expect("GALLEY_TEST_TEXLIVE_PATH is required");
+    assert!(std::path::Path::new(&tectonic).is_file());
+    assert!(std::path::Path::new(&cache).is_dir());
+    assert!(std::path::Path::new(&texlive).join("latexmk").is_file());
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("tectonic")).unwrap();
+    std::os::unix::fs::symlink(&cache, dir.path().join("tectonic/cache")).unwrap();
+    let mut config = Config::default();
+    config.build.sandbox = "bwrap".into();
+    config.build.tectonic_path = tectonic;
+    config.build.texlive_path = texlive;
+    let state = AppState::new(dir.path(), &config).await.unwrap();
+    assert_eq!(state.builder.sandbox.kind, galley_build::SandboxKind::Bwrap);
+    let admin = signup(&state, "matrix@example.com", "Matrix").await;
+    let (status, _, admin) = rest(&state, &admin, "POST", "/api/projects", Some(json!({"name":"Matrix paper"}))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, token_body, _) = rest(&state, &admin, "POST", "/api/auth/tokens", Some(json!({"label":"matrix test"}))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let token = token_body["token"].as_str().unwrap();
+
+    let inventory = mcp_tool_text(&state, token, "matrix-paper", "list_engines", json!({})).await;
+    let inventory: Value = serde_json::from_str(&inventory).unwrap();
+    assert_eq!(inventory["selected"], "tectonic");
+    let engines = inventory["engines"].as_array().unwrap();
+    assert_eq!(engines.len(), 5);
+    for engine in engines { assert_eq!(engine["available"], true, "{engine}"); }
+
+    for engine in ["tectonic", "pdflatex", "xelatex"] {
+        let args = if engine == "tectonic" { json!({}) } else { json!({"engine":engine}) };
+        let response = mcp_tool_text(&state, token, "matrix-paper", "compile", args).await;
+        assert!(response.contains("status: Ok"), "{engine}: {response}");
+        assert!(response.contains(&format!("engine: {engine}")), "{response}");
+        let id = response.lines().find_map(|line| line.strip_prefix("id: ").and_then(|raw| raw.parse::<u64>().ok())).unwrap();
+        let (status, build, _) = rest(&state, &admin, "GET", "/api/projects/matrix-paper/build", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(build["last"]["id"], id);
+        assert_eq!(build["last"]["engine"], engine);
+        assert_eq!(build["pdf_engine"], engine);
+        assert_eq!(build["engine"], "tectonic");
+    }
+    assert_eq!(state.registry.meta("matrix-paper").unwrap().engine, galley_build::EngineKind::Tectonic);
+    let restarted = AppState::new(dir.path(), &config).await.unwrap();
+    let (status, build, _) = rest(&restarted, &admin, "GET", "/api/projects/matrix-paper/build", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(build["engine"], "tectonic");
+    assert_eq!(build["pdf_engine"], "xelatex");
+    assert_eq!(build["last"]["engine"], "xelatex");
+}
+
+async fn mcp_tool_text(state: &AppState, token: &str, project: &str, name: &str, args: Value) -> String {
+    let body = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":args}});
+    let request = Request::builder().method("POST").uri(format!("/mcp/{project}"))
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::from(body.to_string())).unwrap();
+    let response = router(state.clone()).oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let reply: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(status, StatusCode::OK, "{reply}");
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    reply["result"]["content"][0]["text"].as_str().unwrap().to_string()
+}
+
 /// A y-protocol client over a real WebSocket, authenticated by cookie.
 struct Client {
     doc: Doc,

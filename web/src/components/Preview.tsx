@@ -11,6 +11,7 @@ import {
   invertPdf,
   narrowPane,
   pdfVersion,
+  pdfProducer,
   project,
   followCursor,
   requestGoto,
@@ -21,6 +22,7 @@ import {
   toggleInvert,
 } from '../store/store';
 import { Icon } from './Icon';
+import { engineLabel } from './BuildBar';
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
 
@@ -137,12 +139,14 @@ export function Preview() {
   };
 
   const stale = last?.status !== 'ok' && last?.status !== undefined && last.pdf_available;
+  const dviShowingPrevious = last?.status === 'ok' && last.engine === 'latex' && !last.pdf_fresh && last.pdf_available;
   const showEmpty = version === 0;
 
   return (
     <section class="preview" aria-label="Preview">
       <div class="ph">
         <span style={{ fontWeight: 500 }}>Preview</span>
+        {version > 0 && pdfProducer.value && <span class="pdf-producer" title={pdfProducer.value.version ?? undefined}>PDF: {engineLabel(pdfProducer.value.engine)}</span>}
         <button class={`tb ${draftMode.value ? 'on' : ''}`} title="Skip figures for faster builds" onClick={() => (toggleDraft(), void runBuild())}>
           Draft
         </button>
@@ -191,6 +195,7 @@ export function Preview() {
       </div>
       <div class={`pb ${showEmpty ? 'centered' : ''}`} ref={host} onScroll={onScroll}>
         {stale && <div class="stale">Last build failed. Showing the previous PDF.</div>}
+        {dviShowingPrevious && <div class="stale">This build produced no new PDF. Showing the previous PDF.</div>}
         {showEmpty && (
           <div class="empty">
             <b>No PDF yet</b>

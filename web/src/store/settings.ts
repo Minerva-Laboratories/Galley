@@ -45,6 +45,10 @@ export async function setBudget(title: string): Promise<void> {
 }
 
 export async function toggleFigureCache(): Promise<void> {
+  if (project.value?.engine === 'latex') {
+    showToast('LaTeX/DVI builds cannot use the PDF-based TikZ figure cache or automatic SVG conversion.');
+    return;
+  }
   const on = project.value?.figure_cache !== false;
   if (await saveSettings({ figure_cache: !on })) {
     showToast(on ? 'Figure cache off. Every build draws every figure.' : 'Figure cache on. It takes effect from the next build.');

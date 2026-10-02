@@ -4,7 +4,7 @@ use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use galley_build::runner::{LAST_GOOD_PDF, LAST_LOG};
-use galley_build::BuildRequest;
+use galley_build::{BuildRequest, EngineKind};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -19,6 +19,8 @@ pub struct BuildBody {
     /// The file to compile. The default is the project's main file.
     #[serde(default)]
     file: Option<String>,
+    #[serde(default)]
+    engine: Option<EngineKind>,
 }
 
 pub async fn request(
@@ -27,12 +29,28 @@ pub async fn request(
     CurrentUser(user): CurrentUser,
     body: Option<Json<BuildBody>>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
-    app.require(&user, &id, Role::can_compile, "building").await?;
+    app.require(&user, &id, Role::can_compile, "building")
+        .await?;
     let builds = app.builds(&id).await?;
-    let (draft, file) = body.map(|b| (b.draft, b.file.clone())).unwrap_or((false, None));
-    let (lint_disabled, figure_cache) = app.registry.meta(&id).map(|m| (m.lint_disabled, m.figure_cache)).unwrap_or((Vec::new(), true));
-    builds.request(BuildRequest { draft, file, lint_disabled, figure_cache }).await;
-    Ok((StatusCode::ACCEPTED, Json(json!({ "queued": true }))))
+    let (draft, file, override_engine) = body
+        .map(|b| (b.draft, b.file.clone(), b.engine))
+        .unwrap_or((false, None, None));
+    let meta = app.registry.meta(&id)?;
+    let engine = override_engine.unwrap_or(meta.engine);
+    app.require_engine(engine).await?;
+    let id = builds
+        .request(BuildRequest {
+            draft,
+            file,
+            lint_disabled: meta.lint_disabled,
+            figure_cache: meta.figure_cache,
+            engine,
+        })
+        .await;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({ "queued": true, "id": id })),
+    ))
 }
 
 pub async fn status(
@@ -40,13 +58,17 @@ pub async fn status(
     Path(id): Path<String>,
     CurrentUser(user): CurrentUser,
 ) -> Result<Json<Value>, AppError> {
-    app.require(&user, &id, Role::can_view, "seeing the build status").await?;
+    app.require(&user, &id, Role::can_view, "seeing the build status")
+        .await?;
     let builds = app.builds(&id).await?;
+    let last = builds.last().await;
     Ok(Json(json!({
-        "last": builds.last().await,
+        "pdf_engine": last.as_ref().and_then(|r| r.pdf_engine.as_ref()),
+        "pdf_engine_version": last.as_ref().and_then(|r| r.pdf_engine_version.as_ref()),
+        "last": last,
         "running": builds.is_running().await,
         "sandbox": app.builder.sandbox.kind,
-        "engine": "tectonic",
+        "engine": app.registry.meta(&id)?.engine,
         "latexdiff": app.builder.latexdiff_available(),
     })))
 }

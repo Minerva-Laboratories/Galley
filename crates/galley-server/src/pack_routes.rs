@@ -27,17 +27,24 @@ pub async fn pack(
     Path(id): Path<String>,
     CurrentUser(user): CurrentUser,
 ) -> Result<Json<PackReport>, AppError> {
-    app.require(&user, &id, Role::can_compile, "packaging the project").await?;
+    app.require(&user, &id, Role::can_compile, "packaging the project")
+        .await?;
     let project = app.registry.open(&id).await?;
     project.flush_now().await?;
     let meta = app.registry.meta(&id)?;
+    app.require_engine(meta.engine).await?;
     let workdir = project.workdir().to_path_buf();
     let report = app
         .builder
-        .pack(&workdir, &meta.main_file, &|_p| {})
+        .pack(&workdir, &meta.main_file, meta.engine, &|_p| {})
         .await
         .map_err(|e| AppError::BadRequest(e.to_string()))?;
-    app.store.audit(Some(&id), Some(&user), "project.pack", Some(if report.archive { "ok" } else { "failed" }));
+    app.store.audit(
+        Some(&id),
+        Some(&user),
+        "project.pack",
+        Some(if report.archive { "ok" } else { "failed" }),
+    );
     Ok(Json(report))
 }
 

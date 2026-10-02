@@ -46,3 +46,38 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm test
+      - run: npm run build
+
+  engines:
+    runs-on: ubuntu-24.04
+    env:
+      GALLEY_ENGINE_TEST_ROOT: ${{ runner.temp }}/galley-engines
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - name: Install real compile tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap latexdiff latexmk biber ghostscript poppler-utils \
+            texlive-latex-base texlive-latex-recommended texlive-latex-extra texlive-xetex \
+            texlive-luatex texlive-fonts-recommended texlive-pstricks fonts-dejavu-core
+          # Ubuntu's AppArmor namespace restriction otherwise prevents the real compile sandbox.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Compile the strict five-engine integration matrix
+        run: bash scripts/test-engines.sh
+      - run: npx playwright install --with-deps chromium
+        working-directory: web
+      - name: Verify browser selection and temporary builds
+        env:
+          GALLEY_TEST_ENGINE_MATRIX: "1"
+          GALLEY_TEST_TECTONIC: ${{ runner.temp }}/galley-engines/tectonic/tectonic
+          GALLEY_TEST_TECTONIC_CACHE: ${{ runner.temp }}/galley-engines/cache
+        run: bash scripts/e2e.sh engines.spec.ts

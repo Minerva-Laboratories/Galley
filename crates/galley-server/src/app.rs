@@ -9,7 +9,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{middleware, Json, Router};
-use galley_build::{Builder, Hints, ProjectBuilds, Sandbox, SandboxKind};
+use galley_build::{Builder, EngineKind, Hints, ProjectBuilds, Sandbox, SandboxKind};
 use serde::Serialize;
 use serde_json::json;
 use tokio::sync::{broadcast, RwLock};
@@ -61,6 +61,7 @@ pub enum CollabEvent {
     RequestsChanged,
     /// A checkpoint was created. Peers re-fetch the checkpoint list.
     CheckpointsChanged,
+    EngineChanged { engine: EngineKind },
 }
 
 impl AppState {
@@ -100,14 +101,14 @@ impl AppState {
             data_dir,
             Some(b.tectonic_path.clone()).filter(|s| !s.is_empty()),
             b.max_concurrent,
-        ));
+        ).with_texlive_path(Some(b.texlive_path.clone()).filter(|s| !s.trim().is_empty())));
         match builder.engine_path().await {
             Some(p) => tracing::info!(path = %p.display(), "tectonic found"),
             None => tracing::info!("tectonic not installed yet; it is downloaded on the first build"),
         }
         let db = Db::open(&data_dir.join("galley.db")).map_err(std::io::Error::other)?;
         Ok(AppState {
-            registry: Arc::new(Registry::new(data_dir, config.sync_config())?),
+            registry: Arc::new(Registry::new_with_engine(data_dir, config.sync_config(), b.engine)?),
             builder,
             store: Store::new(db),
             secure: !config.server.domain.is_empty(),
@@ -161,6 +162,19 @@ impl AppState {
         if let Ok(text) = serde_json::to_string(&event) {
             let _ = tx.send(text);
         }
+    }
+
+    pub async fn require_engine(&self, engine: EngineKind) -> Result<(), AppError> {
+        let item = self.builder.check_engine(engine).await;
+        if item.available || (engine == EngineKind::Tectonic
+            && item.reason.as_deref().is_some_and(|reason| reason.contains("first build can install"))) {
+            return Ok(());
+        }
+        Err(AppError::BadRequest(format!(
+            "The {} engine is unavailable: {}",
+            engine.id(),
+            item.reason.unwrap_or_else(|| "install or configure its compiler and try again".into())
+        )))
     }
 
     /// The build queue for a project, created on first use with a flush-before-build hook.
@@ -282,6 +296,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/projects/{id}", get(routes::get_project))
         .route("/api/projects/{id}/settings", axum::routing::patch(routes::update_settings))
+        .route("/api/projects/{id}/engines", get(routes::engines))
         .route("/api/venues", get(pack_routes::list_venues))
         .route("/api/templates", get(routes::list_templates))
         .route("/api/projects/{id}/grammar", post(routes::check_grammar))

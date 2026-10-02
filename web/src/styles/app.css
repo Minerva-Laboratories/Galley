@@ -681,6 +681,33 @@ a {
 .build .eng {
   color: var(--text-3);
 }
+.build .compiler-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.build .engine-reasons {
+  position: relative;
+  color: var(--text-3);
+}
+.build .engine-reasons summary {
+  cursor: pointer;
+}
+.build .engine-reasons-list {
+  position: absolute;
+  z-index: 20;
+  bottom: 24px;
+  right: 0;
+  width: min(320px, 70vw);
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg-panel);
+  color: var(--text);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+}
+.build .engine-reasons-list div + div { margin-top: 6px; }
+.build .engine-note, .pdf-producer { color: var(--text-3); font-size: 11px; }
 .build .tb {
   height: 26px;
 }

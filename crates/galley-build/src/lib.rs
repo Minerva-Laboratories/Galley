@@ -15,6 +15,7 @@ pub mod sandbox;
 pub mod svg;
 pub mod synctex;
 
+pub use engine::{EngineAvailability, EngineKind};
 pub use hints::Hints;
 pub use log::{Diagnostic, Fix, Level};
 pub use runner::{BuildEvent, BuildRequest, BuildResult, BuildStatus, Builder, ProjectBuilds};

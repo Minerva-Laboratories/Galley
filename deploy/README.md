@@ -25,6 +25,52 @@ The installer ends by running `galley doctor`, which checks the sandbox, the
 build engine, the package cache, disk space, the listen address, fonts and the
 certificate ports. Run it again at any time.
 
+## Optional TeX Live compilers
+
+Tectonic remains the default. To offer pdfLaTeX, XeLaTeX, LuaLaTeX and LaTeX/DVI, install TeX Live
+and its auxiliary tools as the administrator. For Debian/Ubuntu:
+
+```sh
+sudo apt-get update
+sudo apt-get install texlive-latex-base texlive-latex-recommended texlive-latex-extra \
+  texlive-xetex texlive-luatex texlive-fonts-recommended texlive-pstricks \
+  latexmk biber ghostscript latexdiff
+```
+
+Galley checks `latexmk`, `kpsewhich`, the engine executable, BibTeX and Biber. LaTeX/DVI also
+requires `dvips` and `ps2pdf` (Ghostscript). Install additional packages and fonts required by your
+documents; a missing package produces an actionable build error. Galley does not install or update
+TeX Live and does not fall back to another compiler.
+
+`[build].texlive_path` is the directory containing the executables; leave it empty to use `PATH`.
+With bubblewrap, Galley mounts the discovered TeX distribution, configuration and fonts read-only,
+with writable caches in the build area. All TeX Live passes and bibliography/conversion tools run
+without network access. Project and user `latexmkrc` files are ignored, and shell escape is disabled.
+
+For Docker, install tools **inside the compile image**. The default lightweight image remains
+unchanged. For example:
+
+```dockerfile
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    texlive-latex-base texlive-latex-recommended texlive-latex-extra \
+    texlive-xetex texlive-luatex texlive-fonts-recommended texlive-pstricks \
+    latexmk biber ghostscript latexdiff fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/*
+```
+
+Build that image, then set `[build].docker_image` to its tag and `sandbox = "docker"`.
+`texlive_path` and tool availability refer to paths inside that image. Host TeX Live installations
+are not used by Docker builds. Run `galley doctor` with the same configuration to inspect each
+compiler's version and missing requirements.
+
+`[build].engine` sets the initial selection for new projects. Existing projects without an engine
+field retain Tectonic. Editors save a project choice using the Compiler selector; readers see it.
+Normal builds, drafts, PDF comparisons and submission verification use that choice. REST and MCP
+can override it for one build. The submission archive records its compiler, and figure-cache keys
+include the engine and version. LaTeX/DVI compiles TikZ normally and accepts EPS/PS; convert SVGs
+before uploading because automatic SVG conversion and the PDF figure cache are disabled in that mode.
+
 ## The compile sandbox is required
 
 A compile runs arbitrary LaTeX, so it runs inside a sandbox. In public mode,

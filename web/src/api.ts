@@ -25,6 +25,20 @@ export interface ProjectMeta {
   /** Commit of the "Submitted to …" checkpoint. */
   submitted_checkpoint?: string | null;
   figure_cache?: boolean;
+  /** Older project metadata may omit this; those projects use Tectonic. */
+  engine?: EngineKind;
+}
+
+export type EngineKind = 'tectonic' | 'pdflatex' | 'xelatex' | 'lualatex' | 'latex';
+export interface EngineAvailability {
+  engine: EngineKind;
+  available: boolean;
+  version: string | null;
+  reason: string | null;
+}
+export interface EnginesResponse {
+  selected: EngineKind;
+  engines: EngineAvailability[];
 }
 
 /** How the build used the persistent figure cache (SPEC §13.1). */
@@ -140,6 +154,7 @@ export interface SettingsPatch {
   budgets?: Record<string, number>;
   lint_disabled?: string[];
   figure_cache?: boolean;
+  engine?: EngineKind;
   main_file?: string;
   literature?: boolean;
   name?: string;
@@ -244,6 +259,10 @@ export interface BuildResult {
   draft: boolean;
   main_file: string;
   engine: string;
+  engine_version?: string | null;
+  /** Engine that generated the PDF still served after a failed build. */
+  pdf_engine?: string | null;
+  pdf_engine_version?: string | null;
   sandbox: string;
   finished_at: string;
   message?: string;
@@ -267,8 +286,9 @@ export type ProjectEvent =
   | { type: 'file_deleted'; path: string }
   | { type: 'file_renamed'; from: string; to: string }
   | { type: 'files_changed' }
-  | { type: 'build_started'; id: number; draft: boolean }
+  | { type: 'build_started'; id: number; draft: boolean; engine?: EngineKind }
   | { type: 'build_progress'; id: number; message: string }
+  | { type: 'build_superseded'; id: number }
   | ({ type: 'build_finished' } & BuildResult)
   | CollabEvent;
 
@@ -358,6 +378,7 @@ export interface Suggestion {
 }
 
 export type CollabEvent =
+  | { type: 'engine_changed'; engine: EngineKind }
   | { type: 'comment_added'; comment: Comment }
   | { type: 'comment_resolved'; id: string; resolved: boolean }
   | { type: 'suggestion_added'; suggestion: Suggestion }
@@ -488,6 +509,7 @@ export const api = {
   createProject: (name: string, template?: string) =>
     request<ProjectMeta>('/api/projects', { method: 'POST', body: JSON.stringify({ name, template }) }),
   getProject: (id: string) => request<ProjectMeta & { role: Role2 }>(`/api/projects/${encodeURIComponent(id)}`),
+  listEngines: (id: string) => request<EnginesResponse>(`/api/projects/${encodeURIComponent(id)}/engines`),
   updateSettings: (id: string, patch: SettingsPatch) =>
     request<ProjectMeta & { role: Role2 }>(`/api/projects/${encodeURIComponent(id)}/settings`, {
       method: 'PATCH',
@@ -560,13 +582,13 @@ export const api = {
       body: message ? JSON.stringify({ message }) : undefined,
       method: 'POST',
     }),
-  build: (id: string, draft: boolean, file?: string) =>
-    request<{ queued: boolean }>(`/api/projects/${encodeURIComponent(id)}/build`, {
+  build: (id: string, draft: boolean, file?: string, engine?: EngineKind) =>
+    request<{ queued: boolean; id?: number }>(`/api/projects/${encodeURIComponent(id)}/build`, {
       method: 'POST',
-      body: JSON.stringify({ draft, file }),
+      body: JSON.stringify({ draft, file, ...(engine ? { engine } : {}) }),
     }),
   buildStatus: (id: string) =>
-    request<{ last: BuildResult | null; running: boolean; sandbox: string; engine: string; latexdiff: boolean }>(
+    request<{ last: BuildResult | null; running: boolean; sandbox: string; engine: string; latexdiff: boolean; pdf_engine?: string | null; pdf_engine_version?: string | null }>(
       `/api/projects/${encodeURIComponent(id)}/build`,
     ),
   pdfUrl: (id: string, version: number) => `/api/projects/${encodeURIComponent(id)}/build/pdf?v=${version}`,

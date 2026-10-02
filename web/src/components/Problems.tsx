@@ -154,6 +154,7 @@ export function Problems() {
 /** The profiler's figure phase in one line, with the cache toggle (SPEC §13.1–13.2). */
 function FigureLine({ stats, ms }: { stats: NonNullable<BuildResult['figures']>; ms: number }) {
   const on = project.value?.figure_cache !== false;
+  const dvi = project.value?.engine === 'latex';
   let text: string;
   if (stats.mode === 'cached') {
     text = `Figures: all ${stats.total} from the cache${ms ? `, ${(ms / 1000).toFixed(1)} s spent refreshing changed ones` : ''}.`;
@@ -166,13 +167,13 @@ function FigureLine({ stats, ms }: { stats: NonNullable<BuildResult['figures']>;
   }
   return (
     <div class="hint figline" style={{ gridColumn: '1 / -1' }}>
-      <span>{text} Cached figures are reused until their code, the preamble, or a data file changes.</span>
-      {canEdit.value && (
+      <span>{dvi ? 'LaTeX/DVI builds disable the PDF-based TikZ figure cache and automatic SVG conversion.' : <>{text} Cached figures are reused until their code, the preamble, or a data file changes.</>}</span>
+      {canEdit.value && !dvi && (
         <label>
           <input type="checkbox" checked={on} onChange={() => void toggleFigureCache()} /> Cache figures
         </label>
       )}
-      {canCompile.value && on && stats.mode !== 'off' && (
+      {canCompile.value && on && !dvi && stats.mode !== 'off' && (
         <button class="tb" onClick={() => void clearFigureCache()}>
           Clear
         </button>

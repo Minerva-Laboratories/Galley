@@ -73,7 +73,9 @@ impl Mounts {
         }
         let mut best: Option<(&PathBuf, &PathBuf)> = None;
         for (h, g) in &self.pairs {
-            if host.starts_with(h) && best.is_none_or(|(bh, _)| h.components().count() > bh.components().count()) {
+            if host.starts_with(h)
+                && best.is_none_or(|(bh, _)| h.components().count() > bh.components().count())
+            {
                 best = Some((h, g));
             }
         }
@@ -92,10 +94,23 @@ pub const GUEST_WORK: &str = "/work";
 
 impl Sandbox {
     /// Resolve `auto` with a probe, in the order of the spec: bwrap, then docker, then none.
-    pub async fn detect(preference: &str, docker_image: &str, memory_mb: u64, cpus: f32) -> Sandbox {
+    pub async fn detect(
+        preference: &str,
+        docker_image: &str,
+        memory_mb: u64,
+        cpus: f32,
+    ) -> Sandbox {
         let systemd_scope = probe(
             "systemd-run",
-            &["--user", "--scope", "-q", "-p", "MemoryMax=64M", "--", "/usr/bin/true"],
+            &[
+                "--user",
+                "--scope",
+                "-q",
+                "-p",
+                "MemoryMax=64M",
+                "--",
+                "/usr/bin/true",
+            ],
         )
         .await;
         let mk = |kind| Sandbox {
@@ -147,6 +162,11 @@ impl Sandbox {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.as_std_mut().process_group(0);
+        }
         cmd
     }
 
@@ -169,7 +189,14 @@ impl Sandbox {
             );
         }
         argv.push("bwrap".into());
-        for dir in ["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc/alternatives"] {
+        for dir in [
+            "/usr",
+            "/lib",
+            "/lib64",
+            "/bin",
+            "/sbin",
+            "/etc/alternatives",
+        ] {
             if Path::new(dir).exists() {
                 argv.extend(["--ro-bind", dir, dir].map(String::from));
             }
@@ -177,7 +204,14 @@ impl Sandbox {
         // The CA bundle is mounted even without network. Tectonic builds an HTTPS client as soon
         // as it consults the bundle, and a client with no roots panics before it reports which file
         // it wanted, which hides the missing package that would trigger the fetch pass.
-        for f in ["/etc/ssl", "/etc/ca-certificates"] {
+        for f in [
+            "/etc/ssl",
+            "/etc/ca-certificates",
+            "/etc/texmf",
+            "/etc/fonts",
+            "/var/lib/texmf",
+            "/var/cache/fontconfig",
+        ] {
             if Path::new(f).exists() {
                 argv.extend(["--ro-bind", f, f].map(String::from));
             }
@@ -190,22 +224,42 @@ impl Sandbox {
             }
         }
         argv.extend(["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"].map(String::from));
-        argv.extend(["--ro-bind", &spec.project_dir.to_string_lossy(), GUEST_WORK].map(String::from));
         argv.extend(
-            ["--bind", &spec.out_dir.to_string_lossy(), &format!("{GUEST_WORK}/.galley/build")].map(String::from),
+            ["--ro-bind", &spec.project_dir.to_string_lossy(), GUEST_WORK].map(String::from),
+        );
+        argv.extend(
+            [
+                "--bind",
+                &spec.out_dir.to_string_lossy(),
+                &format!("{GUEST_WORK}/.galley/build"),
+            ]
+            .map(String::from),
         );
         for m in &spec.mounts {
             let flag = if m.writable { "--bind" } else { "--ro-bind" };
-            argv.extend([flag, &m.host.to_string_lossy(), &m.guest.to_string_lossy()].map(String::from));
+            argv.extend(
+                [flag, &m.host.to_string_lossy(), &m.guest.to_string_lossy()].map(String::from),
+            );
         }
         for p in &spec.masked {
             argv.extend(["--tmpfs", &p.to_string_lossy()].map(String::from));
         }
-        argv.extend(["--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup"].map(String::from));
+        argv.extend(
+            [
+                "--unshare-user",
+                "--unshare-pid",
+                "--unshare-ipc",
+                "--unshare-uts",
+                "--unshare-cgroup",
+            ]
+            .map(String::from),
+        );
         if !spec.network {
             argv.push("--unshare-net".into());
         }
-        argv.extend(["--die-with-parent", "--new-session", "--chdir", GUEST_WORK].map(String::from));
+        argv.extend(
+            ["--die-with-parent", "--new-session", "--chdir", GUEST_WORK].map(String::from),
+        );
         for (k, v) in &spec.env {
             argv.extend(["--setenv", k, v].map(String::from));
         }
@@ -221,8 +275,20 @@ impl Sandbox {
         let mut c = Command::new("docker");
         c.args(["run", "--rm", "--init", "--name", &spec.name]);
         c.args(["--network", if spec.network { "bridge" } else { "none" }]);
-        c.args(["--memory", &format!("{}m", self.memory_mb), "--cpus", &format!("{}", self.cpus)]);
-        c.args(["--pids-limit", "512", "--security-opt", "no-new-privileges", "--cap-drop", "ALL"]);
+        c.args([
+            "--memory",
+            &format!("{}m", self.memory_mb),
+            "--cpus",
+            &format!("{}", self.cpus),
+        ]);
+        c.args([
+            "--pids-limit",
+            "512",
+            "--security-opt",
+            "no-new-privileges",
+            "--cap-drop",
+            "ALL",
+        ]);
         c.args(["--read-only", "--tmpfs", "/tmp:rw,exec,size=512m"]);
         c.args(["--user", &format!("{}:{}", uid(), gid())]);
         // A package fetch needs TLS, and a slim image has no CA bundle, so mount the host bundle.
@@ -233,11 +299,20 @@ impl Sandbox {
                 c.args(["-v", &format!("{certs}:{certs}:ro")]);
             }
         }
-        c.args(["-v", &format!("{}:{GUEST_WORK}:ro", spec.project_dir.display())]);
-        c.args(["-v", &format!("{}:{GUEST_WORK}/.galley/build", spec.out_dir.display())]);
+        c.args([
+            "-v",
+            &format!("{}:{GUEST_WORK}:ro", spec.project_dir.display()),
+        ]);
+        c.args([
+            "-v",
+            &format!("{}:{GUEST_WORK}/.galley/build", spec.out_dir.display()),
+        ]);
         for m in &spec.mounts {
             let ro = if m.writable { "" } else { ":ro" };
-            c.args(["-v", &format!("{}:{}{ro}", m.host.display(), m.guest.display())]);
+            c.args([
+                "-v",
+                &format!("{}:{}{ro}", m.host.display(), m.guest.display()),
+            ]);
         }
         for p in &spec.masked {
             c.args(["--tmpfs", &p.to_string_lossy()]);
@@ -257,6 +332,22 @@ impl Sandbox {
         if self.kind == SandboxKind::Docker {
             let _ = Command::new("docker")
                 .args(["kill", &spec.name])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .await;
+        }
+    }
+
+    /// A timed-out command may have spawned latexmk, bibliography tools, and converters.
+    /// Commands are started in their own process group, so kill every host-side descendant.
+    pub async fn kill_group(&self, pid: Option<u32>) {
+        #[cfg(unix)]
+        if let Some(pid) = pid.filter(|pid| *pid > 1) {
+            let _ = Command::new("kill")
+                .arg("-KILL")
+                .arg("--")
+                .arg(format!("-{pid}"))
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status()
@@ -288,17 +379,21 @@ async fn bwrap_works() -> bool {
 }
 
 fn uid() -> u32 {
-    std::fs::metadata("/proc/self").map(|m| {
-        use std::os::unix::fs::MetadataExt;
-        m.uid()
-    }).unwrap_or(1000)
+    std::fs::metadata("/proc/self")
+        .map(|m| {
+            use std::os::unix::fs::MetadataExt;
+            m.uid()
+        })
+        .unwrap_or(1000)
 }
 
 fn gid() -> u32 {
-    std::fs::metadata("/proc/self").map(|m| {
-        use std::os::unix::fs::MetadataExt;
-        m.gid()
-    }).unwrap_or(1000)
+    std::fs::metadata("/proc/self")
+        .map(|m| {
+            use std::os::unix::fs::MetadataExt;
+            m.gid()
+        })
+        .unwrap_or(1000)
 }
 
 #[cfg(test)]
@@ -320,8 +415,16 @@ mod tests {
             project_dir: "/data/p1".into(),
             out_dir: "/data/p1/.galley/build".into(),
             mounts: vec![
-                Mount { host: "/opt/tectonic".into(), guest: "/galley/bin/tectonic".into(), writable: false },
-                Mount { host: "/cache".into(), guest: "/galley/cache".into(), writable: network },
+                Mount {
+                    host: "/opt/tectonic".into(),
+                    guest: "/galley/bin/tectonic".into(),
+                    writable: false,
+                },
+                Mount {
+                    host: "/cache".into(),
+                    guest: "/galley/cache".into(),
+                    writable: network,
+                },
             ],
             masked: vec!["/work/.git".into()],
             env: vec![("TECTONIC_CACHE_DIR".into(), "/galley/cache".into())],
@@ -343,13 +446,28 @@ mod tests {
     fn guest_paths_map_only_when_isolated() {
         let sb = sandbox(SandboxKind::Docker);
         let m = sb.mounts(Path::new("/data/p1"), &spec(false).mounts);
-        assert_eq!(m.guest(Path::new("/data/p1/.galley/build")), PathBuf::from("/work/.galley/build"));
-        assert_eq!(m.guest(Path::new("/cache/x")), PathBuf::from("/galley/cache/x"));
+        assert_eq!(
+            m.guest(Path::new("/data/p1/.galley/build")),
+            PathBuf::from("/work/.galley/build")
+        );
+        assert_eq!(
+            m.guest(Path::new("/cache/x")),
+            PathBuf::from("/galley/cache/x")
+        );
         // A file mount maps to exactly its guest path, with no trailing separator.
-        assert_eq!(m.guest(Path::new("/opt/tectonic")), PathBuf::from("/galley/bin/tectonic"));
-        assert_eq!(m.guest(Path::new("/elsewhere")), PathBuf::from("/elsewhere"));
+        assert_eq!(
+            m.guest(Path::new("/opt/tectonic")),
+            PathBuf::from("/galley/bin/tectonic")
+        );
+        assert_eq!(
+            m.guest(Path::new("/elsewhere")),
+            PathBuf::from("/elsewhere")
+        );
         let none = sandbox(SandboxKind::None).mounts(Path::new("/data/p1"), &[]);
-        assert_eq!(none.guest(Path::new("/data/p1/main.tex")), PathBuf::from("/data/p1/main.tex"));
+        assert_eq!(
+            none.guest(Path::new("/data/p1/main.tex")),
+            PathBuf::from("/data/p1/main.tex")
+        );
     }
 
     #[test]
@@ -391,7 +509,10 @@ mod tests {
     #[test]
     fn none_runs_directly_in_the_project() {
         let cmd = sandbox(SandboxKind::None).command(&spec(false));
-        assert_eq!(argv(&cmd), vec!["/galley/bin/tectonic", "-X", "compile", "main.tex"]);
+        assert_eq!(
+            argv(&cmd),
+            vec!["/galley/bin/tectonic", "-X", "compile", "main.tex"]
+        );
         assert_eq!(cmd.as_std().get_current_dir(), Some(Path::new("/data/p1")));
     }
 }

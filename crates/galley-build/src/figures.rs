@@ -51,7 +51,7 @@ impl FigCache {
 }
 
 /// Figure-cache statistics reported with a build.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FigureStats {
     /// `cached` (the main pass used figure PDFs), `plain` (a normal compile), or `off`.
     pub mode: String,

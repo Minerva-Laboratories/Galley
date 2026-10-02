@@ -11,7 +11,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use galley_build::runner::BuildEvent;
-use galley_build::BuildRequest;
+use galley_build::{BuildRequest, EngineKind};
 use galley_sync::paths::{clean_rel_path, is_text_path};
 use serde_json::{json, Value};
 
@@ -151,8 +151,10 @@ fn tool_schemas() -> Value {
           "inputSchema": { "type": "object", "required": ["pattern"], "properties": { "pattern": { "type": "string" } } } },
         { "name": "read_log", "description": "The last build's outcome: structured errors and warnings with hints.",
           "inputSchema": { "type": "object", "properties": {} } },
+        { "name": "list_engines", "description": "List compiler availability and the project's saved engine.",
+          "inputSchema": { "type": "object", "properties": {} } },
         { "name": "compile", "description": "Save pending edits and compile the project (or one .tex file); returns the structured result. Slow; use sparingly. Proposals are not applied until an author accepts them, so a compile will not reflect your own propose_patch.",
-          "inputSchema": { "type": "object", "properties": { "file": { "type": "string" } } } },
+          "inputSchema": { "type": "object", "properties": { "file": { "type": "string" }, "engine": { "type": "string", "enum": ["tectonic", "pdflatex", "xelatex", "lualatex", "latex"] } } } },
         { "name": "propose_patch", "description": "Propose edits as reviewable suggestions. Each edit replaces one unique occurrence of `find` in `path` with `replace`. The only way to change a document.",
           "inputSchema": { "type": "object", "required": ["path", "edits", "summary"], "properties": {
               "path": { "type": "string" },
@@ -185,7 +187,13 @@ impl From<crate::registry::RegistryError> for ToolError {
     }
 }
 
-async fn call_tool(app: &AppState, project: &str, user: &User, name: &str, args: Value) -> Result<String, ToolError> {
+async fn call_tool(
+    app: &AppState,
+    project: &str,
+    user: &User,
+    name: &str,
+    args: Value,
+) -> Result<String, ToolError> {
     match name {
         "list_files" => list_files(app, project).await,
         "read_file" => read_file(app, project, &args).await,
@@ -196,6 +204,7 @@ async fn call_tool(app: &AppState, project: &str, user: &User, name: &str, args:
         "math" => math(app, project, &args).await,
         "literature" => literature(app, project, &args).await,
         "read_log" => read_log(app, project).await,
+        "list_engines" => list_engines(app, project).await,
         "compile" => compile(app, project, user, &args).await,
         "propose_patch" => propose_patch(app, project, user, &args).await,
         "comment" => comment(app, project, user, &args).await,
@@ -396,9 +405,15 @@ async fn search(app: &AppState, project: &str, args: &Value) -> Result<String, T
 
 fn summarize(result: &galley_build::BuildResult) -> String {
     let mut out = format!(
-        "status: {:?}\nfile: {}\nerrors: {}  warnings: {}\n",
-        result.status, result.main_file, result.error_count, result.warning_count
+        "id: {}\nstatus: {:?}\nengine: {}\nfile: {}\nerrors: {}  warnings: {}\n",
+        result.id, result.status, result.engine, result.main_file, result.error_count, result.warning_count
     );
+    if let Some(version) = &result.engine_version {
+        out.push_str(&format!("engine version: {version}\n"));
+    }
+    if let Some(producer) = &result.pdf_engine {
+        out.push_str(&format!("PDF producer: {producer}\n"));
+    }
     if let Some(m) = &result.message {
         out.push_str(&format!("message: {m}\n"));
     }
@@ -419,6 +434,15 @@ fn summarize(result: &galley_build::BuildResult) -> String {
     out
 }
 
+async fn list_engines(app: &AppState, project: &str) -> Result<String, ToolError> {
+    let selected = app.registry.meta(project)?.engine;
+    serde_json::to_string_pretty(&json!({
+        "selected": selected,
+        "engines": app.builder.engine_availability().await,
+    }))
+    .map_err(|e| ToolError::Failed(e.to_string()))
+}
+
 fn fix_label(fix: &galley_build::Fix) -> String {
     match fix {
         galley_build::Fix::Insert { label, .. } | galley_build::Fix::Replace { label, .. } => label.clone(),
@@ -433,28 +457,62 @@ async fn read_log(app: &AppState, project: &str) -> Result<String, ToolError> {
     }
 }
 
-async fn compile(app: &AppState, project: &str, user: &User, args: &Value) -> Result<String, ToolError> {
-    app.require(user, project, Role::can_compile, "building").await?;
+async fn compile(
+    app: &AppState,
+    project: &str,
+    user: &User,
+    args: &Value,
+) -> Result<String, ToolError> {
+    app.require(user, project, Role::can_compile, "building")
+        .await?;
     let builds = app.builds(project).await?;
     let mut rx = builds.subscribe();
     let file = arg_str(args, "file").map(str::to_string);
-    let (lint_disabled, figure_cache) = app.registry.meta(project).map(|m| (m.lint_disabled, m.figure_cache)).unwrap_or((Vec::new(), true));
-    builds.request(BuildRequest { draft: false, file, lint_disabled, figure_cache }).await;
-    let finished = tokio::time::timeout(COMPILE_WAIT, async {
-        loop {
-            match rx.recv().await {
-                Ok(BuildEvent::BuildFinished(r)) => break Some(r),
-                Ok(_) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(_) => break None,
-            }
-        }
+    let meta = app.registry.meta(project)?;
+    let engine = match args.get("engine") {
+        None => meta.engine,
+        Some(value) => serde_json::from_value::<EngineKind>(value.clone()).map_err(|_| {
+            ToolError::Failed(
+                "Unknown engine. Choose tectonic, pdflatex, xelatex, lualatex, or latex.".into(),
+            )
+        })?,
+    };
+    app.require_engine(engine).await?;
+    let id = builds
+        .request(BuildRequest {
+            draft: false,
+            file,
+            lint_disabled: meta.lint_disabled,
+            figure_cache: meta.figure_cache,
+            engine,
     })
     .await;
+    let finished = tokio::time::timeout(COMPILE_WAIT, wait_for_build(&mut rx, id)).await;
     match finished {
-        Ok(Some(r)) => Ok(summarize(&r)),
-        Ok(None) => Err(ToolError::Failed("The build queue closed before finishing.".into())),
-        Err(_) => Err(ToolError::Failed("The build did not finish in time; check read_log later.".into())),
+        Ok(Ok(r)) => Ok(summarize(&r)),
+        Ok(Err(message)) => Err(ToolError::Failed(message.into())),
+        Err(_) => Err(ToolError::Failed(
+            "The build did not finish in time; check read_log later.".into(),
+        )),
+    }
+}
+
+async fn wait_for_build(
+    rx: &mut tokio::sync::broadcast::Receiver<BuildEvent>,
+    id: u64,
+) -> Result<Box<galley_build::BuildResult>, &'static str> {
+    loop {
+        match rx.recv().await {
+            Ok(BuildEvent::BuildFinished(result)) if result.id == id => return Ok(result),
+            Ok(BuildEvent::BuildSuperseded { id: superseded }) if superseded == id => {
+                return Err(
+                    "This compile was superseded by a newer build request. Retry compile if needed.",
+                );
+            }
+            Ok(_) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(_) => return Err("The build queue closed before finishing."),
+        }
     }
 }
 
@@ -694,4 +752,55 @@ pub async fn runs(
         .map_err(|e| AppError::Internal(e.to_string()))?
         .map_err(|e| AppError::Internal(e.to_string()))?;
     Ok(Json(list))
+}
+
+#[cfg(test)]
+mod engine_wait_tests {
+    use super::*;
+    use galley_build::runner::{BuildResult, BuildStatus, Profile};
+
+    fn result(id: u64) -> BuildResult {
+        BuildResult {
+            id,
+            status: BuildStatus::Ok,
+            errors: Vec::new(),
+            error_count: 0,
+            warning_count: 0,
+            profile: Profile::default(),
+            pages: None,
+            figures: None,
+            pending_figures: Vec::new(),
+            fetched_packages: false,
+            pdf_fresh: true,
+            pdf_available: true,
+            stale: false,
+            draft: false,
+            main_file: "main.tex".into(),
+            engine: "tectonic".into(),
+            engine_version: None,
+            pdf_engine: Some("tectonic".into()),
+            pdf_engine_version: None,
+            sandbox: "none".into(),
+            finished_at: chrono::Utc::now(),
+            message: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn compile_waits_for_its_own_id_and_reports_supersession() {
+        let (tx, mut rx) = tokio::sync::broadcast::channel(8);
+        tx.send(BuildEvent::BuildFinished(Box::new(result(1))))
+            .unwrap();
+        tx.send(BuildEvent::BuildFinished(Box::new(result(2))))
+            .unwrap();
+        assert_eq!(wait_for_build(&mut rx, 2).await.unwrap().id, 2);
+        let mut rx = tx.subscribe();
+        tx.send(BuildEvent::BuildSuperseded { id: 3 }).unwrap();
+        assert!(
+            wait_for_build(&mut rx, 3)
+                .await
+                .unwrap_err()
+                .contains("superseded")
+        );
+    }
 }

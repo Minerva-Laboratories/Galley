@@ -4,9 +4,10 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
+use galley_build::EngineKind;
 use galley_sync::{ProjectSync, SyncConfig};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
@@ -16,6 +17,8 @@ pub struct ProjectMeta {
     pub id: String,
     pub name: String,
     pub main_file: String,
+    #[serde(default)]
+    pub engine: EngineKind,
     pub created_at: DateTime<Utc>,
     #[serde(default)]
     pub updated_at: DateTime<Utc>,
@@ -61,16 +64,24 @@ pub enum RegistryError {
 pub struct Registry {
     root: PathBuf,
     sync_config: SyncConfig,
+    default_engine: EngineKind,
+    meta_lock: Mutex<()>,
     open: RwLock<HashMap<String, Arc<ProjectSync>>>,
 }
 
 impl Registry {
     pub fn new(data_dir: &Path, sync_config: SyncConfig) -> std::io::Result<Registry> {
+        Self::new_with_engine(data_dir, sync_config, EngineKind::Tectonic)
+    }
+
+    pub fn new_with_engine(data_dir: &Path, sync_config: SyncConfig, default_engine: EngineKind) -> std::io::Result<Registry> {
         let root = data_dir.join("data");
         std::fs::create_dir_all(&root)?;
         Ok(Registry {
             root,
             sync_config,
+            default_engine,
+            meta_lock: Mutex::new(()),
             open: RwLock::new(HashMap::new()),
         })
     }
@@ -80,6 +91,7 @@ impl Registry {
     }
 
     pub fn list(&self) -> Result<Vec<ProjectMeta>, RegistryError> {
+        let _guard = self.meta_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut out = Vec::new();
         for entry in std::fs::read_dir(&self.root)? {
             let entry = entry?;
@@ -96,6 +108,7 @@ impl Registry {
     }
 
     pub fn meta(&self, id: &str) -> Result<ProjectMeta, RegistryError> {
+        let _guard = self.meta_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = self.dir_for(id)?;
         read_meta(&dir)
     }
@@ -139,6 +152,7 @@ impl Registry {
             id: id.clone(),
             name: name.to_string(),
             main_file: template.main_file.into(),
+            engine: self.default_engine,
             created_at: now,
             updated_at: now,
         };
@@ -199,6 +213,7 @@ impl Registry {
             id: id.clone(),
             name: name.to_string(),
             main_file: main_file.to_string(),
+            engine: self.default_engine,
             created_at: now,
             updated_at: now,
         };
@@ -228,6 +243,7 @@ impl Registry {
 
     /// Read-modify-write the project's metadata file.
     pub fn update_meta(&self, id: &str, f: impl FnOnce(&mut ProjectMeta)) -> Result<ProjectMeta, RegistryError> {
+        let _guard = self.meta_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = self.dir_for(id)?;
         let mut meta = read_meta(&dir)?;
         f(&mut meta);
@@ -237,6 +253,7 @@ impl Registry {
     }
 
     pub fn touch(&self, id: &str) {
+        let _guard = self.meta_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Ok(dir) = self.dir_for(id) {
             if let Ok(mut meta) = read_meta(&dir) {
                 meta.updated_at = Utc::now();
@@ -355,5 +372,37 @@ mod tests {
             .collect();
         assert_eq!(files, vec!["main.tex", "refs.bib"]);
         assert!(reg.open("nope").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn old_projects_default_to_tectonic_and_new_projects_use_configured_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = Registry::new_with_engine(dir.path(), SyncConfig::default(), EngineKind::XeLatex)
+            .unwrap();
+        let project = reg.create("Engine test").await.unwrap();
+        assert_eq!(project.engine, EngineKind::XeLatex);
+        let imported = reg
+            .create_imported(
+                "Imported engine test",
+                vec![(
+                    "main.tex".into(),
+                    b"\\documentclass{article}\\begin{document}Hi\\end{document}".to_vec(),
+                )],
+                "main.tex",
+            )
+            .await
+            .unwrap();
+        assert_eq!(imported.engine, EngineKind::XeLatex);
+        let path = reg.root().join(&project.id).join(".galley/project.toml");
+        let old = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(
+            &path,
+            old.lines()
+                .filter(|line| !line.starts_with("engine ="))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+        assert_eq!(reg.meta(&project.id).unwrap().engine, EngineKind::Tectonic);
     }
 }
