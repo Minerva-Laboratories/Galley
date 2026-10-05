@@ -35,6 +35,16 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates bubblewrap latexdiff fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
+# TeX Live adds pdfLaTeX, XeLaTeX, LuaLaTeX and LaTeX/DVI to the Compiler menu. It is off by default
+# because it adds about 1.5 GB to the image. Build with --build-arg TEXLIVE=1 to include it.
+ARG TEXLIVE=0
+RUN if [ "$TEXLIVE" = "1" ]; then \
+      apt-get update && apt-get install -y --no-install-recommends \
+        texlive-latex-base texlive-latex-recommended texlive-latex-extra \
+        texlive-xetex texlive-luatex texlive-fonts-recommended texlive-pstricks \
+        texlive-bibtex-extra texlive-science latexmk biber ghostscript \
+      && rm -rf /var/lib/apt/lists/*; \
+    fi
 COPY --from=build /src/target/release/galley /usr/local/bin/galley
 COPY deploy/fly/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
