@@ -179,7 +179,8 @@ a {
 }
 .tb svg,
 .rail svg,
-.row svg {
+.row svg,
+.stale-close svg {
   width: 16px;
   height: 16px;
   stroke: currentColor;
