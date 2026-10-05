@@ -1094,6 +1094,10 @@ a {
   justify-content: center;
 }
 .stale {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   position: sticky;
   top: 0;
   z-index: 2;
@@ -2300,3 +2304,16 @@ ol.steps .link {
   flex: 0 0 17px;
 }
 .filerow .file-kind-icon svg { width: 17px; height: 17px; }
+
+.stale-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 28px;
+  height: 28px;
+  margin: -3px -6px -3px 0;
+  border-radius: 4px;
+  color: inherit;
+}
+.stale-close:hover { background: rgba(255, 255, 255, .18); }
+.stale-close:focus-visible { outline: 2px solid currentColor; outline-offset: 1px; }

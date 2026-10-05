@@ -13,7 +13,7 @@ function Shell({ children }: { children: preact.ComponentChildren }) {
         aria-label="Toggle theme"
         onClick={toggleTheme}
       >
-        <Icon name="theme" size={16} />
+        <Icon name={theme.value === 'light' ? 'sun' : 'theme'} size={16} />
       </button>
       <div class="auth-card">
         <div class="wordmark" aria-label="Galley">
