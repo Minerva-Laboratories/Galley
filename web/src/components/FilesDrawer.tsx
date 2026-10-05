@@ -4,6 +4,7 @@ import { saveSettings } from '../store/settings';
 import { canEdit, currentFile, files, folders, forgetFile, movedFile, openFile, project, showToast } from '../store/store';
 import { closeDoc } from '../sync/docs';
 import { fileTree } from '../util/fileTree';
+import { FileIcon } from './FileIcon';
 import { Icon } from './Icon';
 
 /** Formats the browser can show on its own. Everything else downloads. */
@@ -340,7 +341,7 @@ export function FilesDrawer() {
         ) : (
           <div key={f.path} style={{ paddingLeft: 8 + level * 16 }} class={`row filerow ${f.path === currentFile.value ? 'on' : ''}`}>
             <button class="fname" onClick={() => open(f)} title={f.kind === 'text' ? `Open ${f.path}` : `${f.path} · ${sizeLabel(f.size)}`}>
-              <Icon name="file" />
+              <FileIcon path={f.path} />
               <span class="n">{basename}</span>
               <span class="m">{f.path === main ? 'main' : f.kind === 'binary' ? sizeLabel(f.size) : ''}</span>
             </button>

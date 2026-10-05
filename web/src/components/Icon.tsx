@@ -12,6 +12,14 @@ const PATHS: Record<string, string> = {
   chevron: 'm6 9 6 6 6-6',
   folder: 'M3 7V4h7l2 3h9v13H3z',
   file: 'M14 3v5h5M6 3h8l5 5v13H6z',
+  'file-tex': 'M14 3v5h5M6 3h8l5 5v13H6zM9 11h7m-3.5 0v7M10 18h5',
+  'file-pdf': 'M14 3v5h5M6 3h8l5 5v13H6z',
+  'file-text': 'M14 3v5h5M6 3h8l5 5v13H6zM9 11h7M9 14h7M9 17h5',
+  image: 'M3 4h18v16H3zM3 17l5-5 4 4 3-3 6 6M16 8h.01',
+  'file-settings': 'M4 6h16M4 12h16M4 18h16M8 3v6M16 9v6M10 15v6',
+  table: 'M3 4h18v16H3zM3 10h18M9 4v16M3 15h18',
+  archive: 'M14 3v5h5M6 3h8l5 5v13H6zM10 4h2M10 7h2M10 10h2M10 13h2M10 16h3v3h-3z',
+  code: 'M8 6l-6 6 6 6M16 6l6 6-6 6M14 4l-4 16',
   plus: 'M12 5v14M5 12h14',
   close: 'M6 6l12 12M18 6 6 18',
   back: 'M15 6l-6 6 6 6',
@@ -31,6 +39,7 @@ export function Icon({ name, size }: { name: keyof typeof PATHS | string; size?:
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true" style={s}>
       <path d={d} />
+      {name === 'file-pdf' && <text x="12.5" y="17" text-anchor="middle" fill="currentColor" stroke="none" font-size="6" font-weight="700" font-family="sans-serif">PDF</text>}
     </svg>
   );
 }

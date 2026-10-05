@@ -2293,3 +2293,10 @@ ol.steps .link {
 .folder-row[aria-expanded='true'] .folder-chevron { transform: none; }
 .folder-target { display: flex; align-items: center; gap: 6px; padding: 4px 8px 8px; color: var(--text-2); font-size: 11px; }
 .folder-target span { overflow-wrap: anywhere; }
+
+.file-kind-icon {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 17px;
+}
+.filerow .file-kind-icon svg { width: 17px; height: 17px; }
