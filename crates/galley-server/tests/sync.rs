@@ -172,6 +172,48 @@ async fn signup(state: &AppState, email: &str, name: &str) -> Auth {
 }
 
 #[tokio::test]
+async fn folder_routes_check_roles_and_notify_listeners() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = Config::default();
+    config.build.sandbox = "none".into();
+    config.server.public_signup = true;
+    let state = AppState::new(dir.path(), &config).await.unwrap();
+    let admin = signup(&state, "folder-admin@example.com", "Admin").await;
+    let viewer = signup(&state, "folder-viewer@example.com", "Viewer").await;
+    let editor = signup(&state, "folder-editor@example.com", "Editor").await;
+    let outsider = signup(&state, "folder-outsider@example.com", "Outsider").await;
+    let (status, meta, admin) = rest(&state, &admin, "POST", "/api/projects", Some(json!({"name":"Folder paper"}))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = meta["id"].as_str().unwrap();
+    let folders_url = format!("/api/projects/{id}/folders");
+    for (email, role) in [("folder-viewer@example.com", "viewer"), ("folder-editor@example.com", "editor")] {
+        let (status, _, _) = rest(&state, &admin, "POST", &format!("/api/projects/{id}/members"), Some(json!({"email": email, "role": role}))).await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+    let (status, folders, _) = rest(&state, &viewer, "GET", &folders_url, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(folders, json!([]));
+    let (status, _, _) = rest(&state, &viewer, "POST", &folders_url, Some(json!({"path":"viewer-folder"}))).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _, _) = rest(&state, &outsider, "GET", &folders_url, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let project = state.registry.open(id).await.unwrap();
+    let mut events = project.subscribe_events();
+    let (status, created, _) = rest(&state, &editor, "POST", &folders_url, Some(json!({"path":"sections/./drafts"}))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(created, json!({"path":"sections/drafts"}));
+    assert!(matches!(events.try_recv(), Ok(galley_sync::ProjectEvent::FilesChanged)));
+    let (status, folders, _) = rest(&state, &viewer, "GET", &folders_url, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(folders, json!(["sections", "sections/drafts"]));
+    let (status, created, _) = rest(&state, &admin, "POST", &folders_url, Some(json!({"path":"figures"}))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(created, json!({"path":"figures"}));
+    let (status, _, _) = rest(&state, &editor, "POST", &folders_url, Some(json!({"path":"../escape"}))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn engine_selection_is_saved_and_role_gated() {
     let dir = tempfile::tempdir().unwrap();
     let tex_bin = dir.path().join("texlive-bin");

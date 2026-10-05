@@ -22,6 +22,7 @@ import {
   engineAvailabilityError,
   displayName,
   files,
+  folders,
   forgetFile,
   movedFile,
   navigate,
@@ -76,12 +77,13 @@ export function EditorPage({ id }: { id: string }) {
     let eventEngine: EngineKind | null = null;
     (async () => {
       try {
-        const [meta, list, log, cps, status] = await Promise.all([
+        const [meta, list, log, cps, status, dirs] = await Promise.all([
           api.getProject(id),
           api.listFiles(id),
           api.history(id),
           api.checkpoints(id).catch(() => []),
           api.buildStatus(id).catch(() => null),
+          api.listFolders(id),
         ]);
         if (cancelled) return;
         project.value = { ...meta, engine: eventEngine ?? meta.engine };
@@ -93,6 +95,7 @@ export function EditorPage({ id }: { id: string }) {
         }).catch(() => { if (!cancelled) engineAvailabilityError.value = true; });
         projectRole.value = meta.role;
         files.value = list;
+        folders.value = dirs;
         commits.value = log;
         checkpoints.value = cps;
         void loadCollab(id);
@@ -112,7 +115,11 @@ export function EditorPage({ id }: { id: string }) {
         if (!cancelled) setError(e instanceof ApiError ? e.message : 'Could not load the project.');
       }
     })();
+    const refreshFolders = () => void api.listFolders(id)
+      .then((list) => { if (!cancelled) folders.value = list; })
+      .catch(() => undefined);
     const unsubscribe = subscribeEvents(id, (ev) => {
+      if (['file_created', 'file_deleted', 'file_renamed', 'files_changed'].includes(ev.type)) refreshFolders();
       switch (ev.type) {
         case 'commit': {
           const commit = { sha: ev.sha, short_sha: ev.short_sha, message: ev.message, author: ev.author, time: ev.time };
@@ -137,7 +144,7 @@ export function EditorPage({ id }: { id: string }) {
         case 'files_changed':
           void api
             .listFiles(id)
-            .then((list) => (files.value = list))
+            .then((list) => { if (!cancelled) files.value = list; })
             .catch(() => undefined);
           break;
         case 'build_started':

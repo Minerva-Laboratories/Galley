@@ -262,7 +262,6 @@ impl ProjectSync {
         if is_text_path(&rel) {
             self.doc(&rel).await?.reseed("").await;
         }
-        prune_empty_dirs(&self.workdir, full.parent());
         self.set_last_editor(author);
         self.flush_with(Some(format!("delete: {rel}"))).await?;
         let _ = self.events.send(ProjectEvent::FileDeleted { path: rel });
@@ -300,7 +299,6 @@ impl ProjectSync {
             }
             std::fs::rename(&src, &dst)?;
         }
-        prune_empty_dirs(&self.workdir, src.parent());
         self.set_last_editor(author);
         self.flush_with(Some(format!("rename: {from} → {to}"))).await?;
         let _ = self.events.send(ProjectEvent::FileRenamed { from, to: to.clone() });
@@ -312,6 +310,30 @@ impl ProjectSync {
         let mut out = BTreeSet::new();
         walk(&self.workdir, &self.workdir, &mut out)?;
         Ok(out.into_iter().collect())
+    }
+
+    /// Every author-visible directory, including directories without files.
+    pub fn list_folders(&self) -> Result<Vec<String>> {
+        let mut out = BTreeSet::new();
+        walk_folders(&self.workdir, &self.workdir, &mut out)?;
+        Ok(out.into_iter().collect())
+    }
+
+    /// Create a project directory. Existing directories are accepted so clients can retry safely.
+    pub fn create_folder(&self, path: &str) -> Result<String> {
+        let rel = clean_folder_path(path)?;
+        let mut current = self.workdir.clone();
+        for part in rel.split('/') {
+            current.push(part);
+            match std::fs::symlink_metadata(&current) {
+                Ok(meta) if !meta.file_type().is_dir() => return Err(Error::InvalidPath(rel)),
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::fs::create_dir(&current)?,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        let _ = self.events.send(ProjectEvent::FilesChanged);
+        Ok(rel)
     }
 
     /// Write every open document to the working tree and commit. Returns the commit, or `None`
@@ -592,14 +614,30 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
-/// Remove the directories that a delete or a move left empty. Do not remove the project root.
-fn prune_empty_dirs(root: &Path, mut dir: Option<&Path>) {
-    while let Some(d) = dir {
-        if d == root || !d.starts_with(root) || std::fs::remove_dir(d).is_err() {
-            break;
-        }
-        dir = d.parent();
+fn clean_folder_path(path: &str) -> Result<String> {
+    let rel = clean_rel_path(path).ok_or_else(|| Error::InvalidPath(path.into()))?;
+    if rel.split('/').any(|part| part.eq_ignore_ascii_case(".git")
+        || part.eq_ignore_ascii_case(".galley") || part.ends_with(".galley-tmp")) {
+        return Err(Error::InvalidPath(path.into()));
     }
+    Ok(rel)
+}
+
+fn walk_folders(root: &Path, dir: &Path, out: &mut BTreeSet<String>) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        if !kind.is_dir() { continue; } // file_type does not follow symlinks
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.eq_ignore_ascii_case(".git") || name.eq_ignore_ascii_case(".galley") || name.ends_with(".galley-tmp") { continue; }
+        let path = entry.path();
+        let rel = path.strip_prefix(root).map_err(std::io::Error::other)?
+            .to_string_lossy().replace('\\', "/");
+        out.insert(rel);
+        walk_folders(root, &path, out)?;
+    }
+    Ok(())
 }
 
 fn walk(root: &Path, dir: &Path, out: &mut BTreeSet<FileEntry>) -> std::io::Result<()> {

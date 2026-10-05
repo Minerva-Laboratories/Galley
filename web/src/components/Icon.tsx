@@ -10,6 +10,7 @@ const PATHS: Record<string, string> = {
   search: 'M18 18a7 7 0 1 0-14 0 7 7 0 0 0 14 0zM20 20l-3.5-3.5',
   theme: 'M12 3a9 9 0 1 0 9 9c0-.5 0-1-.1-1.4A5.5 5.5 0 0 1 12 3z',
   chevron: 'm6 9 6 6 6-6',
+  folder: 'M3 7V4h7l2 3h9v13H3z',
   file: 'M14 3v5h5M6 3h8l5 5v13H6z',
   plus: 'M12 5v14M5 12h14',
   close: 'M6 6l12 12M18 6 6 18',

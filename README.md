@@ -144,6 +144,11 @@ venue. Each paper template names the class to swap in.
 
 ### More that is already built
 
+- A resizable sidebar: drag its right edge, use the arrow keys when the divider is focused, or
+  double-click to reset. Its width is remembered in your browser.
+- Expandable folders in Files, including empty folders preserved in project ZIPs. Use **New folder**
+  to create one, select it for new files and uploads, or choose **Use root**. Existing files can be
+  moved with **Rename or move…**; update LaTeX references when their paths change.
 - Snippets with automatic labels, label renaming across files, and a lint pass for stale labels,
   uncited entries, doubled words and breakable references.
 - Word budgets per section, a deadline pill, and a task list built from `TODO` comments.

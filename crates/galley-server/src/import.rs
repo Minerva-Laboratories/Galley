@@ -28,6 +28,7 @@ const SKIPPED_EXTENSIONS: &[&str] = &[
 
 pub struct Imported {
     pub files: Vec<(String, Vec<u8>)>,
+    pub folders: Vec<String>,
     pub report: Report,
 }
 
@@ -73,11 +74,13 @@ pub fn read_zip(bytes: &[u8]) -> Result<Imported, ImportError> {
     }
 
     let mut raw: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut raw_folders = Vec::new();
     let mut skipped = Vec::new();
     let mut expanded: u64 = 0;
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(|e| ImportError::Damaged(e.to_string()))?;
         if entry.is_dir() {
+            raw_folders.push(entry.name().trim_end_matches('/').to_string());
             continue;
         }
         let name = entry.name().replace('\\', "/");
@@ -102,7 +105,18 @@ pub fn read_zip(bytes: &[u8]) -> Result<Imported, ImportError> {
         raw.push((name, data));
     }
 
-    let prefix = common_folder(raw.iter().map(|(n, _)| n.as_str()));
+    // Directory entries participate in wrapper detection. An otherwise empty top-level folder
+    // must keep us from stripping a different folder that happens to contain every file.
+    let folder_names: Vec<String> = raw_folders.iter().map(|n| format!("{}/", n.trim_end_matches('/'))).collect();
+    let prefix = common_folder(raw.iter().map(|(n, _)| n.as_str()).chain(folder_names.iter().map(String::as_str)));
+    let folders: Vec<String> = raw_folders.into_iter()
+        .filter_map(|name| {
+            if name == prefix.trim_end_matches('/') { return None; }
+            let stripped = name.strip_prefix(&prefix).unwrap_or(&name);
+            let rel = clean_rel_path(stripped)?;
+            if is_litter(&rel) || is_build_output(&rel) || rel.split('/').any(|part| part.eq_ignore_ascii_case(".git") || part.eq_ignore_ascii_case(".galley")) { None } else { Some(rel) }
+        })
+        .collect();
     let mut files = Vec::new();
     let mut converted = Vec::new();
     for (name, data) in raw {
@@ -149,6 +163,7 @@ pub fn read_zip(bytes: &[u8]) -> Result<Imported, ImportError> {
     let file_count = files.len();
     Ok(Imported {
         files,
+        folders,
         report: Report { main_file, main_reason, other_candidates, file_count, skipped, converted, warnings, title },
     })
 }
@@ -298,12 +313,17 @@ fn warnings_for(files: &[(String, Vec<u8>)]) -> Vec<String> {
 pub fn write_zip(workdir: &std::path::Path) -> std::io::Result<Vec<u8>> {
     use std::io::Write;
     let mut files = Vec::new();
-    collect(workdir, workdir, &mut files)?;
+    let mut folders = Vec::new();
+    collect(workdir, workdir, &mut files, &mut folders)?;
     files.sort();
+    folders.sort();
     let mut buf = Cursor::new(Vec::new());
     {
         let mut w = zip::ZipWriter::new(&mut buf);
         let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        for rel in folders {
+            w.add_directory(format!("{rel}/"), opts).map_err(std::io::Error::other)?;
+        }
         for rel in files {
             w.start_file(rel.as_str(), opts).map_err(std::io::Error::other)?;
             w.write_all(&std::fs::read(workdir.join(&rel))?)?;
@@ -313,7 +333,7 @@ pub fn write_zip(workdir: &std::path::Path) -> std::io::Result<Vec<u8>> {
     Ok(buf.into_inner())
 }
 
-fn collect(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<String>) -> std::io::Result<()> {
+fn collect(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<String>, folders: &mut Vec<String>) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -324,7 +344,8 @@ fn collect(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<String>)
         }
         let kind = entry.file_type()?;
         if kind.is_dir() {
-            collect(root, &path, out)?;
+            folders.push(rel);
+            collect(root, &path, out, folders)?;
         } else if kind.is_file() {
             out.push(rel);
         }
@@ -367,6 +388,36 @@ mod tests {
         let got = read_zip(&z).unwrap();
         assert_eq!(got.report.main_file, "thesis.tex");
         assert!(got.files.iter().any(|(p, _)| p == "chapters/intro.tex"));
+    }
+
+    #[test]
+    fn wrapped_empty_folders_are_normalized() {
+        let mut buf = Cursor::new(Vec::new());
+        let mut w = zip::ZipWriter::new(&mut buf);
+        let opts = zip::write::SimpleFileOptions::default();
+        w.add_directory("paper/", opts).unwrap();
+        w.add_directory("paper/empty/", opts).unwrap();
+        w.add_directory("paper/empty/nested/", opts).unwrap();
+        w.start_file("paper/main.tex", opts).unwrap();
+        w.write_all(DOC).unwrap();
+        w.finish().unwrap();
+        let got = read_zip(&buf.into_inner()).unwrap();
+        assert_eq!(got.report.main_file, "main.tex");
+        assert_eq!(got.folders, vec!["empty", "empty/nested"]);
+    }
+
+    #[test]
+    fn empty_top_level_folder_prevents_stripping_a_file_folder() {
+        let mut buf = Cursor::new(Vec::new());
+        let mut w = zip::ZipWriter::new(&mut buf);
+        let opts = zip::write::SimpleFileOptions::default();
+        w.add_directory("empty/", opts).unwrap();
+        w.start_file("figures/main.tex", opts).unwrap();
+        w.write_all(DOC).unwrap();
+        w.finish().unwrap();
+        let got = read_zip(&buf.into_inner()).unwrap();
+        assert_eq!(got.report.main_file, "figures/main.tex");
+        assert_eq!(got.folders, vec!["empty"]);
     }
 
     #[test]
@@ -428,6 +479,7 @@ mod tests {
     fn an_export_imports_back_unchanged() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("sections")).unwrap();
+        std::fs::create_dir_all(dir.path().join("empty/nested")).unwrap();
         std::fs::create_dir_all(dir.path().join(".git")).unwrap();
         std::fs::create_dir_all(dir.path().join(".galley/build")).unwrap();
         std::fs::write(dir.path().join("main.tex"), DOC).unwrap();
@@ -438,6 +490,7 @@ mod tests {
         let back = read_zip(&zip).unwrap();
         let paths: Vec<&str> = back.files.iter().map(|(p, _)| p.as_str()).collect();
         assert_eq!(paths, vec!["main.tex", "sections/intro.tex"]);
+        assert!(back.folders.contains(&"empty/nested".to_string()));
         assert_eq!(back.report.main_file, "main.tex");
     }
 

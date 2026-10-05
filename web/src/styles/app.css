@@ -289,6 +289,8 @@ a {
 }
 
 .drawer {
+  position: relative;
+  flex-shrink: 0;
   width: 280px;
   border-right: 1px solid var(--line);
   background: var(--bg-panel);
@@ -2266,3 +2268,28 @@ ol.steps .link {
 .pcard {
   cursor: pointer;
 }
+
+/* The sidebar handle stays in its grid column, including when the drawer floats on mobile. */
+.drawer-resize {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  z-index: 6;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+}
+.drawer-resize:hover, .drawer-resize.dragging, .drawer-resize:focus-visible {
+  background: var(--red);
+  opacity: .6;
+}
+.files-header { flex-wrap: wrap; gap: 8px; padding-right: 16px; }
+.files-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.folder-row { padding-right: 12px; }
+.folder-row svg { flex-shrink: 0; }
+.folder-row .folder-chevron { display: flex; transform: rotate(-90deg); }
+.folder-row[aria-expanded='true'] .folder-chevron { transform: none; }
+.folder-target { display: flex; align-items: center; gap: 6px; padding: 4px 8px 8px; color: var(--text-2); font-size: 11px; }
+.folder-target span { overflow-wrap: anywhere; }

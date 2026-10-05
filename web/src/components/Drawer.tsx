@@ -29,18 +29,21 @@ import {
 } from '../store/store';
 import { AgentsDrawer } from './AgentsDrawer';
 import { BibDrawer } from './BibDrawer';
+import { DrawerResize, useDrawerWidth } from './DrawerResize';
 import { FilesDrawer } from './FilesDrawer';
 import { SubmitDrawer } from './SubmitDrawer';
 import { TasksDrawer } from './TasksDrawer';
 
 export function Drawer() {
   const which = drawer.value;
+  const sizing = useDrawerWidth();
   // The main grid has a fixed column for the drawer. Removing the element would shift the editor,
   // the divider and the preview one column left and squeeze the PDF into the 6 px divider slot, so a
   // closed drawer keeps an empty, zero-width placeholder in its column.
   if (!which) return <aside class="drawer closed" aria-hidden="true" />;
   return (
-    <aside class="drawer" aria-label={TITLES[which]}>
+    <aside class="drawer" aria-label={TITLES[which]} style={{ width: sizing.width }}>
+      <DrawerResize {...sizing} />
       {which === 'files' && <FilesDrawer />}
       {which === 'outline' && <OutlineDrawer />}
       {which === 'comments' && <CommentsDrawer />}

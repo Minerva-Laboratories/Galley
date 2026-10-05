@@ -160,6 +160,7 @@ export const isAdmin = computed(() => projectRole.value === 'admin');
 /** Bumped when membership or governance requests change, so the Share modal re-fetches. */
 export const sharingNonce = signal<number>(0);
 export const files = signal<FileEntry[]>([]);
+export const folders = signal<string[]>([]);
 export const openTabs = signal<string[]>([]);
 export const currentFile = signal<string | null>(null);
 export const drawer = signal<DrawerName | null>('files');
@@ -283,6 +284,7 @@ export function resetProject() {
   comments.value = [];
   suggestions.value = [];
   files.value = [];
+  folders.value = [];
   openTabs.value = [];
   currentFile.value = null;
   peers.value = [];

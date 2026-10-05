@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { api, ApiError, type FileEntry } from '../api';
 import { saveSettings } from '../store/settings';
-import { canEdit, currentFile, files, forgetFile, movedFile, openFile, project, showToast } from '../store/store';
+import { canEdit, currentFile, files, folders, forgetFile, movedFile, openFile, project, showToast } from '../store/store';
 import { closeDoc } from '../sync/docs';
+import { fileTree } from '../util/fileTree';
 import { Icon } from './Icon';
 
 /** Formats the browser can show on its own. Everything else downloads. */
@@ -18,7 +19,10 @@ function message(e: unknown, fallback: string): string {
 
 async function refreshFiles(id: string) {
   try {
-    files.value = await api.listFiles(id);
+    const [list, dirs] = await Promise.all([api.listFiles(id), api.listFolders(id)]);
+    if (project.value?.id !== id) return;
+    files.value = list;
+    folders.value = dirs;
   } catch {
     // The next event or a reload brings the list back in line.
   }
@@ -104,7 +108,10 @@ function sizeLabel(bytes: number): string {
 }
 
 export function FilesDrawer() {
-  const [adding, setAdding] = useState(false);
+  const [adding, setAdding] = useState<'file' | 'folder' | null>(null);
+  const [selectedFolder, setSelectedFolder] = useState('');
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [creating, setCreating] = useState(false);
   const [name, setName] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [menu, setMenu] = useState<string | null>(null);
@@ -131,16 +138,38 @@ export function FilesDrawer() {
   const main = project.value?.main_file;
   const editable = canEdit.value;
 
+  const target = folders.value.includes(selectedFolder) ? selectedFolder : '';
+  const startAdding = (kind: 'file' | 'folder') => {
+    setAdding(kind);
+    setName(target ? `${target}/` : '');
+    setError(null);
+  };
+  const reveal = (path: string) => setCollapsed((old) => new Set([...old].filter((p) => path !== p && !path.startsWith(`${p}/`))));
+  const inTarget = (items: Upload[]) => items.map((item) => ({ ...item, path: target ? `${target}/${item.path}` : item.path }));
+
   const create = async () => {
     const path = name.trim();
-    if (!id || !path) return;
+    if (!id || !path || creating) return;
+    setCreating(true);
     try {
+      if (adding === 'folder') {
+        const folder = await api.createFolder(id, path);
+        await refreshFiles(id);
+        setSelectedFolder(folder.path);
+        reveal(folder.path);
+        setAdding(null);
+        setName('');
+        setError(null);
+        showToast(`Created ${folder.path}. New files and uploads will go here.`);
+        return;
+      }
       const entry = await api.createFile(id, path);
       // The file_created event may have already added it. Dedupe by path either way.
       files.value = [...files.value.filter((f) => f.path !== entry.path), entry].sort((a, b) => a.path.localeCompare(b.path));
-      setAdding(false);
+      setAdding(null);
       setName('');
       setError(null);
+      reveal(entry.path);
       openFile(entry.path);
       // A standalone .tex file is not part of the document until the main file pulls it in.
       if (entry.path.endsWith('.tex') && entry.path !== main) {
@@ -148,7 +177,9 @@ export function FilesDrawer() {
         showToast(`Created ${entry.path}. Add \\input{${base}} to ${main ?? 'main.tex'} to include it in the build.`);
       }
     } catch (e) {
-      setError(message(e, 'Could not create the file.'));
+      setError(message(e, `Could not create the ${adding ?? 'file'}.`));
+    } finally {
+      setCreating(false);
     }
   };
 
@@ -196,23 +227,27 @@ export function FilesDrawer() {
     depth.current = 0;
     setDragging(false);
     if (!editable || !e.dataTransfer) return;
-    void droppedFiles(e.dataTransfer).then(uploadAll);
+    void droppedFiles(e.dataTransfer).then((items) => uploadAll(inTarget(items)));
   };
 
   const hasFiles = (e: DragEvent) => !!e.dataTransfer && Array.from(e.dataTransfer.types).includes('Files');
 
   const list = files.value;
+  const rows = fileTree(list, folders.value, collapsed);
   return (
     <>
-      <div class="dh">
+      <div class="dh files-header">
         <span>Files</span>
         {editable && (
-          <span style={{ display: 'flex', gap: 6 }}>
+          <span class="files-actions">
             <button class="tb" onClick={() => picker.current?.click()} title="Upload files, or drop them on the list">
               <Icon name="upload" size={13} /> Upload
             </button>
-            <button class="tb" onClick={() => setAdding(true)}>
+            <button class="tb" onClick={() => startAdding('file')}>
               <Icon name="plus" size={13} /> New file
+            </button>
+            <button class="tb" onClick={() => startAdding('folder')}>
+              <Icon name="folder" size={13} /> New folder
             </button>
           </span>
         )}
@@ -225,10 +260,16 @@ export function FilesDrawer() {
             const el = e.target as HTMLInputElement;
             const picked = Array.from(el.files ?? []).map((f) => ({ path: f.name, file: f }));
             el.value = '';
-            void uploadAll(picked);
+            void uploadAll(inTarget(picked));
           }}
         />
       </div>
+      {editable && (
+        <div class="folder-target">
+          <span>Adding to: {target || 'Project root'}</span>
+          {target && <button class="tb" onClick={() => setSelectedFolder('')}>Use root</button>}
+        </div>
+      )}
       <div
         class={`db files-db ${dragging ? 'dragging' : ''}`}
         onDragEnter={(e) => {
@@ -256,29 +297,51 @@ export function FilesDrawer() {
           >
             <input
               ref={input}
-              placeholder="sections/method.tex"
+              placeholder={adding === 'folder' ? 'figures' : 'sections/method.tex'}
               value={name}
               onInput={(e) => setName((e.target as HTMLInputElement).value)}
-              onKeyDown={(e) => e.key === 'Escape' && (setAdding(false), setError(null))}
-              aria-label="New file path"
+              onKeyDown={(e) => e.key === 'Escape' && (setAdding(null), setError(null))}
+              aria-label={adding === 'folder' ? 'New folder path' : 'New file path'}
             />
-            <button class="tb primary" type="submit" disabled={!name.trim()}>
-              Add
+            <button class="tb primary" type="submit" disabled={!name.trim() || creating}>
+              {creating ? 'Creating…' : 'Add'}
             </button>
+            <button class="tb" type="button" onClick={() => { setAdding(null); setError(null); }}>Cancel</button>
           </form>
         )}
         {error && <div class="err">{error}</div>}
-        {list.length === 0 && (
+        {rows.length === 0 && (
           <div class="empty">
             <b>No files yet</b>
             Add a .tex file to start writing, or drop files here.
           </div>
         )}
-        {list.map((f) => (
-          <div key={f.path} class={`row filerow ${f.path === currentFile.value ? 'on' : ''}`}>
+        {rows.map(({ path, name: basename, depth: level, file: f }) => !f ? (
+          <button
+            key={path}
+            class={`row folder-row ${target === path ? 'on' : ''}`}
+            style={{ paddingLeft: 8 + level * 16 }}
+            aria-label={`Folder ${path}`}
+            aria-expanded={!collapsed.has(path)}
+            title={`${path} — select as destination; click to expand or collapse`}
+            onClick={() => {
+              setSelectedFolder(path);
+              setCollapsed((old) => {
+                const next = new Set(old);
+                if (next.has(path)) next.delete(path); else next.add(path);
+                return next;
+              });
+            }}
+          >
+            <span class="folder-chevron"><Icon name="chevron" /></span>
+            <Icon name="folder" />
+            <span class="n">{basename}</span>
+          </button>
+        ) : (
+          <div key={f.path} style={{ paddingLeft: 8 + level * 16 }} class={`row filerow ${f.path === currentFile.value ? 'on' : ''}`}>
             <button class="fname" onClick={() => open(f)} title={f.kind === 'text' ? `Open ${f.path}` : `${f.path} · ${sizeLabel(f.size)}`}>
               <Icon name="file" />
-              <span class="n">{f.path}</span>
+              <span class="n">{basename}</span>
               <span class="m">{f.path === main ? 'main' : f.kind === 'binary' ? sizeLabel(f.size) : ''}</span>
             </button>
             <button
@@ -326,7 +389,7 @@ export function FilesDrawer() {
             )}
           </div>
         ))}
-        {editable && list.length > 0 && <div class="hint">Drop files or folders here to upload them, up to 25 MB each.</div>}
+        {editable && list.length > 0 && <div class="hint">Select a folder for new files and uploads. Use a file’s “Rename or move…” action to move it. Drop files or folders here, up to 25 MB each.</div>}
         {id && list.length > 0 && (
           <a class="export-link" href={`/api/projects/${encodeURIComponent(id)}/export`} download>
             <Icon name="download" size={13} /> Download the project as a zip

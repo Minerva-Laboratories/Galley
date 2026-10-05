@@ -176,6 +176,16 @@ impl Registry {
         files: Vec<(String, Vec<u8>)>,
         main_file: &str,
     ) -> Result<ProjectMeta, RegistryError> {
+        self.create_imported_with_folders(name, files, Vec::new(), main_file).await
+    }
+
+    pub async fn create_imported_with_folders(
+        &self,
+        name: &str,
+        files: Vec<(String, Vec<u8>)>,
+        folders: Vec<String>,
+        main_file: &str,
+    ) -> Result<ProjectMeta, RegistryError> {
         let name = name.trim();
         let base = slugify(name);
         if base.is_empty() {
@@ -220,6 +230,9 @@ impl Registry {
         write_meta(&dir, &meta)?;
 
         let project = self.open(&id).await?;
+        for folder in &folders {
+            project.create_folder(folder)?;
+        }
         for path in &text_paths {
             project.doc(path).await?;
         }
