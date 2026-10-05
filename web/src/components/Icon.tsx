@@ -8,9 +8,19 @@ const PATHS: Record<string, string> = {
   bib: 'M4 19V5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2zm0 0a2 2 0 0 0 2 2h13M9 7h6M9 11h6',
   agents: 'M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8zM19 17l.7 2.3L22 20l-2.3.7L19 23l-.7-2.3L16 20l2.3-.7z',
   search: 'M18 18a7 7 0 1 0-14 0 7 7 0 0 0 14 0zM20 20l-3.5-3.5',
+  sun: 'M16 12a4 4 0 1 0-8 0 4 4 0 0 0 8 0M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4',
   theme: 'M12 3a9 9 0 1 0 9 9c0-.5 0-1-.1-1.4A5.5 5.5 0 0 1 12 3z',
   chevron: 'm6 9 6 6 6-6',
+  folder: 'M3 7V4h7l2 3h9v13H3z',
   file: 'M14 3v5h5M6 3h8l5 5v13H6z',
+  'file-tex': 'M14 3v5h5M6 3h8l5 5v13H6zM9 11h7m-3.5 0v7M10 18h5',
+  'file-pdf': 'M14 3v5h5M6 3h8l5 5v13H6z',
+  'file-text': 'M14 3v5h5M6 3h8l5 5v13H6zM9 11h7M9 14h7M9 17h5',
+  image: 'M3 4h18v16H3zM3 17l5-5 4 4 3-3 6 6M16 8h.01',
+  'file-settings': 'M4 6h16M4 12h16M4 18h16M8 3v6M16 9v6M10 15v6',
+  table: 'M3 4h18v16H3zM3 10h18M9 4v16M3 15h18',
+  archive: 'M14 3v5h5M6 3h8l5 5v13H6zM10 4h2M10 7h2M10 10h2M10 13h2M10 16h3v3h-3z',
+  code: 'M8 6l-6 6 6 6M16 6l6 6-6 6M14 4l-4 16',
   plus: 'M12 5v14M5 12h14',
   close: 'M6 6l12 12M18 6 6 18',
   back: 'M15 6l-6 6 6 6',
@@ -30,6 +40,7 @@ export function Icon({ name, size }: { name: keyof typeof PATHS | string; size?:
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true" style={s}>
       <path d={d} />
+      {name === 'file-pdf' && <text x="12.5" y="17" text-anchor="middle" fill="currentColor" stroke="none" font-size="6" font-weight="700" font-family="sans-serif">PDF</text>}
     </svg>
   );
 }

@@ -157,6 +157,33 @@ pub struct RenameBody {
     to: String,
 }
 
+#[derive(Deserialize)]
+pub struct CreateFolderBody {
+    path: String,
+}
+
+/// GET /api/projects/{id}/folders.
+pub async fn list_folders(
+    State(app): State<AppState>, Path(id): Path<String>, CurrentUser(user): CurrentUser,
+) -> Result<Json<Vec<String>>, AppError> {
+    app.require(&user, &id, Role::can_view, "seeing the folders").await?;
+    let project = app.registry.open(&id).await?;
+    Ok(Json(project.list_folders()?))
+}
+
+/// POST /api/projects/{id}/folders with {"path":"sections/new"}.
+pub async fn create_folder(
+    State(app): State<AppState>, Path(id): Path<String>, CurrentUser(user): CurrentUser,
+    Json(body): Json<CreateFolderBody>,
+) -> Result<(StatusCode, Json<Value>), AppError> {
+    app.require(&user, &id, Role::can_edit, "adding folders").await?;
+    let project = app.registry.open(&id).await?;
+    let path = project.create_folder(&body.path)?;
+    app.registry.touch(&id);
+    app.store.audit(Some(&id), Some(&user), "folder.create", Some(&path));
+    Ok((StatusCode::CREATED, Json(json!({ "path": path }))))
+}
+
 /// POST /api/projects/{id}/files/rename. A move of the main file moves the setting with it.
 pub async fn rename(
     State(app): State<AppState>,

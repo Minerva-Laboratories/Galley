@@ -37,6 +37,7 @@ export function Preview() {
   const [scale, setScale] = useState(1);
   const [highlight, setHighlight] = useState<{ page: number; top: number; height: number } | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [dismissedNotice, setDismissedNotice] = useState<string | null>(null);
   const id = project.value?.id;
   const version = pdfVersion.value;
   const last = build.value.last;
@@ -140,6 +141,9 @@ export function Preview() {
 
   const stale = last?.status !== 'ok' && last?.status !== undefined && last.pdf_available;
   const dviShowingPrevious = last?.status === 'ok' && last.engine === 'latex' && !last.pdf_fresh && last.pdf_available;
+  const noticeKey = last ? `${id}:${last.id}:${last.finished_at}` : null;
+  const notice = stale ? 'Last build failed. Showing the previous PDF.'
+    : dviShowingPrevious ? 'This build produced no new PDF. Showing the previous PDF.' : null;
   const showEmpty = version === 0;
 
   return (
@@ -194,8 +198,14 @@ export function Preview() {
         <span class="pg">{pageCount ? `${current} / ${pageCount}` : '— / —'}</span>
       </div>
       <div class={`pb ${showEmpty ? 'centered' : ''}`} ref={host} onScroll={onScroll}>
-        {stale && <div class="stale">Last build failed. Showing the previous PDF.</div>}
-        {dviShowingPrevious && <div class="stale">This build produced no new PDF. Showing the previous PDF.</div>}
+        {notice && dismissedNotice !== noticeKey && (
+          <div class="stale" role="status">
+            <span>{notice}</span>
+            <button class="stale-close" aria-label="Dismiss build notice" title="Dismiss" onClick={() => setDismissedNotice(noticeKey)}>
+              <Icon name="close" size={14} />
+            </button>
+          </div>
+        )}
         {showEmpty && (
           <div class="empty">
             <b>No PDF yet</b>

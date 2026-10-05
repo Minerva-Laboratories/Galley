@@ -71,10 +71,10 @@ async fn upload_rename_delete_commit_and_deleted_text_stays_deleted() {
     assert!(!dir.path().join("notes.tex").exists());
     assert_eq!(std::fs::read_to_string(dir.path().join("sections/notes.tex")).unwrap(), "hello notes");
     p.rename_file("figs/plot.png", "plot.png", "Ana").await.unwrap();
-    assert!(!dir.path().join("figs").exists(), "empty folders are pruned");
+    assert!(dir.path().join("figs").is_dir(), "empty folders remain available");
 
     p.delete_file("sections/notes.tex", "Ana").await.unwrap();
-    assert!(!dir.path().join("sections").exists());
+    assert!(dir.path().join("sections").is_dir());
 
     // The stale browser edits its copy of the old path and syncs. The file must not come back.
     stale.doc.get_or_insert_text("content").insert(&mut stale.doc.transact_mut(), 0, "late ");
@@ -92,6 +92,36 @@ async fn upload_rename_delete_commit_and_deleted_text_stays_deleted() {
     }
     let names: Vec<String> = p.list_files().unwrap().into_iter().map(|f| f.path).collect();
     assert_eq!(names, vec!["notes.tex", "plot.png"]);
+}
+
+#[tokio::test]
+async fn folders_survive_file_removal_and_reopening() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = ProjectSync::open("t", dir.path(), fast()).unwrap();
+    assert_eq!(p.create_folder("notes/./drafts").unwrap(), "notes/drafts");
+    assert_eq!(p.create_folder("notes/drafts").unwrap(), "notes/drafts");
+    for bad in ["../outside", ".git/hooks", "notes/.galley/private", "a\\b", "", "/tmp/outside"] {
+        assert!(p.create_folder(bad).is_err(), "accepted {bad:?}");
+    }
+    p.put_file("notes/drafts/a.tex", b"x", false, "Ana").await.unwrap();
+    p.delete_file("notes/drafts/a.tex", "Ana").await.unwrap();
+    assert_eq!(p.list_folders().unwrap(), vec!["notes", "notes/drafts"]);
+    drop(p);
+    let reopened = ProjectSync::open("t", dir.path(), fast()).unwrap();
+    assert_eq!(reopened.list_folders().unwrap(), vec!["notes", "notes/drafts"]);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn folder_operations_do_not_follow_symlinks() {
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    symlink(outside.path(), dir.path().join("linked")).unwrap();
+    let p = ProjectSync::open("t", dir.path(), fast()).unwrap();
+    assert!(p.create_folder("linked/child").is_err());
+    assert!(!outside.path().join("child").exists());
+    assert!(p.list_folders().unwrap().is_empty());
 }
 
 #[tokio::test]

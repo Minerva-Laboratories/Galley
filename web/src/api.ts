@@ -515,6 +515,9 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(patch),
     }),
+  listFolders: (id: string) => request<string[]>(`/api/projects/${encodeURIComponent(id)}/folders`),
+  createFolder: (id: string, path: string) =>
+    request<{ path: string }>(`/api/projects/${encodeURIComponent(id)}/folders`, { method: 'POST', body: JSON.stringify({ path }) }),
   listFiles: (id: string) => request<FileEntry[]>(`/api/projects/${encodeURIComponent(id)}/files`),
   createFile: (id: string, path: string) =>
     request<FileEntry>(`/api/projects/${encodeURIComponent(id)}/files`, {

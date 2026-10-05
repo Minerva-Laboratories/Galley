@@ -75,9 +75,9 @@ jobs:
         run: bash scripts/test-engines.sh
       - run: npx playwright install --with-deps chromium
         working-directory: web
-      - name: Verify browser selection and temporary builds
+      - name: Verify browser compilation and file management
         env:
           GALLEY_TEST_ENGINE_MATRIX: "1"
           GALLEY_TEST_TECTONIC: ${{ runner.temp }}/galley-engines/tectonic/tectonic
           GALLEY_TEST_TECTONIC_CACHE: ${{ runner.temp }}/galley-engines/cache
-        run: bash scripts/e2e.sh engines.spec.ts
+        run: bash scripts/e2e.sh engines.spec.ts files.spec.ts

@@ -150,7 +150,7 @@ pub async fn import_project(
         .or(from_file)
         .unwrap_or_else(|| "Imported project".into());
     let name: String = name.chars().take(120).collect();
-    let meta = app.registry.create_imported(&name, imported.files, &imported.report.main_file).await?;
+    let meta = app.registry.create_imported_with_folders(&name, imported.files, imported.folders, &imported.report.main_file).await?;
     let store = app.store.clone();
     let (pid, uid) = (meta.id.clone(), user.id.clone());
     tokio::task::spawn_blocking(move || store.set_member(&pid, &uid, Role::Admin))

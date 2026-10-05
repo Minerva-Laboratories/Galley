@@ -106,7 +106,7 @@ export function TopBar() {
         aria-label="Toggle theme"
         onClick={toggleTheme}
       >
-        <Icon name="theme" size={16} />
+        <Icon name={theme.value === 'light' ? 'sun' : 'theme'} size={16} />
       </button>
       <UserMenu />
     </header>
