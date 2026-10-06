@@ -386,7 +386,7 @@ function draw(
   const line = css('--line', '#d9d3c6');
   const text = css('--text', '#1b1a17');
   const text2 = css('--text-2', '#5b6470');
-  const accent = css('--red', '#c6402a');
+  const accent = css('--accent-ink', '#c6402a');
   const moss = css('--moss', '#3e7c59');
   const panel = css('--bg-panel', '#fbf9f4');
   ctx.clearRect(0, 0, width, height);

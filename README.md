@@ -157,7 +157,9 @@ venue. Each paper template names the class to swap in.
 - A persistent figure cache, so TikZ figures are drawn once and reused until their code changes.
 - SVG figures converted without shell escape.
 - Two-way SyncTeX. Click the PDF to reach the source, click the source to reach the page.
-- A light theme and a dark theme, both checked for contrast.
+- A light theme and a dark theme, with a personal accent color in **Appearance** (the palette button).
+  Choose a preset, use the color picker, or enter a hex color. Changes preview immediately and are
+  saved in your browser. Text contrast adapts to the color; errors keep their own red.
 
 <img src="docs/images/editor-light.png" alt="The same project in the light theme" width="100%">
 

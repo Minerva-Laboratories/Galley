@@ -2,19 +2,23 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import { api } from '../api';
 import { login, messageOf, signup } from '../store/auth';
 import { currentUser, navigate, needsSetup, publicSignup, setDisplayName, theme, toggleTheme } from '../store/store';
+import { AppearanceButton } from './Appearance';
 import { Icon } from './Icon';
 
 function Shell({ children }: { children: preact.ComponentChildren }) {
   return (
     <div class="auth">
-      <button
-        class="tb icon auth-theme"
-        title={theme.value === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
-        aria-label="Toggle theme"
-        onClick={toggleTheme}
-      >
-        <Icon name={theme.value === 'light' ? 'sun' : 'theme'} size={16} />
-      </button>
+      <div class="auth-appearance">
+        <AppearanceButton />
+        <button
+          class="tb icon"
+          title={theme.value === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+          aria-label="Toggle theme"
+          onClick={toggleTheme}
+        >
+          <Icon name={theme.value === 'light' ? 'sun' : 'theme'} size={16} />
+        </button>
+      </div>
       <div class="auth-card">
         <div class="wordmark" aria-label="Galley">
           galley<span class="caret">^</span>
