@@ -88,7 +88,7 @@ const STEPS: Step[] = [
     target: '[data-tour="connect"]',
     body: (
       <p>
-        Connect AI lets Claude Code, Cursor or another assistant read the paper, compile it and propose edits, using your
+        Connect AI lets OpenAI Codex, Claude Code, Cursor or another assistant read the paper, compile it and propose edits, using your
         own account. Its edits arrive as suggestions, so nothing changes until someone accepts them.
       </p>
     ),

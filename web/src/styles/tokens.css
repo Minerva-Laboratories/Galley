@@ -5,6 +5,13 @@
   --paper: #f6f3ec;
   --vellum: #ece7dc;
   --panel: #fbf9f4;
+  /* Personal accent colors are computed in util/accent.ts with readable text variants.
+     Semantic error colors stay independent of appearance preferences. */
+  --accent: #c6402a;
+  --accent-ink: #c6402a;
+  --accent-soft: #f6dcd5;
+  --accent-hover: #b2361f;
+  --on-accent: #fff;
   --red: #c6402a;
   --red-soft: #f6dcd5;
   --slate: #5b6470;

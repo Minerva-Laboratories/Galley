@@ -24,6 +24,7 @@ import {
   tourOpen,
 } from '../store/store';
 import { EditableName } from './EditableName';
+import { AppearanceButton } from './Appearance';
 import { Icon } from './Icon';
 
 export function TopBar() {
@@ -100,6 +101,7 @@ export function TopBar() {
           <Icon name="share" size={14} /> Share
         </button>
       )}
+      <AppearanceButton />
       <button
         class="tb icon"
         title={theme.value === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}

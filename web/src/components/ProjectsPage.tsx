@@ -4,6 +4,7 @@ import { ago } from '../util/time';
 import { logout } from '../store/auth';
 import { currentUser, navigate, showToast, theme, toggleTheme } from '../store/store';
 import { EditableName } from './EditableName';
+import { AppearanceButton } from './Appearance';
 import { Icon } from './Icon';
 
 export function ProjectsPage() {
@@ -115,6 +116,7 @@ export function ProjectsPage() {
         <button class="tb" onClick={() => void logout()}>
           Sign out
         </button>
+        <AppearanceButton />
         <button
           class="tb icon"
           title={theme.value === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}

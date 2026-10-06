@@ -1,4 +1,5 @@
 // The only mutable state in the app. Components read signals. Actions live next to them.
+import { DEFAULT_ACCENT, normalizeHex } from '../util/accent';
 import { computed, signal } from '@preact/signals';
 import type { EditorView } from '@codemirror/view';
 import type { AuthUser, BuildResult, Checkpoint, Comment, CommitInfo, EnginesResponse, FileEntry, PdfLocation, ProjectMeta, Role2, Suggestion } from '../api';
@@ -51,6 +52,14 @@ export function setTheme(next: Theme) {
 }
 export function toggleTheme() {
   setTheme(theme.value === 'dark' ? 'light' : 'dark');
+}
+
+export const accentColor = signal(normalizeHex(readPref('galley.accent') ?? '') ?? DEFAULT_ACCENT);
+export function setAccentColor(value: string) {
+  const color = normalizeHex(value);
+  if (!color) return;
+  accentColor.value = color;
+  writePref('galley.accent', color);
 }
 
 export const displayName = signal<string>(readPref('galley.name') ?? '');
