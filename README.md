@@ -34,6 +34,7 @@ your disk.
 - [Documentation](#documentation)
 - [Status](#status)
 - [Security](#security)
+- [License](#license)
 
 ## Why Galley
 
@@ -85,9 +86,10 @@ Galley compiles with Tectonic by default inside a sandbox. Administrators can in
 offer pdfLaTeX, XeLaTeX, LuaLaTeX and LaTeX (DVI → PS → PDF). Choose **Compiler** in the build bar;
 the choice is saved per project. Unavailable engines show the missing tools. The preview labels the
 compiler that produced its PDF separately from the selection for the next build.
-The log parser turns the output into
-cards: what went wrong, where, and what to do about it. Many cards carry a fix you can apply with one
-click. A failed build never replaces the PDF you already had.
+
+The log parser turns the output into cards: what went wrong, where, and what to do about it. Many
+cards carry a fix you can apply with one click. A failed build never replaces the PDF you already
+had. When the server is busy, a waiting build shows its place in the queue.
 
 <img src="docs/images/problems.png" alt="Three error cards, each with a hint and an Add booktabs fix" width="100%">
 
@@ -160,6 +162,15 @@ Ask your assistant to inspect the paper or fix a build error; proposed edits app
 
 <img src="docs/images/share.png" alt="The share panel with roles, links and the MCP client command" width="100%">
 
+### Move in from Overleaf, and take your work out
+
+In Overleaf, choose Menu, then Download, then Source. In Galley, choose **Import zip** on the
+projects page. The import finds the main file by itself, drops build output and editor litter,
+removes a single wrapping folder, and converts text that is not UTF-8. A summary lists what it did
+and anything that needs your attention. You set nothing.
+
+**Download the project as a zip**, under the file list, gives you a full copy at any time.
+
 ### Start from a template
 
 Six templates ship inside the binary: blank article, conference paper, preprint, talk, thesis or
@@ -181,6 +192,9 @@ venue. Each paper template names the class to swap in.
 - A persistent figure cache, so TikZ figures are drawn once and reused until their code changes.
 - SVG figures converted without shell escape.
 - Two-way SyncTeX. Click the PDF to reach the source, click the source to reach the page.
+- Rename a project by clicking its name, in the top bar or on its card.
+- A short welcome tour on first use, which you can skip and reopen from the account menu.
+- On a narrow screen, **Source** and **PDF** buttons in the build bar show one pane at a time.
 - A light theme and a dark theme, with a personal accent color in **Appearance** (the palette button).
   Choose a preset, use the color picker, or enter a hex color. Changes preview immediately and are
   saved in your browser. Text contrast adapts to the color; errors keep their own red.
@@ -203,7 +217,7 @@ flowchart LR
     IDX[paper index]
     MCP[MCP endpoint]
   end
-  SB[bubblewrap sandbox<br/>Tectonic]
+  SB[bubblewrap sandbox<br/>Tectonic or TeX Live]
   AI[your AI client]
 
   CM <-->|edits and presence| WS
@@ -242,15 +256,21 @@ galley init                               # write a default galley.toml
 galley engine install                     # fetch Tectonic now instead of on the first build
 
 galley admin create-user <email> --name "Name" --password '...' [--admin]
-galley admin reset-password <email>
-galley project new <name> --owner <email>
+galley admin reset-password <email> --password '...'
+galley admin list
+galley project new <name> [--owner <email>]
+galley project list                       # project ids for the commands below
 
-galley map                                # the paper map, in the terminal
-galley find <query>                       # ranked passages
-galley bib                                # bibliography audit
-galley math '<expression>'                # find formulas by shape
-galley lit                                # catalogue lookups for the bibliography
-galley agent run <project> --agent fix-build
+galley map <project>                      # the paper map, in the terminal
+galley find <project> '<query>'           # ranked passages
+galley bib <project>                      # bibliography audit
+galley math <project> '<expression>'      # find formulas by shape
+galley lit <project> [--enable]           # catalogue lookups for the bibliography
+
+# A local model edits a checkout and sends its changes back as suggestions.
+# The address and the token come from the Connect AI panel.
+galley agent run --url https://your-host/mcp/<project> --token <device-token> \
+  --prompt fix-build --model qwen2.5-coder:14b
 ```
 
 ## Configuration
@@ -296,6 +316,9 @@ already run. Either way the machine needs bubblewrap or Docker, because public
 mode refuses to start without a compile sandbox. `deploy/README.md` covers the
 service, the sandbox, TLS and backups.
 
+The `Dockerfile` builds an image for any container host. It carries Tectonic only. Build it with
+`--build-arg TEXLIVE=1` to add TeX Live and offer every compiler, at about 1.5 GB more.
+
 ## Develop
 
 ```sh
@@ -303,7 +326,7 @@ cargo run -p galley-cli -- serve --dev --data-dir /tmp/galley-dev   # API on por
 cd web && npm install && npm run dev                                # Vite on port 5173
 ```
 
-Run all four checks before you claim something works.
+Run all five checks before you claim something works.
 
 ```sh
 cargo test --workspace
@@ -337,6 +360,7 @@ try `fig` followed by Tab, then Ctrl+K, then Ctrl+Enter.
 |---|---|
 | `docs/SPEC.md` | The product and engineering specification. Authoritative for behaviour. |
 | `docs/RETRIEVAL.md` | The paper index: map, passages, bibliography, graph, math search. |
+| `docs/TYPST.md` | What Typst support would take. Scoped, not built. |
 | `deploy/README.md` | Running Galley as a service, the sandbox, TLS, and backups. |
 
 ## Status
