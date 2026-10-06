@@ -125,14 +125,38 @@ anywhere in the loop.
 
 ### Bring your own AI client
 
-Each project exposes an MCP server over HTTP with a closed tool set. Point Claude Code, an SDK client
-or any MCP client at it with a device token you can revoke. The only write path is `propose_patch`,
-which produces a suggestion for a human to accept or reject. Nothing runs on the server.
+Each project exposes an MCP server over HTTP with a closed tool set. Connect OpenAI Codex, Claude
+Code, Cursor or another MCP client with a device token you can revoke. Your AI client uses your own
+account; proposed edits arrive as suggestions for a human to accept or reject.
+
+**OpenAI Codex:** open **Connect AI**, choose **OpenAI Codex**, and create a token. Select your terminal
+(macOS/Linux or Windows PowerShell) and copy the generated commands. For example, in Bash or Zsh:
 
 ```sh
-claude mcp add --transport http galley https://your-host/mcp/<project> \
-  --header "Authorization: Bearer <device-token>"
+export GALLEY_PAPER_TOKEN='<galley-device-token>'
+codex mcp add galley-paper --url 'https://your-host/mcp/<project>' --bearer-token-env-var GALLEY_PAPER_TOKEN
+codex
 ```
+
+The Codex CLI must already be installed. Use `/mcp` inside Codex to check the connection. Set the
+variable again when starting Codex from a new terminal. This is a **Galley device token**, not an
+OpenAI API key. The panel uses a separate server name for each project.
+
+For the **Codex app or IDE extension**, expand **Using the Codex app or IDE extension?** in the panel
+and copy the generated configuration into your personal `~/.codex/config.toml` (Windows:
+`%USERPROFILE%\.codex\config.toml`). Restart the app or extension and open a new chat. Keep this
+configuration private because it contains your token; update an existing server section instead of
+adding a duplicate. See the [official OpenAI MCP guide](https://developers.openai.com/codex/mcp/).
+
+**Claude Code:** choose it in the same panel to get its setup command:
+
+```sh
+claude mcp add --transport http galley-paper 'https://your-host/mcp/<project>' \
+  --header 'Authorization: Bearer <device-token>'
+```
+
+Other clients can use the displayed MCP address with Streamable HTTP and a Bearer token header.
+Ask your assistant to inspect the paper or fix a build error; proposed edits appear in Comments.
 
 <img src="docs/images/share.png" alt="The share panel with roles, links and the MCP client command" width="100%">
 

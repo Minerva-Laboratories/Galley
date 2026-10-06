@@ -80,4 +80,4 @@ jobs:
           GALLEY_TEST_ENGINE_MATRIX: "1"
           GALLEY_TEST_TECTONIC: ${{ runner.temp }}/galley-engines/tectonic/tectonic
           GALLEY_TEST_TECTONIC_CACHE: ${{ runner.temp }}/galley-engines/cache
-        run: bash scripts/e2e.sh engines.spec.ts files.spec.ts appearance.spec.ts
+        run: bash scripts/e2e.sh engines.spec.ts files.spec.ts appearance.spec.ts connect-ai.spec.ts

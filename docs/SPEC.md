@@ -388,7 +388,7 @@ so a compromised runner can propose but not commit. Runs are rate-limited and lo
 
 ### 7.7 MCP server: bring your own AI client
 
-Galley exposes the §7.1 tool set as an **MCP server**, so a member can drive their project from Claude
+Galley exposes the §7.1 tool set as an **MCP server**, so a member can drive their project from OpenAI Codex, Claude
 Desktop, Claude Code, Cursor or any MCP client instead of the in-app Agents panel. The tools are the
 same: `list_files`, `read_file`, `search`, `read_log`, `compile`, `lookup_citation` and `propose_patch`.
 A scoped, revocable per-client token authenticates them, exactly like a runner (§7.6).
@@ -486,7 +486,8 @@ Self-hosters get the complete feature set by design. That is a stated principle,
    picks which one shows. Ctrl+Shift+P swaps them. Clicking the PDF shows the source; the Sync button
    shows the PDF; a click that only follows the cursor leaves the pane alone.
 6. **Connect AI** (top bar, primary button, every signed-in author): a numbered panel that creates a
-   device token, shows the `claude mcp add` command and the MCP address, offers the local runner
+   device token, offers OpenAI Codex (Bash/Zsh, PowerShell and personal app/IDE configuration),
+   Claude Code and generic MCP instructions, shows the MCP address, offers the local runner
    command, and lists the person's tokens with Revoke. It left the Share modal because connecting an
    assistant is a main feature and a token belongs to a person, not to a project's admins. Share keeps
    a one-line pointer to it.

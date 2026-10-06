@@ -2381,3 +2381,12 @@ ol.steps .link {
   .accent-custom { gap: 8px; padding: 10px; }
   .accent-custom-label span { display: none; }
 }
+
+.connect-modal { width: 660px; }
+.mcp-command { padding: 12px; margin: 8px 0; border: 1px solid var(--line); border-radius: 8px; background: var(--bg-sunk); }
+.mcp-command pre { font: 11px/1.6 var(--mono); margin: 0 0 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.mcp-command .tb { margin-left: auto; }
+.codex-config { margin: 10px 0; font-size: 12px; }
+.codex-config summary { cursor: pointer; font-weight: 500; }
+.codex-config p { color: var(--text-2); overflow-wrap: anywhere; }
+.connect-modal code { font: .9em var(--mono); }
