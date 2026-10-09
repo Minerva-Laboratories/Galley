@@ -6,7 +6,11 @@ const base = process.env.GALLEY_E2E_URL ?? 'http://127.0.0.1:7411';
 export default defineConfig({
   testDir: './e2e',
   timeout: 60_000,
-  retries: 0,
+  // On CI, one retry keeps a timing flake from blocking the team, and the github reporter still
+  // records it: failures and flaky tests become run annotations, which anyone can read through the
+  // API, while the logs need admin rights. Fix every test the annotations call flaky.
+  retries: process.env.CI ? 1 : 0,
+  reporter: process.env.CI ? [['list'], ['github']] : 'list',
   use: {
     baseURL: base,
     trace: 'retain-on-failure',
