@@ -106,6 +106,11 @@ enum Command {
     Doctor,
     /// Write a default galley.toml
     Init,
+    /// Copy projects and the database to object storage, or rebuild a data directory from it
+    Backup {
+        #[command(subcommand)]
+        command: BackupCommand,
+    },
     /// Run a model on your own machine against a project. It needs no TeX. Compiles stay on the server
     Agent {
         #[command(subcommand)]
@@ -145,6 +150,16 @@ enum AgentCommand {
         #[arg(long)]
         workdir: Option<PathBuf>,
     },
+}
+
+#[derive(Subcommand)]
+enum BackupCommand {
+    /// Upload every project that changed, and the database, once. The server does this on its own
+    /// every few minutes when a bucket is configured
+    Run,
+    /// Download the latest backup into an empty data directory. Stop the server first, point
+    /// --data-dir at a fresh directory, then start the server on it
+    Restore,
 }
 
 #[derive(Subcommand)]
@@ -214,7 +229,32 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&data_dir)
         .with_context(|| format!("could not create data directory {}", data_dir.display()))?;
 
+    // A restore must find the data directory empty, so it runs before anything opens a database.
+    if let Command::Backup { command: BackupCommand::Restore } = command {
+        let backup = galley_server::backup::Backup::from_config(&config.backup, &data_dir)?
+            .context("backup is not configured. Set [backup] bucket and its keys, or the GALLEY_BACKUP_* variables.")?;
+        let report = backup.restore().await?;
+        println!("Restored the database and {} projects into {}", report.projects, data_dir.display());
+        for key in report.skipped {
+            println!("Skipped {key}: not a valid project id");
+        }
+        return Ok(());
+    }
+
     match command {
+        Command::Backup { command: _ } => {
+            let state = AppState::new(&data_dir, &config).await?;
+            let backup = state
+                .backup
+                .clone()
+                .context("backup is not configured. Set [backup] bucket and its keys, or the GALLEY_BACKUP_* variables.")?;
+            let status = backup.run_once(state.store.db()).await?;
+            println!(
+                "Backup done: {} projects uploaded{}",
+                status.projects_uploaded,
+                if status.database_uploaded { ", database uploaded" } else { ", database unchanged" }
+            );
+        }
         Command::Serve { bind, port, dev } => {
             let mut addr: SocketAddr = bind
                 .map(Ok)

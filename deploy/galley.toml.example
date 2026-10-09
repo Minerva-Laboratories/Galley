@@ -48,3 +48,13 @@ cpus = 1.0
 # unsandboxed compiler must not face the internet. Turn it on ONLY for a group
 # you trust, and only if the host has neither bubblewrap nor Docker.
 allow_unsandboxed = false
+
+[backup]
+# Continuous backup to an S3-compatible bucket. Off while bucket is empty.
+# Set the keys in the environment, not here: GALLEY_BACKUP_ACCESS_KEY_ID and
+# GALLEY_BACKUP_SECRET_ACCESS_KEY. On Fly, an attached Tigris bucket sets
+# everything. See deploy/README.md, "Backups".
+# endpoint = "https://fly.storage.tigris.dev"
+# bucket = "galley-backup"
+# prefix = "galley"
+# interval_s = 120

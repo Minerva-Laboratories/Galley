@@ -14,6 +14,97 @@ pub struct Config {
     pub build: BuildConfig,
     pub sync: SyncSection,
     pub grammar: GrammarConfig,
+    pub backup: BackupConfig,
+}
+
+/// Continuous backup to an S3-compatible bucket. Off until a bucket is set, here or through the
+/// environment. The keys are best kept out of this file: `GALLEY_BACKUP_ACCESS_KEY_ID` and
+/// `GALLEY_BACKUP_SECRET_ACCESS_KEY`, or the `AWS_*` variables that Tigris on Fly sets.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BackupConfig {
+    /// For example `https://fly.storage.tigris.dev`, `https://<account>.r2.cloudflarestorage.com`
+    /// or `https://s3.eu-central-1.amazonaws.com`.
+    pub endpoint: String,
+    pub bucket: String,
+    pub region: String,
+    /// Key prefix inside the bucket, so one bucket can hold several servers.
+    pub prefix: String,
+    /// Path-style URLs, which MinIO and some self-hosted stores need.
+    pub path_style: bool,
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    /// How often a pass looks for changed projects. Work since the last pass is what a lost
+    /// volume can cost.
+    pub interval_s: u64,
+}
+
+impl Default for BackupConfig {
+    fn default() -> Self {
+        BackupConfig {
+            endpoint: String::new(),
+            bucket: String::new(),
+            region: "auto".into(),
+            prefix: "galley".into(),
+            path_style: false,
+            access_key_id: String::new(),
+            secret_access_key: String::new(),
+            interval_s: 120,
+        }
+    }
+}
+
+impl std::fmt::Debug for BackupConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BackupConfig")
+            .field("endpoint", &self.endpoint)
+            .field("bucket", &self.bucket)
+            .field("region", &self.region)
+            .field("prefix", &self.prefix)
+            .field("access_key_id", &"<redacted>")
+            .field("secret_access_key", &"<redacted>")
+            .field("interval_s", &self.interval_s)
+            .finish()
+    }
+}
+
+/// Backup settings after the environment fills the gaps the file left.
+pub struct ResolvedBackup {
+    pub endpoint: String,
+    pub bucket: String,
+    pub region: String,
+    pub access_key_id: String,
+    pub secret_access_key: String,
+}
+
+impl BackupConfig {
+    /// `None` when backup is off. The file wins over the environment, `GALLEY_BACKUP_*` wins over
+    /// the generic `AWS_*` names, which Tigris on Fly sets when a bucket is attached to the app.
+    pub fn resolve(&self) -> Option<ResolvedBackup> {
+        self.resolve_with(|k| std::env::var(k).ok().filter(|v| !v.is_empty()))
+    }
+
+    fn resolve_with(&self, env: impl Fn(&str) -> Option<String>) -> Option<ResolvedBackup> {
+        let pick = |own: &str, names: &[&str]| -> Option<String> {
+            if !own.is_empty() {
+                return Some(own.to_string());
+            }
+            names.iter().find_map(|n| env(n))
+        };
+        let bucket = pick(&self.bucket, &["GALLEY_BACKUP_BUCKET", "BUCKET_NAME"])?;
+        Some(ResolvedBackup {
+            endpoint: pick(&self.endpoint, &["GALLEY_BACKUP_ENDPOINT", "AWS_ENDPOINT_URL_S3"])
+                .unwrap_or_else(|| "https://s3.amazonaws.com".into()),
+            region: if self.region.is_empty() || self.region == "auto" {
+                pick("", &["GALLEY_BACKUP_REGION", "AWS_REGION"]).unwrap_or_else(|| "auto".into())
+            } else {
+                self.region.clone()
+            },
+            access_key_id: pick(&self.access_key_id, &["GALLEY_BACKUP_ACCESS_KEY_ID", "AWS_ACCESS_KEY_ID"])?,
+            secret_access_key: pick(&self.secret_access_key, &["GALLEY_BACKUP_SECRET_ACCESS_KEY", "AWS_SECRET_ACCESS_KEY"])?,
+            bucket,
+        })
+    }
 }
 
 /// LanguageTool needs Java and a running server, so Galley never requires it. When it is off, the
@@ -217,6 +308,37 @@ mod tests {
         let parsed: Config = toml::from_str("[server]\nbind = \"0.0.0.0:8080\"\n").unwrap();
         assert_eq!(parsed.server.bind, "0.0.0.0:8080");
         assert_eq!(parsed.sync.flush_max_ms, 60_000);
+    }
+
+    #[test]
+    fn backup_is_off_until_a_bucket_and_keys_exist() {
+        let none = |_: &str| None;
+        assert!(BackupConfig::default().resolve_with(none).is_none());
+        let only_bucket = BackupConfig { bucket: "b".into(), ..BackupConfig::default() };
+        assert!(only_bucket.resolve_with(none).is_none(), "no keys, no backup");
+    }
+
+    #[test]
+    fn backup_reads_the_variables_tigris_sets() {
+        let env = |k: &str| {
+            match k {
+                "BUCKET_NAME" => Some("galley-backup"),
+                "AWS_ENDPOINT_URL_S3" => Some("https://fly.storage.tigris.dev"),
+                "AWS_ACCESS_KEY_ID" => Some("tid_x"),
+                "AWS_SECRET_ACCESS_KEY" => Some("tsec_y"),
+                "GALLEY_BACKUP_SECRET_ACCESS_KEY" => Some("own"),
+                _ => None,
+            }
+            .map(str::to_string)
+        };
+        let r = BackupConfig::default().resolve_with(env).unwrap();
+        assert_eq!(r.bucket, "galley-backup");
+        assert_eq!(r.endpoint, "https://fly.storage.tigris.dev");
+        assert_eq!(r.access_key_id, "tid_x");
+        assert_eq!(r.secret_access_key, "own", "the Galley name wins over the generic one");
+        assert_eq!(r.region, "auto");
+        let shown = format!("{:?}", BackupConfig { secret_access_key: "s3cr3t".into(), ..BackupConfig::default() });
+        assert!(!shown.contains("s3cr3t"));
     }
 
     #[test]

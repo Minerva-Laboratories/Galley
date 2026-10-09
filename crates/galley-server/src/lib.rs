@@ -4,6 +4,7 @@
 
 mod app;
 mod assets;
+pub mod backup;
 pub mod auth;
 mod auth_routes;
 mod bib_routes;

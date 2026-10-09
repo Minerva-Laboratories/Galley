@@ -254,6 +254,8 @@ galley serve [--port 7000] [--dev]        # run the server
 galley doctor                             # check sandbox, engine, disk, ports, TLS, fonts
 galley init                               # write a default galley.toml
 galley engine install                     # fetch Tectonic now instead of on the first build
+galley backup run                         # copy changed projects and the database to the bucket
+galley backup restore                     # rebuild an empty data directory from the bucket
 
 galley admin create-user <email> --name "Name" --password '...' [--admin]
 galley admin reset-password <email> --password '...'
@@ -317,6 +319,10 @@ its own certificate, or leave it empty and put Galley behind a reverse proxy you
 already run. Either way the machine needs bubblewrap or Docker, because public
 mode refuses to start without a compile sandbox. `deploy/README.md` covers the
 service, the sandbox, TLS and backups.
+
+Point `[backup]` at any S3-compatible bucket and Galley copies every changed project and the
+database there every two minutes, so a lost disk costs minutes of work, not a day.
+`galley backup restore` rebuilds a server from the bucket.
 
 The `Dockerfile` builds an image for any container host. It carries Tectonic only. Build it with
 `--build-arg TEXLIVE=1` to add TeX Live and offer every compiler, at about 1.5 GB more.

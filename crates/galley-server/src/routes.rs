@@ -16,6 +16,15 @@ pub async fn health(State(app): State<AppState>) -> Json<Value> {
         "version": crate::VERSION,
         "sandbox": app.builder.sandbox.kind,
         "engine": app.builder.engine_path().await.map(|p| p.display().to_string()),
+        // Only whether backups work and when one last succeeded. The error text stays in the log,
+        // since this endpoint needs no sign-in.
+        "backup": match &app.backup {
+            None => json!({ "enabled": false }),
+            Some(b) => {
+                let s = b.status();
+                json!({ "enabled": true, "ok": s.last_error.is_none(), "last_ok": s.last_ok })
+            }
+        },
     }))
 }
 

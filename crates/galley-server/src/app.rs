@@ -41,6 +41,8 @@ pub struct AppState {
     /// The build mode a browser starts in, and the pause before an auto build.
     pub auto_build: bool,
     pub auto_build_delay_ms: u64,
+    /// Continuous backup to object storage, when the operator configured a bucket.
+    pub backup: Option<Arc<crate::backup::Backup>>,
     builds: Arc<RwLock<HashMap<String, Arc<ProjectBuilds>>>>,
     collab: Arc<RwLock<HashMap<String, broadcast::Sender<String>>>>,
 }
@@ -110,6 +112,9 @@ impl AppState {
             None => tracing::info!("tectonic not installed yet; it is downloaded on the first build"),
         }
         let db = Db::open(&data_dir.join("galley.db")).map_err(std::io::Error::other)?;
+        let backup = crate::backup::Backup::from_config(&config.backup, data_dir)
+            .map_err(std::io::Error::other)?
+            .map(Arc::new);
         Ok(AppState {
             registry: Arc::new(Registry::new_with_engine(data_dir, config.sync_config(), b.engine)?),
             builder,
@@ -120,6 +125,7 @@ impl AppState {
             grammar: config.grammar.clone(),
             auto_build: config.build.auto_build,
             auto_build_delay_ms: config.build.auto_build_delay_s.max(1) * 1000,
+            backup,
             builds: Arc::new(RwLock::new(HashMap::new())),
             collab: Arc::new(RwLock::new(HashMap::new())),
         })
@@ -382,6 +388,10 @@ pub struct ServeOptions {
 pub async fn serve(state: AppState, opts: ServeOptions) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(opts.bind).await?;
     let addr = listener.local_addr()?;
+    match &state.backup {
+        Some(backup) => backup.clone().spawn(state.store.db().clone()),
+        None => tracing::info!("backup is off; set [backup] bucket to copy projects to object storage"),
+    }
     tracing::info!(%addr, "galley listening");
     println!("Galley is running at http://{addr}");
     if opts.dev {

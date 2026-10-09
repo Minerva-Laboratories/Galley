@@ -598,7 +598,7 @@ The script:
 galley serve [--config PATH] [--domain tex.example.org] [--port 7000]
 galley admin create-user <email>           galley admin reset-password <email>
 galley project import <zip|git-url> [--name]   galley project export <id> --zip
-galley backup [--to PATH]   galley restore <archive>
+galley backup run          galley backup restore     # S3-compatible bucket, see §9.7
 galley doctor          # checks bwrap, tectonic, disk, ports, TLS
 galley engine install tectonic            galley agents test
 ```
@@ -663,7 +663,7 @@ volumes: { galley-data: {} }
 ```
 
 ### 9.7 Backups
-`galley backup` writes a tar of `data/` and `galley.db` (SQLite online backup API). An optional nightly systemd timer can send it to an `rclone` target. Every project is a git repo, so `origin` mirrors are a second backup at no extra cost.
+Continuous backup goes to an S3-compatible bucket (`[backup]`, off until a bucket is set; keys come from `GALLEY_BACKUP_*` or the `AWS_*` variables that Tigris on Fly sets). A background pass every `interval_s` (120 s by default) uploads each project whose git refs, live editing state or settings changed, as `projects/<id>.tar.gz` without build output, and a consistent copy of the database (`VACUUM INTO`) as `galley.db.gz`, plus the first copy of each day under `daily/<date>/`. A pass never blocks a save; a failure is logged, shown in `/api/health` and retried. `galley backup run` makes one pass. `galley backup restore` rebuilds an empty data directory from the bucket and refuses one that holds work. Every project is a git repo, so `origin` mirrors are a further backup at no extra cost.
 
 ### 9.8 Updates
 `galley self-update` checks the signed release, swaps the binary and restarts the service. SQLite migrations run on start. Git repos never need migration.

@@ -200,6 +200,11 @@ pub struct RoleRequest {
 }
 
 impl Store {
+    /// The database itself, for a consistent backup copy.
+    pub fn db(&self) -> &Db {
+        &self.db
+    }
+
     pub fn new(db: Db) -> Store {
         Store { db }
     }

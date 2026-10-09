@@ -87,6 +87,14 @@ impl Db {
         Ok(self.pool.get()?)
     }
 
+    /// Write a consistent copy of the whole database to `dest`, while other connections keep
+    /// writing. `dest` must not exist.
+    pub fn snapshot(&self, dest: &Path) -> Result<(), DbError> {
+        let dest = dest.to_str().ok_or_else(|| std::io::Error::other("backup path is not UTF-8"))?;
+        self.conn()?.execute("VACUUM INTO ?1", [dest])?;
+        Ok(())
+    }
+
     fn migrate(&self) -> Result<(), DbError> {
         let conn = self.conn()?;
         conn.execute_batch(

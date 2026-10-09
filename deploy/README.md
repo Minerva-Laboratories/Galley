@@ -109,6 +109,48 @@ your own network or a private tunnel.
 
 ## Backups
 
+### Continuous backup to object storage
+
+A disk on one machine can fail. Set a bucket on any S3-compatible store
+(Tigris, Cloudflare R2, Backblaze B2, AWS S3, MinIO) and Galley copies every
+project that changed, and the database, every two minutes:
+
+```toml
+[backup]
+endpoint = "https://fly.storage.tigris.dev"
+bucket = "galley-backup"
+interval_s = 120
+```
+
+Keep the keys out of the file: set `GALLEY_BACKUP_ACCESS_KEY_ID` and
+`GALLEY_BACKUP_SECRET_ACCESS_KEY` in the environment. On Fly, `fly storage
+create` attaches a Tigris bucket and sets `BUCKET_NAME`, `AWS_ENDPOINT_URL_S3`,
+`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, which Galley reads with no
+further setup.
+
+The bucket holds `galley.db.gz` (accounts, members, comments, tokens), one
+database copy per day under `daily/`, and `projects/<id>.tar.gz` for each
+project: its git repository, files, live editing state and settings. Build
+output is left out. Turn on object versioning in the bucket if you want older
+copies of each project archive as well; the git history inside already keeps
+every version of the text.
+
+`/api/health` reports whether the last pass worked and when. A failed upload
+is logged and retried on the next pass. It never delays a save.
+
+To rebuild a server, stop Galley, then restore into an empty data directory and
+start Galley on it:
+
+```sh
+galley --data-dir /var/lib/galley-restored backup restore
+galley --data-dir /var/lib/galley-restored serve
+```
+
+A restore refuses a data directory that already holds a database or projects.
+`galley backup run` makes one pass by hand.
+
+### A local copy
+
 Everything lives under the data directory, `/var/lib/galley` for a system
 install. Each project is a plain git repository, so a second copy can also be a
 git remote you push to.
