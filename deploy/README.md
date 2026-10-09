@@ -107,6 +107,26 @@ editing needs, and allows long responses, which slow compiles need.
 Without a domain name, bind to the loopback address and reach the machine over
 your own network or a private tunnel.
 
+## Single sign-on
+
+Galley signs people in through any OpenID Connect provider: a university's single sign-on,
+Microsoft Entra ID, Google Workspace, Keycloak or similar. Register an application at the provider
+with the redirect URI `https://<server.domain>/api/auth/oidc/callback`, then:
+
+```toml
+[oidc]
+issuer = "https://login.example.edu"
+client_id = "galley"
+label = "Continue with your university account"
+allowed_domains = ["example.edu"]
+```
+
+Put the client secret in `GALLEY_OIDC_CLIENT_SECRET`. With `allowed_domains`, anyone with a
+verified email in those domains can create an account, whatever `public_signup` says; without it,
+new accounts follow `public_signup`. A person who already has a password account with the same
+verified email keeps that account and can then use either way in. Password sign-in stays
+available.
+
 ## Build workers
 
 One machine holds the documents, the accounts and the queue, and needs little CPU. Compiles need

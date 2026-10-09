@@ -53,6 +53,15 @@ allow_unsandboxed = false
 # max_concurrent then counts compiles across all workers. See deploy/README.md.
 # worker_url = "http://workers.internal:7100"
 
+[oidc]
+# Single sign-on through an OpenID Connect provider. Off while issuer is empty.
+# Register https://<server.domain>/api/auth/oidc/callback at the provider, and put
+# the client secret in GALLEY_OIDC_CLIENT_SECRET. See deploy/README.md.
+# issuer = "https://login.example.edu"
+# client_id = "galley"
+# label = "Continue with your university account"
+# allowed_domains = ["example.edu"]
+
 [backup]
 # Continuous backup to an S3-compatible bucket. Off while bucket is empty.
 # Set the keys in the environment, not here: GALLEY_BACKUP_ACCESS_KEY_ID and

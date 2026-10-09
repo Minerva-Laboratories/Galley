@@ -14,6 +14,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (2, include_str!("../migrations/0002_governance.sql")),
     (3, include_str!("../migrations/0003_checkpoints.sql")),
     (4, include_str!("../migrations/0004_agents.sql")),
+    (5, include_str!("../migrations/0005_oidc.sql")),
 ];
 
 pub type Conn = PooledConnection<SqliteConnectionManager>;

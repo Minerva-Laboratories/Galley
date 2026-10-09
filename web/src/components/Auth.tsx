@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { api } from '../api';
 import { login, messageOf, signup } from '../store/auth';
-import { currentUser, navigate, needsSetup, publicSignup, setDisplayName, theme, toggleTheme } from '../store/store';
+import { currentUser, navigate, needsSetup, publicSignup, setDisplayName, ssoLabel, theme, toggleTheme } from '../store/store';
 import { AppearanceButton } from './Appearance';
 import { Icon } from './Icon';
 
@@ -29,6 +29,21 @@ function Shell({ children }: { children: preact.ComponentChildren }) {
   );
 }
 
+/** A failed single sign-on comes back as ?signin_error=. Take it out of the address once read, so a
+ * reload does not show it again. */
+function takeSigninError(): string | null {
+  try {
+    const url = new URL(window.location.href);
+    const message = url.searchParams.get('signin_error');
+    if (message === null) return null;
+    url.searchParams.delete('signin_error');
+    window.history.replaceState(null, '', url.pathname + url.search + url.hash);
+    return message;
+  } catch {
+    return null;
+  }
+}
+
 /** Sign in, first-run admin setup, or open signup. The server state chooses. */
 export function AuthScreen() {
   const setup = needsSetup.value;
@@ -36,7 +51,7 @@ export function AuthScreen() {
   const [email, setEmail] = useState('');
   const [name, setName] = useState('');
   const [password, setPassword] = useState('');
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(takeSigninError);
   const [busy, setBusy] = useState(false);
   const first = useRef<HTMLInputElement>(null);
   useEffect(() => first.current?.focus(), [mode]);
@@ -58,6 +73,15 @@ export function AuthScreen() {
     <Shell>
       <h1 class="auth-h">{setup ? 'Create your admin account' : mode === 'signup' ? 'Create an account' : 'Sign in'}</h1>
       {setup && <p class="auth-sub">This is the first account on this server, so it becomes the admin.</p>}
+      {ssoLabel.value && (
+        <>
+          {/* A full page load, not fetch: the provider's sign-in page takes over the tab. */}
+          <a class="tb primary auth-submit auth-sso" href="/api/auth/oidc/start">
+            {ssoLabel.value}
+          </a>
+          <div class="auth-or">or with email</div>
+        </>
+      )}
       <form onSubmit={submit}>
         {mode === 'signup' && (
           <input ref={mode === 'signup' ? first : undefined} class="auth-in" placeholder="Your name" value={name} onInput={(e) => setName((e.target as HTMLInputElement).value)} autocomplete="name" />

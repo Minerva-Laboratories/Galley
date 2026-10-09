@@ -2,7 +2,8 @@
 //! share-link landing page. The landing page asks only for a display name. The session and the
 //! CSRF token travel in cookies.
 
-use axum::extract::State;
+use axum::extract::{Query, State};
+use axum::response::Redirect;
 use axum::Json;
 use axum_extra::extract::cookie::CookieJar;
 use serde::Deserialize;
@@ -32,6 +33,7 @@ pub async fn me(State(app): State<AppState>, MaybeUser(user): MaybeUser, jar: Co
             "user": user.map(public_user),
             "needs_setup": needs_setup,
             "public_signup": app.public_signup,
+            "oidc": app.oidc.as_ref().map(|o| json!({ "label": o.label })),
         })),
     )
 }
@@ -163,6 +165,123 @@ pub async fn landing(
 }
 
 /// Create a session, set the cookies, and return the user.
+/// Send the person to a page that says what went wrong. The sign-in screen shows the message.
+fn signin_error(message: &str) -> Redirect {
+    let encoded: String = message
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => (b as char).to_string(),
+            b' ' => "+".into(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect();
+    Redirect::to(&format!("/?signin_error={encoded}"))
+}
+
+const OIDC_STATE_COOKIE: &str = "galley_oidc_state";
+
+/// The state also rides in a cookie of the browser that started the sign-in. Without it, someone
+/// could finish a sign-in with their own account and send the callback link to someone else, who
+/// would then work inside the sender's account without noticing.
+fn oidc_state_cookie(state: String, secure: bool) -> axum_extra::extract::cookie::Cookie<'static> {
+    let mut c = axum_extra::extract::cookie::Cookie::new(OIDC_STATE_COOKIE, state);
+    c.set_http_only(true);
+    c.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
+    c.set_path("/api/auth/oidc");
+    c.set_secure(secure);
+    c.set_max_age(time::Duration::minutes(10));
+    c
+}
+
+/// GET /api/auth/oidc/start. Off to the provider's sign-in page.
+pub async fn oidc_start(State(app): State<AppState>, jar: CookieJar) -> (CookieJar, Redirect) {
+    let Some(oidc) = app.oidc.clone() else {
+        return (jar, signin_error("Single sign-on is not set up on this server."));
+    };
+    match oidc.start().await {
+        Ok((url, state)) => (jar.add(oidc_state_cookie(state, app.secure)), Redirect::to(&url)),
+        Err(e) => {
+            tracing::warn!(error = ?e, "single sign-on could not start");
+            (jar, signin_error(&e.to_string()))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct OidcReturn {
+    code: Option<String>,
+    state: Option<String>,
+    error: Option<String>,
+}
+
+/// GET /api/auth/oidc/callback. The provider sends the person back here with a code.
+pub async fn oidc_callback(
+    State(app): State<AppState>,
+    jar: CookieJar,
+    Query(back): Query<OidcReturn>,
+) -> (CookieJar, Redirect) {
+    let Some(oidc) = app.oidc.clone() else {
+        return (jar, signin_error("Single sign-on is not set up on this server."));
+    };
+    let started_here = jar.get(OIDC_STATE_COOKIE).map(|c| c.value().to_string());
+    let jar = jar.remove(oidc_state_cookie(String::new(), app.secure));
+    let (Some(code), Some(state)) = (back.code, back.state) else {
+        let why = match back.error.as_deref() {
+            Some("access_denied") => "Sign-in was cancelled at the provider.",
+            _ => "The sign-in provider did not complete the sign-in. Start again.",
+        };
+        return (jar, signin_error(why));
+    };
+    if started_here.as_deref() != Some(state.as_str()) {
+        return (jar, signin_error("This sign-in was started in another browser or has expired. Start again here."));
+    }
+    let identity = match oidc.finish(&code, &state).await {
+        Ok(i) => i,
+        Err(e) => {
+            tracing::warn!(error = ?e, "single sign-on failed");
+            return (jar, signin_error(&e.to_string()));
+        }
+    };
+    let store = app.store.clone();
+    let public_signup = app.public_signup;
+    let domains_checked = oidc.restricts_domains();
+    let resolved = tokio::task::spawn_blocking(move || -> Result<(User, &'static str), String> {
+        if let Some(user) = store.user_by_oidc_sub(&identity.subject).map_err(|e| e.to_string())? {
+            return Ok((user, "account.signin"));
+        }
+        let Some(email) = identity.email.clone() else {
+            return Err("The provider did not share an email address, which Galley needs for an account. Ask your provider to release it.".into());
+        };
+        if let Some(user) = store.user_by_email(&email).map_err(|e| e.to_string())? {
+            if !identity.email_verified {
+                return Err("An account with this email exists, and the provider has not verified the email. Sign in with your password.".into());
+            }
+            store.link_oidc(&user.id, &identity.subject).map_err(|e| e.to_string())?;
+            return Ok((user, "account.link_oidc"));
+        }
+        let first = matches!(store.user_count(), Ok(0));
+        if !first && !public_signup && !domains_checked {
+            return Err("This server is invite-only. Ask an admin to add you, or use a share link.".into());
+        }
+        let name = identity.name.clone().unwrap_or_default();
+        let user = store.create_oidc_user(&email, &name, &identity.subject, first).map_err(|e| e.to_string())?;
+        Ok((user, "account.create_oidc"))
+    })
+    .await;
+    match resolved {
+        Ok(Ok((user, action))) => {
+            app.store.audit(None, Some(&user), action, None);
+            let (jar, _) = sign_in(&app, jar, &user);
+            (jar, Redirect::to("/"))
+        }
+        Ok(Err(message)) => (jar, signin_error(&message)),
+        Err(e) => {
+            tracing::error!(error = %e, "single sign-on account lookup failed");
+            (jar, signin_error("Something went wrong on the server. Try again."))
+        }
+    }
+}
+
 fn sign_in(app: &AppState, jar: CookieJar, user: &User) -> (CookieJar, Json<Value>) {
     let token = match app.store.create_session(&user.id, 30) {
         Ok(t) => t,

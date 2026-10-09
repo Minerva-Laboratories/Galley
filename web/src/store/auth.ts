@@ -1,6 +1,6 @@
 // Auth actions. Kept out of components so the gate and forms share one source of truth.
 import { api, ApiError } from '../api';
-import { authReady, currentUser, needsSetup, publicSignup, setDisplayName } from './store';
+import { authReady, currentUser, needsSetup, publicSignup, setDisplayName, ssoLabel } from './store';
 
 export async function loadMe(): Promise<void> {
   try {
@@ -8,6 +8,7 @@ export async function loadMe(): Promise<void> {
     currentUser.value = me.user;
     needsSetup.value = me.needs_setup;
     publicSignup.value = me.public_signup;
+    ssoLabel.value = me.oidc?.label ?? null;
     // The server holds the chosen name for guests too, so it is authoritative for both.
     if (me.user) setDisplayName(me.user.name);
   } catch {

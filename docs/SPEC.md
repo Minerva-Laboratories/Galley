@@ -702,6 +702,13 @@ Continuous backup goes to an S3-compatible bucket (`[backup]`, off until a bucke
 - Agents: allowlisted egress to the model endpoint and the citation resolvers, redaction of API keys from logs, and per-run budgets.
 - Rate limits on auth and on the share-link landing. An audit log for admin actions and history restores.
 
+### 10.1 Single sign-on (OIDC)
+`[oidc]` with an `issuer` and a `client_id` adds "Continue with …" (the `label`) to the sign-in screen. The flow is the authorization code flow with PKCE and a nonce. The provider is discovered on first use, so a provider that is down never stops Galley from starting and password sign-in keeps working.
+- `/api/auth/oidc/start` sends the browser to the provider and sets a 10-minute HttpOnly cookie with the state. `/api/auth/oidc/callback` accepts the return only in the browser that holds that cookie, and each state works once, so a callback link sent to someone else signs no one in.
+- The ID token is verified against the provider's keys, issuer, audience, expiry and nonce. Token requests never follow redirects.
+- Account resolution: the provider subject (`users.oidc_sub`) finds the account. Otherwise a verified email links an existing account to the subject; an unverified email never does. Otherwise a new account without a password is created, as admin when it is the first account. With `allowed_domains`, only verified emails in those domains get in, and the list decides who may create an account. Without it, new accounts follow `public_signup`.
+- Every failure returns to the sign-in screen with a message (`?signin_error=`), never an error page. Sign-ins, links and creations are audited.
+
 ---
 
 ## 11. Repository layout & milestones

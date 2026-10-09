@@ -41,8 +41,12 @@ yrs.workspace = true
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 rusty-s3 = "0.10"
 url = "2"
+openidconnect = { version = "4", default-features = false }
 
 [dev-dependencies]
+# Only to make a throwaway signing key for the single sign-on test, so no key file is committed.
+rsa = { version = "0.9", features = ["pem"] }
+rand = "0.8"
 http-body-util.workspace = true
 tokio-tungstenite.workspace = true
 tower.workspace = true

@@ -279,6 +279,44 @@ impl Store {
         .map_err(Into::into)
     }
 
+    pub fn user_by_oidc_sub(&self, subject: &str) -> Result<Option<User>, DbError> {
+        let conn = self.db.conn()?;
+        conn.query_row(
+            "SELECT id, email, name, pw_hash, is_admin, is_guest FROM users WHERE oidc_sub = ?1 AND is_guest = 0",
+            params![subject],
+            row_to_user,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    /// Tie an existing account to a provider subject, so later sign-ins find it by subject.
+    pub fn link_oidc(&self, user_id: &str, subject: &str) -> Result<(), DbError> {
+        let conn = self.db.conn()?;
+        conn.execute("UPDATE users SET oidc_sub = ?2 WHERE id = ?1 AND is_guest = 0", params![user_id, subject])?;
+        Ok(())
+    }
+
+    /// An account that signs in only through the provider. It has no password until an admin sets one.
+    pub fn create_oidc_user(&self, email: &str, name: &str, subject: &str, is_admin: bool) -> Result<User, StoreError> {
+        let email = email.trim().to_lowercase();
+        let name = name.trim();
+        let name = if name.is_empty() { email.split('@').next().unwrap_or("Author").to_string() } else { name.to_string() };
+        let id = new_id();
+        let conn = self.db.conn()?;
+        conn.execute(
+            "INSERT INTO users (id, email, name, pw_hash, oidc_sub, is_admin, is_guest, created_at) VALUES (?1,?2,?3,NULL,?4,?5,0,?6)",
+            params![id, email, name, subject, is_admin as i64, Utc::now()],
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::SqliteFailure(f, _) if f.code == rusqlite::ErrorCode::ConstraintViolation => {
+                StoreError::Conflict("An account with that email already exists.".into())
+            }
+            other => StoreError::Db(other.into()),
+        })?;
+        Ok(User { id, email, name, is_admin, is_guest: false, pw_hash: None })
+    }
+
     pub fn reset_password(&self, user_id: &str, password: &str) -> Result<(), StoreError> {
         if password.len() < 8 {
             return Err(StoreError::Invalid("Passwords must be at least 8 characters.".into()));

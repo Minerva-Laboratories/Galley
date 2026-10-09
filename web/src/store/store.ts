@@ -143,6 +143,8 @@ window.addEventListener('popstate', () => {
 export const currentUser = signal<AuthUser | null>(null);
 export const needsSetup = signal<boolean>(false);
 export const publicSignup = signal<boolean>(false);
+/** The sign-in button text, when the server offers single sign-on. */
+export const ssoLabel = signal<string | null>(null);
 export const authReady = signal<boolean>(false);
 
 export const suggestMode = signal<boolean>(readPref('galley.suggest') === 'on');

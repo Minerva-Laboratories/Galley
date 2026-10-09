@@ -43,6 +43,8 @@ pub struct AppState {
     pub auto_build_delay_ms: u64,
     /// Continuous backup to object storage, when the operator configured a bucket.
     pub backup: Option<Arc<crate::backup::Backup>>,
+    /// Single sign-on, when the operator configured a provider.
+    pub oidc: Option<Arc<crate::oidc::Oidc>>,
     builds: Arc<RwLock<HashMap<String, Arc<ProjectBuilds>>>>,
     collab: Arc<RwLock<HashMap<String, broadcast::Sender<String>>>>,
 }
@@ -135,6 +137,10 @@ impl AppState {
         let backup = crate::backup::Backup::from_config(&config.backup, data_dir)
             .map_err(std::io::Error::other)?
             .map(Arc::new);
+        let public_url = if config.server.domain.is_empty() { String::new() } else { format!("https://{}", config.server.domain) };
+        let oidc = crate::oidc::Oidc::from_config(&config.oidc, &public_url)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?
+            .map(Arc::new);
         Ok(AppState {
             registry: Arc::new(Registry::new_with_engine(data_dir, config.sync_config(), config.build.engine)?),
             builder,
@@ -146,6 +152,7 @@ impl AppState {
             auto_build: config.build.auto_build,
             auto_build_delay_ms: config.build.auto_build_delay_s.max(1) * 1000,
             backup,
+            oidc,
             builds: Arc::new(RwLock::new(HashMap::new())),
             collab: Arc::new(RwLock::new(HashMap::new())),
         })
@@ -313,6 +320,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/auth/me", get(auth_routes::me))
         .route("/api/auth/signup", post(auth_routes::signup))
         .route("/api/auth/login", post(auth_routes::login))
+        .route("/api/auth/oidc/start", get(auth_routes::oidc_start))
+        .route("/api/auth/oidc/callback", get(auth_routes::oidc_callback))
         .route("/api/auth/logout", post(auth_routes::logout))
         .route("/api/auth/name", post(auth_routes::rename))
         .route("/api/auth/landing", post(auth_routes::landing))

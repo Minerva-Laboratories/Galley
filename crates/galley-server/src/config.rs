@@ -15,6 +15,26 @@ pub struct Config {
     pub sync: SyncSection,
     pub grammar: GrammarConfig,
     pub backup: BackupConfig,
+    pub oidc: OidcConfig,
+}
+
+/// Single sign-on through an OpenID Connect provider. Off while `issuer` is empty. Register
+/// `https://<server.domain>/api/auth/oidc/callback` as the redirect URI at the provider.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OidcConfig {
+    /// For example `https://login.microsoftonline.com/<tenant>/v2.0` or `https://accounts.google.com`.
+    pub issuer: String,
+    pub client_id: String,
+    /// Prefer `GALLEY_OIDC_CLIENT_SECRET`. A public client with PKCE needs none.
+    pub client_secret: Secret,
+    /// Only when the callback is not `https://<server.domain>/api/auth/oidc/callback`.
+    pub redirect_url: String,
+    /// The text on the sign-in button, such as "Continue with your university account".
+    pub label: String,
+    /// Accept only verified emails from these domains, such as `example.edu`. Empty accepts
+    /// anyone the provider vouches for.
+    pub allowed_domains: Vec<String>,
 }
 
 /// Continuous backup to an S3-compatible bucket. Off until a bucket is set, here or through the

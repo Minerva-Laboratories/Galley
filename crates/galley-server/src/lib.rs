@@ -27,6 +27,7 @@ pub mod venues;
 pub mod store;
 mod ws;
 pub mod worker;
+pub mod oidc;
 
 pub use app::{router, serve, AppState, ServeOptions};
 pub use config::Config;

@@ -192,6 +192,8 @@ venue. Each paper template names the class to swap in.
 - A persistent figure cache, so TikZ figures are drawn once and reused until their code changes.
 - SVG figures converted without shell escape.
 - Two-way SyncTeX. Click the PDF to reach the source, click the source to reach the page.
+- Single sign-on with any OpenID Connect provider, such as a university's, limited to the email
+  domains you list if you want.
 - Rename a project by clicking its name, in the top bar or on its card.
 - A short welcome tour on first use, which you can skip and reopen from the account menu.
 - On a narrow screen, **Source** and **PDF** buttons in the build bar show one pane at a time.
@@ -295,6 +297,11 @@ memory_mb = 2048
 auto_build = false       # the build mode a browser starts in; each person can switch
 auto_build_delay_s = 10  # pause in typing before an auto build
 worker_url = ""          # send compiles to build workers; empty compiles here
+
+[oidc]
+issuer = ""              # an OpenID Connect provider turns on "Continue with …" sign-in
+client_id = ""           # the secret goes in GALLEY_OIDC_CLIENT_SECRET
+allowed_domains = []     # for example ["example.edu"]; empty follows public_signup
 
 [grammar]
 languagetool = "off"     # off, auto, or the URL of a LanguageTool server

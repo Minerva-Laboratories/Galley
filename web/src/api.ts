@@ -431,6 +431,8 @@ export interface Me {
   user: AuthUser | null;
   needs_setup: boolean;
   public_signup: boolean;
+  /** Present when the server offers single sign-on. */
+  oidc?: { label: string } | null;
 }
 
 export const api = {
