@@ -9,11 +9,26 @@ export function AppearanceButton() {
   const [invalid, setInvalid] = useState(false);
   const color = accentColor.value;
   const selected = ACCENT_PRESETS.find((preset) => preset.color === color)?.name ?? 'Custom';
-  useEffect(() => { setHex(color.toUpperCase()); setInvalid(false); }, [color]);
+  // Each control here updates the hex field at once. The effect below runs after paint, which can be
+  // after the person has typed something new, so it only follows changes made elsewhere, such as in
+  // another tab, and never repeats a change this dialog made.
+  const own = useRef(color);
+  useEffect(() => {
+    if (color === own.current) return;
+    own.current = color;
+    setHex(color.toUpperCase());
+    setInvalid(false);
+  }, [color]);
+  const pick = (next: string) => {
+    own.current = next;
+    setAccentColor(next);
+    setHex(next.toUpperCase());
+    setInvalid(false);
+  };
   const applyHex = () => {
     const normalized = normalizeHex(hex);
     setInvalid(!normalized);
-    if (normalized) { setAccentColor(normalized); setHex(normalized.toUpperCase()); }
+    if (normalized) { own.current = normalized; setAccentColor(normalized); setHex(normalized.toUpperCase()); }
   };
   return (
     <>
@@ -50,7 +65,7 @@ export function AppearanceButton() {
           <div class="accent-presets" role="group" aria-label="Accent colors">
             {ACCENT_PRESETS.map((preset) => (
               <button class="accent-swatch" aria-label={`${preset.name} accent`} title={preset.name} aria-pressed={color === preset.color}
-                style={{ background: preset.color, color: onAccent(preset.color) }} onClick={() => setAccentColor(preset.color)}>
+                style={{ background: preset.color, color: onAccent(preset.color) }} onClick={() => pick(preset.color)}>
                 {color === preset.color && <Icon name="check" size={17} />}
               </button>
             ))}
@@ -58,7 +73,7 @@ export function AppearanceButton() {
           <div class="accent-custom">
             <label class="accent-picker" style={{ background: color, color: onAccent(color) }} title="Choose a custom color">
               <Icon name="palette" size={20} />
-              <input type="color" aria-label="Custom accent color" value={color} onInput={(e) => setAccentColor(e.currentTarget.value)} />
+              <input type="color" aria-label="Custom accent color" value={color} onInput={(e) => pick(e.currentTarget.value)} />
             </label>
             <div class="accent-custom-label"><b>Custom color</b><span>Pick any shade you like</span></div>
             <input class="accent-hex" aria-label="Accent hex color" aria-invalid={invalid} aria-describedby={invalid ? 'accent-error' : undefined}
@@ -69,7 +84,7 @@ export function AppearanceButton() {
           <p class="appearance-note">Applied instantly. Saved in this browser.</p>
         </div>
         <footer class="appearance-footer">
-          <button class="tb" onClick={() => { setAccentColor(DEFAULT_ACCENT); setHex(DEFAULT_ACCENT.toUpperCase()); setInvalid(false); }}>Reset accent</button>
+          <button class="tb" onClick={() => pick(DEFAULT_ACCENT)}>Reset accent</button>
           <button class="tb primary" onClick={() => dialog.current?.close()}>Done</button>
         </footer>
       </dialog>
