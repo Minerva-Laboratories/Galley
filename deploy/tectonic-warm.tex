@@ -1,0 +1,22 @@
+% Compiled once when an image is built with WARM_TECTONIC=1, so the packages most papers load are
+% already in Tectonic's cache and a new build machine does not download them on a user's first build.
+\documentclass{article}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[spanish,english]{babel}
+\usepackage{amsmath,amssymb,amsthm,mathtools,bm}
+\usepackage{graphicx,xcolor,float,subcaption,caption,wrapfig}
+\usepackage{booktabs,multirow,tabularx,longtable,array}
+\usepackage{geometry,setspace,fancyhdr,enumitem,titlesec}
+\usepackage{natbib}
+\usepackage{listings,algorithm,algpseudocode}
+\usepackage{siunitx,url,microtype,lipsum,csquotes}
+\usepackage{tikz,pgfplots}
+\pgfplotsset{compat=1.18}
+\usepackage{hyperref,cleveref}
+\begin{document}
+\section{Lorem ipsum}
+\lipsum[1] $\mathbf{x}\in\mathbb{R}^n$, \SI{3}{\metre}.
+\begin{tikzpicture}\begin{axis}\addplot{x^2};\end{axis}\end{tikzpicture}
+\selectlanguage{spanish}Introducción.
+\end{document}

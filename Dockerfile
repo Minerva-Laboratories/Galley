@@ -46,6 +46,22 @@ RUN if [ "$TEXLIVE" = "1" ]; then \
       && rm -rf /var/lib/apt/lists/*; \
     fi
 COPY --from=build /src/target/release/galley /usr/local/bin/galley
+# Tectonic with a warm package cache in the image. A machine with no volume, such as a build worker,
+# otherwise downloads Tectonic and its packages on a user's first build, which takes about a minute.
+# A server's volume mounted at /data hides this copy and keeps its own. Build with
+# --build-arg WARM_TECTONIC=1 to include it.
+ARG WARM_TECTONIC=0
+COPY templates /opt/galley-warm/templates
+COPY deploy/tectonic-warm.tex /opt/galley-warm/warm/main.tex
+RUN if [ "$WARM_TECTONIC" = "1" ]; then \
+      galley --data-dir /data engine install \
+      && for d in /opt/galley-warm/warm /opt/galley-warm/templates/*/; do \
+           [ -f "$d/main.tex" ] || continue; \
+           (cd "$d" && TECTONIC_CACHE_DIR=/data/tectonic/cache XDG_CACHE_HOME=/data/tectonic/cache HOME=/tmp \
+             /data/tectonic/tectonic -X compile main.tex -o /tmp >/dev/null 2>&1 || echo "warm-up: $d did not compile"); \
+         done \
+      && du -sh /data/tectonic/cache; \
+    fi
 COPY deploy/fly/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 # The defaults. Override them in the fly.toml [env] block. GALLEY_DOMAIN turns
