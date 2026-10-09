@@ -69,54 +69,74 @@ pub enum CollabEvent {
     EngineChanged { engine: EngineKind },
 }
 
+/// The compiler and its sandbox, as the server and a build worker both use it. `public` means
+/// strangers' LaTeX reaches it, which requires a sandbox unless the operator accepted the risk.
+pub async fn make_builder(data_dir: &Path, config: &Config, public: bool) -> std::io::Result<Builder> {
+    let b = &config.build;
+    let sandbox = Sandbox::detect(&b.sandbox, &b.docker_image, b.memory_mb, b.cpus).await;
+    match sandbox.kind {
+        SandboxKind::None => {
+            // Security rule. An unsandboxed build must never run in public mode, that is,
+            // with a domain set. The one exception is an operator who has accepted the risk
+            // for a trusted test group.
+            if public && !config.build.allow_unsandboxed {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "refusing to start: server.domain is set (public mode) but no sandbox is \
+                     available. Install bubblewrap (or Docker), or unset server.domain to run \
+                     on localhost only. To run publicly without a sandbox anyway (only for a \
+                     group you trust), set build.allow_unsandboxed = true.",
+                ));
+            }
+            if public {
+                tracing::warn!("sandbox: none in PUBLIC mode via allow_unsandboxed. Compiles run unconfined; only expose this to people you trust.");
+                eprintln!("\x1b[31mWarning: running publicly with NO sandbox (allow_unsandboxed). Compiles run unconfined. Only for a trusted group.\x1b[0m");
+            } else {
+                tracing::warn!("sandbox: none. Compiles run unconfined; do not expose this server beyond localhost.");
+                eprintln!("\x1b[31mWarning: no sandbox available (bubblewrap and docker both unusable). Compiles run unconfined. Fine for local development; never expose this server.\x1b[0m");
+            }
+        }
+        kind => tracing::info!(%kind, "sandbox ready"),
+    }
+    let hints = Hints::bundled().map_err(std::io::Error::other)?;
+    let builder = Builder::new(
+        sandbox,
+        hints,
+        Duration::from_secs(b.timeout_s),
+        data_dir,
+        Some(b.tectonic_path.clone()).filter(|s| !s.is_empty()),
+        b.max_concurrent,
+    ).with_texlive_path(Some(b.texlive_path.clone()).filter(|s| !s.trim().is_empty()));
+    match builder.engine_path().await {
+        Some(p) => tracing::info!(path = %p.display(), "tectonic found"),
+        None => tracing::info!("tectonic not installed yet; it is downloaded on the first build"),
+    }
+    Ok(builder)
+}
+
 impl AppState {
     pub async fn new(data_dir: &Path, config: &Config) -> std::io::Result<AppState> {
-        let b = &config.build;
-        let sandbox = Sandbox::detect(&b.sandbox, &b.docker_image, b.memory_mb, b.cpus).await;
         let public = !config.server.domain.is_empty();
-        match sandbox.kind {
-            SandboxKind::None => {
-                // Security rule. An unsandboxed build must never run in public mode, that is,
-                // with a domain set. The one exception is an operator who has accepted the risk
-                // for a trusted test group.
-                if public && !config.build.allow_unsandboxed {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "refusing to start: server.domain is set (public mode) but no sandbox is \
-                         available. Install bubblewrap (or Docker), or unset server.domain to run \
-                         on localhost only. To run publicly without a sandbox anyway (only for a \
-                         group you trust), set build.allow_unsandboxed = true.",
-                    ));
-                }
-                if public {
-                    tracing::warn!("sandbox: none in PUBLIC mode via allow_unsandboxed. Compiles run unconfined; only expose this to people you trust.");
-                    eprintln!("\x1b[31mWarning: running publicly with NO sandbox (allow_unsandboxed). Compiles run unconfined. Only for a trusted group.\x1b[0m");
-                } else {
-                    tracing::warn!("sandbox: none. Compiles run unconfined; do not expose this server beyond localhost.");
-                    eprintln!("\x1b[31mWarning: no sandbox available (bubblewrap and docker both unusable). Compiles run unconfined. Fine for local development; never expose this server.\x1b[0m");
-                }
-            }
-            kind => tracing::info!(%kind, "sandbox ready"),
+        let mut builder = make_builder(data_dir, config, public).await?;
+        let worker_token = config.build.worker_token.resolve("GALLEY_WORKER_TOKEN");
+        if !config.build.worker_url.is_empty() {
+            let token = worker_token.ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "build.worker_url is set but no worker token is. Set GALLEY_WORKER_TOKEN to the same \
+                     value on the server and on its workers.",
+                )
+            })?;
+            tracing::info!(url = %config.build.worker_url, "compiles run on build workers");
+            builder = builder.with_remote(&config.build.worker_url, &token);
         }
-        let hints = Hints::bundled().map_err(std::io::Error::other)?;
-        let builder = Arc::new(Builder::new(
-            sandbox,
-            hints,
-            Duration::from_secs(b.timeout_s),
-            data_dir,
-            Some(b.tectonic_path.clone()).filter(|s| !s.is_empty()),
-            b.max_concurrent,
-        ).with_texlive_path(Some(b.texlive_path.clone()).filter(|s| !s.trim().is_empty())));
-        match builder.engine_path().await {
-            Some(p) => tracing::info!(path = %p.display(), "tectonic found"),
-            None => tracing::info!("tectonic not installed yet; it is downloaded on the first build"),
-        }
+        let builder = Arc::new(builder);
         let db = Db::open(&data_dir.join("galley.db")).map_err(std::io::Error::other)?;
         let backup = crate::backup::Backup::from_config(&config.backup, data_dir)
             .map_err(std::io::Error::other)?
             .map(Arc::new);
         Ok(AppState {
-            registry: Arc::new(Registry::new_with_engine(data_dir, config.sync_config(), b.engine)?),
+            registry: Arc::new(Registry::new_with_engine(data_dir, config.sync_config(), config.build.engine)?),
             builder,
             store: Store::new(db),
             secure: !config.server.domain.is_empty(),

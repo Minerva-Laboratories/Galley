@@ -107,26 +107,52 @@ editing needs, and allows long responses, which slow compiles need.
 Without a domain name, bind to the loopback address and reach the machine over
 your own network or a private tunnel.
 
+## Build workers
+
+One machine holds the documents, the accounts and the queue, and needs little CPU. Compiles need
+a lot of it, in bursts. To add capacity, run build workers on other machines:
+
+```sh
+GALLEY_WORKER_TOKEN=<a long random secret> galley worker --bind 0.0.0.0:7100
+```
+
+and point the server at them, with the same token in its environment:
+
+```toml
+[build]
+worker_url = "http://workers.internal:7100"
+max_concurrent = 8        # now the number of compiles across all workers
+```
+
+Use the same image or packages on the server and on the workers: the server still checks which
+compilers exist, compares PDFs and verifies submission packages itself. Each worker needs
+bubblewrap or Docker, like the server. Keep workers on a private network; they accept work from
+anything that holds the token.
+
+A worker holds no documents beyond copies it can rebuild, so workers can stop when idle and start
+on demand behind any load balancer that sends one compile to each worker at a time. A worker
+keeps its copy of each project it built, so a repeated build there is faster, but any worker can
+build any project.
+
 ## Backups
 
 ### Continuous backup to object storage
 
 A disk on one machine can fail. Set a bucket on any S3-compatible store
-(Tigris, Cloudflare R2, Backblaze B2, AWS S3, MinIO) and Galley copies every
+(Cloudflare R2, Backblaze B2, AWS S3, Tigris, MinIO) and Galley copies every
 project that changed, and the database, every two minutes:
 
 ```toml
 [backup]
-endpoint = "https://fly.storage.tigris.dev"
+endpoint = "https://<account>.r2.cloudflarestorage.com"
 bucket = "galley-backup"
 interval_s = 120
 ```
 
 Keep the keys out of the file: set `GALLEY_BACKUP_ACCESS_KEY_ID` and
-`GALLEY_BACKUP_SECRET_ACCESS_KEY` in the environment. On Fly, `fly storage
-create` attaches a Tigris bucket and sets `BUCKET_NAME`, `AWS_ENDPOINT_URL_S3`,
-`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, which Galley reads with no
-further setup.
+`GALLEY_BACKUP_SECRET_ACCESS_KEY` in the environment. Galley also reads the
+standard `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_ENDPOINT_URL_S3` and
+`BUCKET_NAME` variables, which some hosts set when they attach a bucket.
 
 The bucket holds `galley.db.gz` (accounts, members, comments, tokens), one
 database copy per day under `daily/`, and `projects/<id>.tar.gz` for each

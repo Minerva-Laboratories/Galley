@@ -254,6 +254,7 @@ galley serve [--port 7000] [--dev]        # run the server
 galley doctor                             # check sandbox, engine, disk, ports, TLS, fonts
 galley init                               # write a default galley.toml
 galley engine install                     # fetch Tectonic now instead of on the first build
+galley worker [--bind 0.0.0.0:7100]       # compile for a server whose worker_url points here
 galley backup run                         # copy changed projects and the database to the bucket
 galley backup restore                     # rebuild an empty data directory from the bucket
 
@@ -293,6 +294,7 @@ timeout_s = 120
 memory_mb = 2048
 auto_build = false       # the build mode a browser starts in; each person can switch
 auto_build_delay_s = 10  # pause in typing before an auto build
+worker_url = ""          # send compiles to build workers; empty compiles here
 
 [grammar]
 languagetool = "off"     # off, auto, or the URL of a LanguageTool server
@@ -323,6 +325,11 @@ service, the sandbox, TLS and backups.
 Point `[backup]` at any S3-compatible bucket and Galley copies every changed project and the
 database there every two minutes, so a lost disk costs minutes of work, not a day.
 `galley backup restore` rebuilds a server from the bucket.
+
+Compiles take most of the CPU. To add capacity, start build workers with `galley worker` on other
+machines and set `[build].worker_url` to reach them, with the same `GALLEY_WORKER_TOKEN` on both
+sides. The server keeps the documents and the queue; workers only compile, so they can start and
+stop with demand. `deploy/README.md` covers the setup.
 
 The `Dockerfile` builds an image for any container host. It carries Tectonic only. Build it with
 `--build-arg TEXLIVE=1` to add TeX Live and offer every compiler, at about 1.5 GB more.

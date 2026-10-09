@@ -19,11 +19,11 @@ pub struct Config {
 
 /// Continuous backup to an S3-compatible bucket. Off until a bucket is set, here or through the
 /// environment. The keys are best kept out of this file: `GALLEY_BACKUP_ACCESS_KEY_ID` and
-/// `GALLEY_BACKUP_SECRET_ACCESS_KEY`, or the `AWS_*` variables that Tigris on Fly sets.
+/// `GALLEY_BACKUP_SECRET_ACCESS_KEY`, or the standard `AWS_*` variables.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BackupConfig {
-    /// For example `https://fly.storage.tigris.dev`, `https://<account>.r2.cloudflarestorage.com`
+    /// For example `https://<account>.r2.cloudflarestorage.com`
     /// or `https://s3.eu-central-1.amazonaws.com`.
     pub endpoint: String,
     pub bucket: String,
@@ -79,7 +79,7 @@ pub struct ResolvedBackup {
 
 impl BackupConfig {
     /// `None` when backup is off. The file wins over the environment, `GALLEY_BACKUP_*` wins over
-    /// the generic `AWS_*` names, which Tigris on Fly sets when a bucket is attached to the app.
+    /// the standard `AWS_*` names and `BUCKET_NAME`, which some hosts set when they attach a bucket.
     pub fn resolve(&self) -> Option<ResolvedBackup> {
         self.resolve_with(|k| std::env::var(k).ok().filter(|v| !v.is_empty()))
     }
@@ -180,6 +180,32 @@ pub struct BuildConfig {
     /// Compiles that may run at once across the whole server. Set it so that this many times
     /// `memory_mb` fits in the machine's memory with room for the server itself.
     pub max_concurrent: usize,
+    /// Send compiles to build workers (`galley worker`) at this address, for example
+    /// `http://galley-compile.flycast`. Empty compiles on this machine.
+    pub worker_url: String,
+    /// The shared secret between the server and its workers. Prefer `GALLEY_WORKER_TOKEN`.
+    pub worker_token: Secret,
+}
+
+/// A secret from `galley.toml`. It never appears in `Debug` output or logs.
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Secret(String);
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_empty() { "<unset>" } else { "<redacted>" })
+    }
+}
+
+impl Secret {
+    /// The value from the environment variable `var`, else from the file, else none.
+    pub fn resolve(&self, var: &str) -> Option<String> {
+        std::env::var(var)
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .or_else(|| Some(self.0.clone()).filter(|v| !v.trim().is_empty()))
+    }
 }
 
 impl Default for BuildConfig {
@@ -195,6 +221,8 @@ impl Default for BuildConfig {
             auto_build_delay_s: 10,
             sandbox: "auto".into(),
             docker_image: "debian:bookworm-slim".into(),
+            worker_url: String::new(),
+            worker_token: Secret::default(),
             allow_unsandboxed: false,
             max_concurrent: 2,
         }
@@ -319,11 +347,11 @@ mod tests {
     }
 
     #[test]
-    fn backup_reads_the_variables_tigris_sets() {
+    fn backup_reads_the_standard_variables() {
         let env = |k: &str| {
             match k {
                 "BUCKET_NAME" => Some("galley-backup"),
-                "AWS_ENDPOINT_URL_S3" => Some("https://fly.storage.tigris.dev"),
+                "AWS_ENDPOINT_URL_S3" => Some("https://storage.example.com"),
                 "AWS_ACCESS_KEY_ID" => Some("tid_x"),
                 "AWS_SECRET_ACCESS_KEY" => Some("tsec_y"),
                 "GALLEY_BACKUP_SECRET_ACCESS_KEY" => Some("own"),
@@ -333,7 +361,7 @@ mod tests {
         };
         let r = BackupConfig::default().resolve_with(env).unwrap();
         assert_eq!(r.bucket, "galley-backup");
-        assert_eq!(r.endpoint, "https://fly.storage.tigris.dev");
+        assert_eq!(r.endpoint, "https://storage.example.com");
         assert_eq!(r.access_key_id, "tid_x");
         assert_eq!(r.secret_access_key, "own", "the Galley name wins over the generic one");
         assert_eq!(r.region, "auto");

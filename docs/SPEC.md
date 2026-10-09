@@ -206,6 +206,30 @@ LuaLaTeX. LaTeX/DVI accepts EPS/PS and compiles TikZ normally, but disables the 
 automatic SVG conversion with a visible explanation. No engine is detected or substituted after a
 failure. TeX Live and document packages are installed by administrators, never by Galley.
 
+### 6.1.2 Build workers
+
+Compiles need much more CPU than everything else, and in bursts. With `[build].worker_url` set,
+the server sends each compile to a build worker (`galley worker`) instead of running it itself.
+The server keeps the latest-wins queue, the server-wide limit (`max_concurrent` then counts
+workers), the publication gate and the last-good PDF. A remote build looks the same to the UI.
+
+- The server sends the project's files as a gzipped tar, without `.git` and `.galley`, with the
+  job (build id, project id, main file, request) in a header and a shared bearer token
+  (`GALLEY_WORKER_TOKEN`). The worker compares the token in constant time.
+- The worker keeps one copy per project, replaces its sources on each build and keeps its
+  `.galley/build`, so a repeated build on the same worker reuses auxiliary files and the figure
+  cache. It warms pending figures itself after it replies, and prunes copies beyond 200, least
+  recently built first.
+- The worker runs the same `Builder` and sandbox and is held to the public rule: no sandbox, no
+  worker, unless `allow_unsandboxed` is set. It replies with the result, the log, and the PDF and
+  SyncTeX only when the build published a new PDF. An older PDF on the worker never reaches the
+  server.
+- The server publishes the PDF through the same path as a local build. A worker that cannot be
+  reached, refuses the token or times out produces an error card that says so and that the last
+  PDF is unchanged. Nothing falls back to a local compile.
+- Engine availability, `latexdiff` comparisons and submission verification still run on the
+  server, so the server and its workers must use the same image.
+
 ### 6.2 Sandbox
 `bwrap --ro-bind /usr /usr --ro-bind $TECTONIC_CACHE /cache --bind $PROJECT /work --unshare-all --die-with-parent --new-session --chdir /work tectonic -X compile main.tex`
 Project sources are mounted read-only; only the build area and declared caches are writable.
@@ -663,7 +687,7 @@ volumes: { galley-data: {} }
 ```
 
 ### 9.7 Backups
-Continuous backup goes to an S3-compatible bucket (`[backup]`, off until a bucket is set; keys come from `GALLEY_BACKUP_*` or the `AWS_*` variables that Tigris on Fly sets). A background pass every `interval_s` (120 s by default) uploads each project whose git refs, live editing state or settings changed, as `projects/<id>.tar.gz` without build output, and a consistent copy of the database (`VACUUM INTO`) as `galley.db.gz`, plus the first copy of each day under `daily/<date>/`. A pass never blocks a save; a failure is logged, shown in `/api/health` and retried. `galley backup run` makes one pass. `galley backup restore` rebuilds an empty data directory from the bucket and refuses one that holds work. Every project is a git repo, so `origin` mirrors are a further backup at no extra cost.
+Continuous backup goes to an S3-compatible bucket (`[backup]`, off until a bucket is set; keys come from `GALLEY_BACKUP_*` or the standard `AWS_*` variables). A background pass every `interval_s` (120 s by default) uploads each project whose git refs, live editing state or settings changed, as `projects/<id>.tar.gz` without build output, and a consistent copy of the database (`VACUUM INTO`) as `galley.db.gz`, plus the first copy of each day under `daily/<date>/`. A pass never blocks a save; a failure is logged, shown in `/api/health` and retried. `galley backup run` makes one pass. `galley backup restore` rebuilds an empty data directory from the bucket and refuses one that holds work. Every project is a git repo, so `origin` mirrors are a further backup at no extra cost.
 
 ### 9.8 Updates
 `galley self-update` checks the signed release, swaps the binary and restarts the service. SQLite migrations run on start. Git repos never need migration.
@@ -695,7 +719,7 @@ galley/
   web/                 Vite + TS app (CodeMirror, PDF.js, design system)
   templates/           bundled project templates
   hints/               error-hint YAML (community-editable)
-  deploy/              install.sh, systemd, docker, fly.toml
+  deploy/              install.sh, systemd, docker
   docs/
 ```
 

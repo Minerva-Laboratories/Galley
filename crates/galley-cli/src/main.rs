@@ -106,6 +106,12 @@ enum Command {
     Doctor,
     /// Write a default galley.toml
     Init,
+    /// Run a build worker: it compiles for a Galley server whose build.worker_url points here, and
+    /// needs the same GALLEY_WORKER_TOKEN
+    Worker {
+        #[arg(long, default_value = "0.0.0.0:7100")]
+        bind: SocketAddr,
+    },
     /// Copy projects and the database to object storage, or rebuild a data directory from it
     Backup {
         #[command(subcommand)]
@@ -242,6 +248,11 @@ async fn main() -> Result<()> {
     }
 
     match command {
+        Command::Worker { bind } => {
+            galley_server::worker::serve_worker(&data_dir, &config, bind)
+                .await
+                .with_context(|| format!("the build worker could not start on {bind}"))?;
+        }
         Command::Backup { command: _ } => {
             let state = AppState::new(&data_dir, &config).await?;
             let backup = state

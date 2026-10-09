@@ -10,6 +10,7 @@ pub mod install;
 pub mod lint;
 pub mod log;
 pub mod pack;
+pub mod remote;
 pub mod runner;
 pub mod sandbox;
 pub mod svg;

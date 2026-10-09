@@ -48,13 +48,17 @@ cpus = 1.0
 # unsandboxed compiler must not face the internet. Turn it on ONLY for a group
 # you trust, and only if the host has neither bubblewrap nor Docker.
 allow_unsandboxed = false
+# Send compiles to build workers (`galley worker`) instead of compiling here. Set the
+# same GALLEY_WORKER_TOKEN in the environment of the server and every worker.
+# max_concurrent then counts compiles across all workers. See deploy/README.md.
+# worker_url = "http://workers.internal:7100"
 
 [backup]
 # Continuous backup to an S3-compatible bucket. Off while bucket is empty.
 # Set the keys in the environment, not here: GALLEY_BACKUP_ACCESS_KEY_ID and
-# GALLEY_BACKUP_SECRET_ACCESS_KEY. On Fly, an attached Tigris bucket sets
-# everything. See deploy/README.md, "Backups".
-# endpoint = "https://fly.storage.tigris.dev"
+# GALLEY_BACKUP_SECRET_ACCESS_KEY, or the standard AWS_* variables.
+# See deploy/README.md, "Backups".
+# endpoint = "https://<account>.r2.cloudflarestorage.com"
 # bucket = "galley-backup"
 # prefix = "galley"
 # interval_s = 120

@@ -26,6 +26,7 @@ pub mod templates;
 pub mod venues;
 pub mod store;
 mod ws;
+pub mod worker;
 
 pub use app::{router, serve, AppState, ServeOptions};
 pub use config::Config;

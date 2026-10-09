@@ -21,7 +21,7 @@ use crate::sandbox::Sandbox;
 use crate::synctex::SyncTex;
 use crate::{Result, install};
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BuildRequest {
     pub engine: EngineKind,
     pub draft: bool,
@@ -305,6 +305,8 @@ pub struct Builder {
     /// is first in, first out, so the difference is how many builds are ahead of a given ticket.
     tickets: std::sync::atomic::AtomicU64,
     served: std::sync::atomic::AtomicU64,
+    /// Build workers. When set, compiles run there and this machine only queues and publishes.
+    remote: Option<crate::remote::RemoteWorker>,
 }
 
 #[derive(Clone)]
@@ -408,7 +410,19 @@ impl Builder {
             slots: tokio::sync::Semaphore::new(max_concurrent.max(1)),
             tickets: std::sync::atomic::AtomicU64::new(0),
             served: std::sync::atomic::AtomicU64::new(0),
+            remote: None,
         }
+    }
+
+    /// Send compiles to build workers at `url`. `max_concurrent` then counts workers, not local
+    /// compiles.
+    pub fn with_remote(mut self, url: &str, token: &str) -> Self {
+        self.remote = Some(crate::remote::RemoteWorker::new(url, token));
+        self
+    }
+
+    pub fn is_remote(&self) -> bool {
+        self.remote.is_some()
     }
 
     pub fn with_texlive_path(mut self, path: Option<String>) -> Self {
@@ -858,6 +872,11 @@ impl Builder {
                 "{main_file} does not exist. Create it, or pick another main file in project settings."
             ));
             return self.finish(result, started, &out_dir);
+        }
+        if let Some(remote) = &self.remote {
+            return self
+                .run_remote(remote, result, project_dir, req, progress, control, started)
+                .await;
         }
         let engine = match self.resolve_engine(req.engine, progress).await {
             Ok(e) => e,
@@ -1475,6 +1494,109 @@ impl Builder {
     /// Clear the figure cache. This removes every figure PDF and the cache state.
     pub fn clear_figures(&self, project_dir: &Path) -> usize {
         figures::clear(&project_dir.join(".galley").join("build"))
+    }
+
+    /// Compile on a build worker, then publish its PDF here under the same rules as a local build:
+    /// only the latest request publishes, and a failure keeps the PDF the author already has.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_remote(
+        &self,
+        remote: &crate::remote::RemoteWorker,
+        local: BuildResult,
+        project_dir: &Path,
+        req: &BuildRequest,
+        progress: &(dyn Fn(String) + Send + Sync),
+        control: RunControl<'_>,
+        started: Instant,
+    ) -> BuildResult {
+        let out_dir = project_dir.join(".galley").join("build");
+        let fail = |mut result: BuildResult, message: String| {
+            result.status = BuildStatus::Error;
+            result.message = Some(format!("{message}. Your last PDF is unchanged. Try the build again in a moment."));
+            result
+        };
+        let sources = {
+            let dir = project_dir.to_path_buf();
+            tokio::task::spawn_blocking(move || crate::remote::pack_sources(&dir)).await
+        };
+        let sources = match sources {
+            Ok(Ok(bytes)) => bytes,
+            _ => return self.finish(fail(local, "The project could not be packed for the build worker".into()), started, &out_dir),
+        };
+        let job = crate::remote::WorkerJob {
+            id: local.id,
+            // The worker names its copy after this, so only plain characters travel.
+            project: project_dir
+                .file_name()
+                .map(|n| n.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect())
+                .unwrap_or_else(|| "project".into()),
+            main_file: local.main_file.clone(),
+            request: req.clone(),
+        };
+        progress("Compiling on a build worker…".into());
+        // A stopped worker takes a moment to start, and the reply carries the PDF.
+        let limit = self.timeout + Duration::from_secs(60);
+        let outcome = match remote.compile(&job, sources, limit).await {
+            Ok(o) => o,
+            Err(message) => {
+                tracing::warn!(error = %message, "remote build failed");
+                return self.finish(fail(local, message), started, &out_dir);
+            }
+        };
+        let Some(mut result) = outcome.result else {
+            return self.finish(fail(local, "The build worker sent no result".into()), started, &out_dir);
+        };
+        // The worker's view of the previous PDF is its own. This machine's is the one that counts.
+        result.id = local.id;
+        result.pdf_fresh = false;
+        result.pdf_available = local.pdf_available;
+        result.pdf_engine = local.pdf_engine;
+        result.pdf_engine_version = local.pdf_engine_version;
+        // The worker caches figures for itself, so there is nothing left to warm here.
+        result.pending_figures.clear();
+        let _ = std::fs::create_dir_all(&out_dir);
+        if let Some(log) = &outcome.log {
+            let _ = std::fs::write(out_dir.join(LAST_LOG), log);
+        }
+        if let (BuildStatus::Ok, Some(pdf)) = (result.status, outcome.pdf) {
+            let _gate = match control.publication_gate {
+                Some(gate) => Some(gate.lock().await),
+                None => None,
+            };
+            if !(control.latest)() {
+                result.status = BuildStatus::Failed;
+                result.stale = true;
+                result.message = Some("A newer build was requested".into());
+                return self.finish(result, started, &out_dir);
+            }
+            let incoming = out_dir.join(".remote-paper.pdf");
+            let incoming_st = out_dir.join(".remote-paper.synctex.gz");
+            let written = std::fs::write(&incoming, &pdf).and_then(|()| match &outcome.synctex {
+                Some(st) => std::fs::write(&incoming_st, st),
+                None => Ok(()),
+            });
+            let published = written.and_then(|()| {
+                publish_pdf(&out_dir, &incoming, outcome.synctex.is_some().then_some(incoming_st.as_path()), &result)
+            });
+            let _ = std::fs::remove_file(&incoming);
+            let _ = std::fs::remove_file(&incoming_st);
+            match published {
+                Ok(()) => {
+                    result.pdf_fresh = true;
+                    result.pdf_available = true;
+                    result.pdf_engine = Some(result.engine.clone());
+                    result.pdf_engine_version = result.engine_version.clone();
+                }
+                Err(e) => {
+                    result.status = BuildStatus::Failed;
+                    result.message = Some(format!("The PDF was produced but could not be saved: {e}"));
+                }
+            }
+        } else if result.status == BuildStatus::Ok {
+            result.status = BuildStatus::Failed;
+            result.message = Some("The build worker reported success but sent no PDF".into());
+        }
+        self.finish(result, started, &out_dir)
     }
 
     fn finish(&self, mut result: BuildResult, started: Instant, out_dir: &Path) -> BuildResult {

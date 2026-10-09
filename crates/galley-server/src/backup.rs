@@ -1,4 +1,4 @@
-//! Continuous backup to S3-compatible object storage: Tigris, Cloudflare R2, Backblaze B2, AWS S3
+//! Continuous backup to S3-compatible object storage: Cloudflare R2, Backblaze B2, AWS S3, Tigris
 //! or MinIO. A volume on one host is a single point of failure, and a daily snapshot loses up to a
 //! day of everyone's work. Every few minutes, each project that changed is packed and uploaded, and
 //! so is a consistent copy of the database, which holds the accounts, members, comments and tokens.
