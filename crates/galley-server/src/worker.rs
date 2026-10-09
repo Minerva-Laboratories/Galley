@@ -110,6 +110,7 @@ async fn compile(State(w): State<Worker>, headers: HeaderMap, body: Bytes) -> Re
     }
 
     let result = w.builder.run(job.id, &dir, &job.main_file, &job.request, &|_| {}).await;
+    tracing::info!(project = %job.project, id = job.id, engine = %result.engine, status = ?result.status, ms = result.profile.total_ms, "build finished");
     let out_dir = dir.join(".galley").join("build");
     let reply = {
         let (result, out_dir) = (result.clone(), out_dir.clone());
