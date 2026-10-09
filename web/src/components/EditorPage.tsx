@@ -7,7 +7,9 @@ import { watchTasks } from '../store/tasks';
 import { closeAll, closeDoc, openDoc } from '../sync/docs';
 import { subscribeEvents } from '../sync/events';
 import {
+  applyServerAutoBuild,
   autoBuild,
+  autoBuildDelayMs,
   build,
   checkpoints,
   comments,
@@ -59,7 +61,6 @@ import { Tour } from './Tour';
 import { Tabs } from './Tabs';
 import { TopBar } from './TopBar';
 
-const AUTO_BUILD_DELAY_MS = 1500;
 
 export function EditorPage({ id }: { id: string }) {
   const [error, setError] = useState<string | null>(null);
@@ -106,6 +107,7 @@ export function EditorPage({ id }: { id: string }) {
           const producer = status.last?.pdf_engine ?? status.pdf_engine ?? (status.last?.status === 'ok' && status.last.pdf_available ? status.last.engine : status.last?.pdf_available ? 'unknown' : null);
           if (producer) pdfProducer.value = { engine: producer, version: status.last?.pdf_engine_version ?? status.pdf_engine_version ?? null };
           latexdiffAvailable.value = status.latexdiff;
+          if (status.auto_build) applyServerAutoBuild(status.auto_build);
         }
         const first = list.find((f) => f.path === meta.main_file) ?? list.find((f) => f.kind === 'text');
         if (first) openFile(first.path);
@@ -245,7 +247,7 @@ export function EditorPage({ id }: { id: string }) {
     };
   }, [id, path]);
 
-  // Auto-build: 1.5 s after the last local edit, if nothing is running (SPEC.md §6.1).
+  // Auto-build: a pause after the last local edit, if nothing is running (SPEC.md §6.1).
   const session = currentSession.value;
   const autoTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => {
@@ -257,7 +259,7 @@ export function EditorPage({ id }: { id: string }) {
       clearTimeout(autoTimer.current);
       autoTimer.current = setTimeout(() => {
         if (autoBuild.value && build.value.phase !== 'running') void runBuild();
-      }, AUTO_BUILD_DELAY_MS);
+      }, autoBuildDelayMs.value);
     };
     session.ydoc.on('update', onUpdate);
     return () => {

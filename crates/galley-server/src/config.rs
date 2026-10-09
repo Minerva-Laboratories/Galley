@@ -72,7 +72,12 @@ pub struct BuildConfig {
     pub timeout_s: u64,
     pub memory_mb: u64,
     pub cpus: f32,
+    /// Whether a new browser builds on its own after an edit, until its user picks a mode. It is
+    /// off by default: on a shared server, a build on every pause is most of the compile load.
     pub auto_build: bool,
+    /// How long typing must pause before an auto build starts. Shorter feels livelier and costs
+    /// a compile for nearly every sentence.
+    pub auto_build_delay_s: u64,
     /// auto | bwrap | docker | none
     pub sandbox: String,
     pub docker_image: String,
@@ -95,7 +100,8 @@ impl Default for BuildConfig {
             timeout_s: 120,
             memory_mb: 2048,
             cpus: 2.0,
-            auto_build: true,
+            auto_build: false,
+            auto_build_delay_s: 10,
             sandbox: "auto".into(),
             docker_image: "debian:bookworm-slim".into(),
             allow_unsandboxed: false,
@@ -211,6 +217,16 @@ mod tests {
         let parsed: Config = toml::from_str("[server]\nbind = \"0.0.0.0:8080\"\n").unwrap();
         assert_eq!(parsed.server.bind, "0.0.0.0:8080");
         assert_eq!(parsed.sync.flush_max_ms, 60_000);
+    }
+
+    #[test]
+    fn auto_build_starts_off_with_a_long_pause() {
+        let parsed: Config = toml::from_str("").unwrap();
+        assert!(!parsed.build.auto_build);
+        assert_eq!(parsed.build.auto_build_delay_s, 10);
+        let parsed: Config = toml::from_str("[build]\nauto_build = true\nauto_build_delay_s = 20\n").unwrap();
+        assert!(parsed.build.auto_build);
+        assert_eq!(parsed.build.auto_build_delay_s, 20);
     }
 
     #[test]

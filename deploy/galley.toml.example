@@ -21,6 +21,10 @@ data_dir = "/var/lib/galley"
 public_signup = false
 
 [build]
+# A browser starts in manual build mode. Set auto_build = true to start in auto mode, which builds
+# after typing pauses for auto_build_delay_s seconds. Each person can still switch in the build bar.
+# auto_build = false
+# auto_build_delay_s = 10
 # Initial selection for new projects only. Existing projects keep their own selection.
 # tectonic | pdflatex | xelatex | lualatex | latex (DVI -> PS -> PDF)
 # "texlive" is accepted as an alias for "pdflatex" in this configuration.

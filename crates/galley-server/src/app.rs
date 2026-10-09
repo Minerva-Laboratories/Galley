@@ -38,6 +38,9 @@ pub struct AppState {
     pub contact_email: Option<String>,
     /// Grammar checking, off unless the operator points at a LanguageTool server.
     pub grammar: crate::config::GrammarConfig,
+    /// The build mode a browser starts in, and the pause before an auto build.
+    pub auto_build: bool,
+    pub auto_build_delay_ms: u64,
     builds: Arc<RwLock<HashMap<String, Arc<ProjectBuilds>>>>,
     collab: Arc<RwLock<HashMap<String, broadcast::Sender<String>>>>,
 }
@@ -115,6 +118,8 @@ impl AppState {
             public_signup: config.server.public_signup,
             contact_email: (!config.server.contact_email.is_empty()).then(|| config.server.contact_email.clone()),
             grammar: config.grammar.clone(),
+            auto_build: config.build.auto_build,
+            auto_build_delay_ms: config.build.auto_build_delay_s.max(1) * 1000,
             builds: Arc::new(RwLock::new(HashMap::new())),
             collab: Arc::new(RwLock::new(HashMap::new())),
         })

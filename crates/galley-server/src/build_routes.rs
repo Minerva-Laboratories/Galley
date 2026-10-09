@@ -72,6 +72,7 @@ pub async fn status(
         "sandbox": app.builder.sandbox.kind,
         "engine": app.registry.meta(&id)?.engine,
         "latexdiff": app.builder.latexdiff_available(),
+        "auto_build": { "default": app.auto_build, "delay_ms": app.auto_build_delay_ms },
     })))
 }
 

@@ -591,7 +591,7 @@ export const api = {
       body: JSON.stringify({ draft, file, ...(engine ? { engine } : {}) }),
     }),
   buildStatus: (id: string) =>
-    request<{ last: BuildResult | null; running: boolean; sandbox: string; engine: string; latexdiff: boolean; pdf_engine?: string | null; pdf_engine_version?: string | null }>(
+    request<{ last: BuildResult | null; running: boolean; sandbox: string; engine: string; latexdiff: boolean; auto_build?: { default: boolean; delay_ms: number }; pdf_engine?: string | null; pdf_engine_version?: string | null }>(
       `/api/projects/${encodeURIComponent(id)}/build`,
     ),
   pdfUrl: (id: string, version: number) => `/api/projects/${encodeURIComponent(id)}/build/pdf?v=${version}`,

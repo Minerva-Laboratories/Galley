@@ -289,6 +289,8 @@ texlive_path = ""        # executable directory; empty uses PATH in the compile 
 sandbox = "auto"         # bubblewrap, then docker, then refuse in public mode
 timeout_s = 120
 memory_mb = 2048
+auto_build = false       # the build mode a browser starts in; each person can switch
+auto_build_delay_s = 10  # pause in typing before an auto build
 
 [grammar]
 languagetool = "off"     # off, auto, or the URL of a LanguageTool server

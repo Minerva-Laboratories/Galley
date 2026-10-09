@@ -93,10 +93,17 @@ export function togglePreview() {
   writePref('galley.preview', previewVisible.value ? 'on' : 'off');
 }
 
-export const autoBuild = signal<boolean>(readPref('galley.autobuild') !== 'off');
+// A build on every pause in typing is most of a shared server's compile load, so a browser starts
+// in manual mode and the server may say otherwise. A mode the person picked always wins.
+export const autoBuild = signal<boolean>(readPref('galley.autobuild') === 'on');
+export const autoBuildDelayMs = signal<number>(10_000);
 export function setAutoBuild(on: boolean) {
   autoBuild.value = on;
   writePref('galley.autobuild', on ? 'on' : 'off');
+}
+export function applyServerAutoBuild(server: { default: boolean; delay_ms: number }) {
+  if (readPref('galley.autobuild') === null) autoBuild.value = server.default;
+  if (server.delay_ms > 0) autoBuildDelayMs.value = server.delay_ms;
 }
 
 export const draftMode = signal<boolean>(readPref('galley.draft') === 'on');

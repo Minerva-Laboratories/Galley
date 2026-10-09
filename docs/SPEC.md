@@ -172,7 +172,7 @@ edit → flusher commit → build request → queue (per-project, latest-wins) �
    → WS event → client swaps PDF (keeps last-good if failed)
 ```
 - **Latest-wins queue**: a new request cancels a request that has not started. A running build finishes, but Galley marks its result stale if a newer request exists.
-- **Auto-build** (default on): it triggers 1.5 s after the last edit, only if the previous build finished. A manual `Ctrl+Enter` is always allowed.
+- **Auto-build** (default off): when on, it triggers after the last local edit has paused for `[build].auto_build_delay_s` (10 s by default), only if the previous build finished. On a shared server a build on every pause is most of the compile load, so a browser starts in manual mode unless `[build].auto_build` says otherwise. A mode the person picks in the build bar is remembered in that browser and always wins. A manual `Ctrl+Enter` is always allowed.
 - **Draft mode**: passes the `draft` class option and replaces figures with boxes, for 3–5× faster iteration. Toggle it in the build bar.
 - **Timeout**: 120 s by default (config), memory 2 GB, no network. Tectonic package fetches go through the host-side cache, not from inside the sandbox.
 
@@ -616,7 +616,8 @@ engine = "tectonic"      # new projects: tectonic | pdflatex | xelatex | lualate
 texlive_path = ""        # executables directory in compile environment, or PATH
 timeout_s = 120
 memory_mb = 2048
-auto_build = true
+auto_build = false        # the mode a browser starts in; each person can change it
+auto_build_delay_s = 10   # pause in typing before an auto build
 sandbox = "auto"         # bwrap | docker | none
 
 [sync]
