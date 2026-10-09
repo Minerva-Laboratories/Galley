@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import { authenticate, dismissTour } from './auth';
+import { authenticate, dismissTour, startNewProject } from './auth';
 
 const inventory = {
   selected: 'tectonic',
@@ -22,9 +22,7 @@ function alternativePdfEngine(availability: { selected: string; engines: { engin
 
 async function createProject(page: Page): Promise<string> {
   await authenticate(page);
-  const newProject = page.getByRole('button', { name: 'New project' });
-  if (await newProject.isVisible()) await newProject.click();
-  else await page.getByRole('button', { name: 'Blank article' }).click();
+  await startNewProject(page);
   await page.getByLabel('Project name').fill(`Engines ${Date.now()}`);
   await page.getByRole('button', { name: 'Create' }).click();
   await expect(page).toHaveURL(/\/p\/[a-z0-9-]+$/);

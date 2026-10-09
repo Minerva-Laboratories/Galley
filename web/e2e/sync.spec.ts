@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { authenticate, dismissTour } from './auth';
+import { authenticate, dismissTour, startNewProject } from './auth';
 
 // M1 flow: create a project, edit it in two tabs, see the edit arrive, see it land in git.
 
@@ -12,11 +12,7 @@ test('edits sync between two tabs and land in git', async ({ browser }) => {
 
   await authenticate(a);
   const author = (await (await a.request.get('/api/auth/me')).json()).user.name as string;
-  if (await a.getByRole('button', { name: 'New project' }).isVisible()) {
-    await a.getByRole('button', { name: 'New project' }).click();
-  } else {
-    await a.getByRole('button', { name: 'Blank article' }).click();
-  }
+  await startNewProject(a);
   await a.getByLabel('Project name').fill(name);
   await a.getByRole('button', { name: 'Create' }).click();
   await expect(a).toHaveURL(/\/p\/[a-z0-9-]+$/);
@@ -46,9 +42,7 @@ test('edits sync between two tabs and land in git', async ({ browser }) => {
 test('build produces a PDF, an error card fixes it, and SyncTeX jumps both ways', async ({ page }) => {
   const name = `Build ${Date.now()}`;
   await authenticate(page);
-  const newProject = page.getByRole('button', { name: 'New project' });
-  if (await newProject.isVisible()) await newProject.click();
-  else await page.getByRole('button', { name: 'Blank article' }).click();
+  await startNewProject(page);
   await page.getByLabel('Project name').fill(name);
   await page.getByRole('button', { name: 'Create' }).click();
   await expect(page).toHaveURL(/\/p\/[a-z0-9-]+$/);

@@ -33,6 +33,17 @@ export async function authenticate(page: Page): Promise<void> {
   await expect(page.locator('.projects')).toBeVisible();
 }
 
+/** Open the new-project form. An account with projects shows "New project"; an empty one shows the
+ * template cards instead. Wait until the list has loaded and one of them is on screen, then use it:
+ * checking before the list loads picks a control that is about to disappear. */
+export async function startNewProject(page: Page): Promise<void> {
+  const newProject = page.getByRole('button', { name: 'New project' });
+  const blank = page.getByRole('button', { name: 'Blank article' });
+  await expect(newProject.or(blank).first()).toBeVisible();
+  if (await newProject.isVisible()) await newProject.click();
+  else await blank.click();
+}
+
 /** First project visit opens the tour after the editor mounts; close it through its own control. */
 export async function dismissTour(page: Page): Promise<void> {
   await expect(page.locator('.cm-content')).toBeVisible();

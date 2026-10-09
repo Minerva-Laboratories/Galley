@@ -162,7 +162,9 @@ export function ProjectsPage() {
           </div>
         )}
 
-        {!empty && (
+        {/* Not while the list loads: an empty account gets the template cards instead, and a bar
+            that shows and then vanishes is a button pulled from under the pointer. */}
+        {(projects !== null || !!error) && !empty && (
           <div class="bar">
             {creating ? (
               <form
