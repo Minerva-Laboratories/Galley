@@ -267,7 +267,8 @@ pub fn scan(project_dir: &std::path::Path, main_file: &str) -> Paper {
     // The bibliography files the document names, if they are in the project.
     let mut bibs = Vec::new();
     for f in &paper.files {
-        if let Ok(text) = std::fs::read_to_string(project_dir.join(&f.path)) {
+        let Some(full) = crate::paths::inside(project_dir, &f.path) else { continue };
+        if let Ok(text) = std::fs::read_to_string(full) {
             for m in BIBLIOGRAPHY.captures_iter(&strip_comments(&text)) {
                 for name in m[1].split(',') {
                     let name = name.trim();
@@ -280,7 +281,8 @@ pub fn scan(project_dir: &std::path::Path, main_file: &str) -> Paper {
         }
     }
     for rel in bibs {
-        let Ok(text) = std::fs::read_to_string(project_dir.join(&rel)) else { continue };
+        let Some(full) = crate::paths::inside(project_dir, &rel) else { continue };
+        let Ok(text) = std::fs::read_to_string(full) else { continue };
         for m in BIB_ENTRY.captures_iter(&text) {
             let start = m.get(0).unwrap().start();
             let line = text[..start].lines().count() as u32 + 1;
@@ -368,7 +370,8 @@ fn read_file(
         return;
     }
     seen.push(rel.to_string());
-    let Ok(raw) = std::fs::read_to_string(dir.join(rel)) else { return };
+    let Some(full) = crate::paths::inside(dir, rel) else { return };
+    let Ok(raw) = std::fs::read_to_string(full) else { return };
     let text = strip_comments(&raw);
     // Claim this file's place before recursing, so the list reads in document order.
     let slot = paper.files.len();
@@ -755,5 +758,25 @@ a = b
         let p = scan(dir.path(), "main.tex");
         assert_eq!(p.sections.len(), 1);
         assert_eq!(p.files[0].inputs, vec!["nope.tex"]);
+    }
+
+    #[test]
+    fn names_outside_the_project_are_not_read() {
+        let parent = tempfile::tempdir().unwrap();
+        let other = parent.path().join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("main.tex"), "\\section{Stolen}\n").unwrap();
+        std::fs::write(other.join("refs.bib"), BIB).unwrap();
+        let mine = parent.path().join("mine");
+        std::fs::create_dir_all(&mine).unwrap();
+        std::fs::write(
+            mine.join("main.tex"),
+            "\\section{Mine}\n\\input{../other/main}\n\\input{/etc/hosts}\n\\bibliography{../other/refs}\n",
+        )
+        .unwrap();
+        let p = scan(&mine, "main.tex");
+        assert_eq!(p.sections.iter().map(|s| s.title.as_str()).collect::<Vec<_>>(), vec!["Mine"]);
+        assert_eq!(p.files.len(), 1);
+        assert!(p.bib.is_empty());
     }
 }

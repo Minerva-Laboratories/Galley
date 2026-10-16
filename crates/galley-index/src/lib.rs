@@ -9,6 +9,7 @@ pub mod bib;
 pub mod graph;
 pub mod math;
 mod parse;
+pub mod paths;
 mod rank;
 mod search;
 mod render;
