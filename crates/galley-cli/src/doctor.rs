@@ -184,19 +184,33 @@ async fn engine(config: &Config, data_dir: &Path) -> Vec<Check> {
         let selected = item.engine == b.engine;
         out.push(engine_check(item, selected));
     }
-    // A warm bundle cache makes builds fast, and lets them run offline.
+    // A warm bundle cache makes builds fast, and lets them run offline. Galley seeds projects
+    // only from a cache marked trusted (see galley_build::engine::TRUSTED_CACHE).
     let cache = data_dir.join("tectonic").join("cache");
-    let warm = std::fs::read_dir(&cache)
-        .map(|mut d| d.next().is_some())
-        .unwrap_or(false);
-    out.push(if warm {
-        Check::ok("package cache", format!("warm at {}", cache.display()))
-    } else {
-        Check::warn(
+    let trusted = galley_build::engine::Tectonic::trusted_shared_cache(data_dir);
+    out.push(match trusted {
+        Some(c) if galley_build::engine::Tectonic::has_formats(&c) => {
+            Check::ok("package cache", format!("warm at {}", c.display()))
+        }
+        None if std::fs::symlink_metadata(&cache).is_ok() => Check::warn(
+            "package cache",
+            format!("{} is not marked trusted, so it is not used", cache.display()),
+            format!(
+                "if it is a link, check its contents, then create {}; otherwise the next start \
+                 retries discarding it, so do not mark it",
+                data_dir.join("tectonic").join(galley_build::engine::TRUSTED_CACHE).display()
+            ),
+        ),
+        Some(c) => Check::warn(
+            "package cache",
+            format!("no finished format files yet at {}", c.display()),
+            "the first build fetches them, which needs network access",
+        ),
+        _ => Check::warn(
             "package cache",
             "empty; the first build downloads what the document needs",
             "the first build needs network access, later ones do not",
-        )
+        ),
     });
     out
 }

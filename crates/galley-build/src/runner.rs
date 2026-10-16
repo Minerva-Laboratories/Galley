@@ -130,11 +130,9 @@ struct PdfProducer {
 }
 
 fn read_producer(out_dir: &Path) -> Option<PdfProducer> {
-    if !out_dir.join(LAST_GOOD_PDF).is_file() {
-        return None;
-    }
-    std::fs::read(out_dir.join(PDF_PRODUCER_JSON))
-        .ok()
+    crate::buildfs::resolve(out_dir, LAST_GOOD_PDF).filter(|p| p.is_file())?;
+    crate::buildfs::resolve(out_dir, PDF_PRODUCER_JSON)
+        .and_then(|p| crate::buildfs::read(&p).ok())
         .and_then(|b| serde_json::from_slice(&b).ok())
 }
 
@@ -148,26 +146,10 @@ fn publish_pdf(
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let published = out_dir.join("published");
     std::fs::create_dir_all(&published)?;
-    let current = out_dir.join("current");
-    if current.symlink_metadata().is_err() && out_dir.join(LAST_GOOD_PDF).is_file() {
-        let legacy = published.join("legacy");
-        std::fs::create_dir_all(&legacy)?;
-        std::fs::copy(out_dir.join(LAST_GOOD_PDF), legacy.join("paper.pdf"))?;
-        if out_dir.join(LAST_GOOD_SYNCTEX).is_file() {
-            std::fs::copy(
-                out_dir.join(LAST_GOOD_SYNCTEX),
-                legacy.join("paper.synctex.gz"),
-            )?;
-        }
-        if out_dir.join(PDF_PRODUCER_JSON).is_file() {
-            std::fs::copy(
-                out_dir.join(PDF_PRODUCER_JSON),
-                legacy.join("producer.json"),
-            )?;
-        }
-        let _ = std::fs::remove_file(&current);
-        symlink("published/legacy", &current)?;
+    if !std::fs::symlink_metadata(&published)?.file_type().is_dir() {
+        return Err(std::io::Error::other("the published folder is not a folder"));
     }
+    let current = out_dir.join("current");
     let epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -180,16 +162,16 @@ fn publish_pdf(
     );
     let target = published.join(&generation);
     std::fs::create_dir(&target)?;
-    std::fs::copy(pdf, target.join("paper.pdf"))?;
+    crate::buildfs::copy(pdf, &target.join("paper.pdf"))?;
     if let Some(st) = synctex {
-        std::fs::copy(st, target.join("paper.synctex.gz"))?;
+        crate::buildfs::copy(st, &target.join("paper.synctex.gz"))?;
     }
     let producer = PdfProducer {
         engine: result.engine.clone(),
         version: result.engine_version.clone(),
     };
-    std::fs::write(
-        target.join("producer.json"),
+    crate::buildfs::write(
+        &target.join("producer.json"),
         serde_json::to_vec_pretty(&producer)?,
     )?;
 
@@ -225,10 +207,7 @@ fn publish_pdf(
 fn persist_result(out_dir: &Path, result: &BuildResult) {
     if let Ok(json) = serde_json::to_vec_pretty(result) {
         let _ = std::fs::create_dir_all(out_dir);
-        let tmp = out_dir.join(".last-result.json.tmp");
-        if std::fs::write(&tmp, json).is_ok() {
-            let _ = std::fs::rename(tmp, out_dir.join(LAST_RESULT_JSON));
-        }
+        let _ = crate::buildfs::write(&out_dir.join(LAST_RESULT_JSON), json);
     }
 }
 
@@ -300,7 +279,9 @@ pub struct Builder {
     texlive_path: Option<String>,
     /// Compiles running at once across the whole server. One compile can take most of a small
     /// machine's memory, so the rest wait for a slot instead of all starting and being killed.
-    slots: tokio::sync::Semaphore,
+    pub(crate) slots: tokio::sync::Semaphore,
+    /// Projects being packaged right now (see [`Builder::pack`]).
+    packing: std::sync::Mutex<std::collections::HashSet<PathBuf>>,
     /// Tickets handed to builds that had to wait, and how many of those have started. The semaphore
     /// is first in, first out, so the difference is how many builds are ahead of a given ticket.
     tickets: std::sync::atomic::AtomicU64,
@@ -346,13 +327,10 @@ impl ResolvedEngine {
         project_dir: &Path,
         main_file: &str,
         draft: bool,
-        fetch: bool,
         timeout_s: u64,
     ) -> Result<crate::engine::CompileSpec> {
         match self {
-            Self::Tectonic(e) => {
-                e.compile(sandbox, project_dir, main_file, draft, fetch, timeout_s)
-            }
+            Self::Tectonic(e) => e.compile(sandbox, project_dir, main_file, draft, timeout_s),
             Self::TexLive(e) => e.compile(sandbox, project_dir, main_file, draft),
         }
     }
@@ -362,10 +340,9 @@ impl ResolvedEngine {
         project_dir: &Path,
         file: &str,
         stem: &str,
-        fetch: bool,
     ) -> Result<crate::engine::CompileSpec> {
         match self {
-            Self::Tectonic(e) => e.compile_generated(sandbox, project_dir, file, stem, fetch),
+            Self::Tectonic(e) => e.compile_generated(sandbox, project_dir, file, stem),
             Self::TexLive(e) => e.compile_generated(sandbox, project_dir, file, stem),
         }
     }
@@ -398,6 +375,10 @@ impl Builder {
         configured_path: Option<String>,
         max_concurrent: usize,
     ) -> Builder {
+        if let Err(e) = Tectonic::discard_untrusted_cache(data_dir) {
+            // The cache is then not marked, so no project is seeded from it.
+            tracing::warn!(error = %e, "could not discard the old shared Tectonic cache");
+        }
         let engine = Tectonic::locate(data_dir, configured_path.as_deref());
         Builder {
             sandbox,
@@ -408,6 +389,7 @@ impl Builder {
             configured_path,
             texlive_path: None,
             slots: tokio::sync::Semaphore::new(max_concurrent.max(1)),
+            packing: std::sync::Mutex::new(std::collections::HashSet::new()),
             tickets: std::sync::atomic::AtomicU64::new(0),
             served: std::sync::atomic::AtomicU64::new(0),
             remote: None,
@@ -598,8 +580,7 @@ impl Builder {
         static PROBE_SEQ: AtomicU64 = AtomicU64::new(0);
         let seq = PROBE_SEQ.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("galley-probe-{}-{seq}", std::process::id()));
-        let out_dir = dir.join(".galley/build");
-        if std::fs::create_dir_all(&out_dir).is_err() {
+        if std::fs::create_dir_all(&dir).is_err() {
             return None;
         }
         let mut mounts = Vec::new();
@@ -638,7 +619,6 @@ impl Builder {
             .unwrap_or_default();
         let spec = crate::sandbox::Spec {
             project_dir: dir.clone(),
-            out_dir,
             mounts,
             masked: Vec::new(),
             env,
@@ -769,7 +749,7 @@ impl Builder {
 
     /// Wait for a free compile slot, telling the author where they are in the queue. A number that
     /// counts down reads as progress, and a bare "waiting" reads as a hang.
-    async fn wait_for_slot(
+    pub(crate) async fn wait_for_slot(
         &self,
         progress: &(dyn Fn(String) + Send + Sync),
     ) -> Option<tokio::sync::SemaphorePermit<'_>> {
@@ -798,6 +778,18 @@ impl Builder {
         };
         self.served.fetch_add(1, SeqCst);
         permit
+    }
+
+    /// Mark `project_dir` as being packaged until the returned value is dropped, or refuse when it
+    /// already is.
+    pub(crate) fn start_packing(&self, project_dir: &Path) -> Result<Packing<'_>> {
+        let mut busy = self.packing.lock().unwrap_or_else(|e| e.into_inner());
+        if !busy.insert(project_dir.to_path_buf()) {
+            return Err(crate::Error::Engine(
+                "This project is already being packaged. Try again when that finishes.".into(),
+            ));
+        }
+        Ok(Packing { builder: self, project_dir: project_dir.to_path_buf() })
     }
 
     /// Compile `main_file` inside `project_dir`. Bad input never causes a panic. Every failure
@@ -841,7 +833,8 @@ impl Builder {
         };
         let started = Instant::now();
         let deadline = started + self.timeout;
-        let out_dir = project_dir.join(".galley").join("build");
+        let out_dir = crate::zones::build_dir(project_dir);
+        let prepared = crate::zones::prepare(project_dir);
         let mut result = BuildResult {
             id,
             status: BuildStatus::Error,
@@ -867,6 +860,10 @@ impl Builder {
             message: None,
         };
 
+        if let Err(e) = prepared {
+            result.message = Some(format!("The build folder could not be prepared: {e}"));
+            return result;
+        }
         if !project_dir.join(main_file).is_file() {
             result.message = Some(format!(
                 "{main_file} does not exist. Create it, or pick another main file in project settings."
@@ -954,7 +951,7 @@ impl Builder {
                 (_, false) => Some(FigureStats::off("turned off for this project")),
                 (Err(why), true) => Some(FigureStats::off(why)),
                 (Ok(()), true) if cold => {
-                    Some(FigureStats::off("the first build fetches packages"))
+                    Some(FigureStats::off("packages are still being fetched"))
                 }
                 (Ok(()), true) => {
                     use_cache = true;
@@ -989,29 +986,29 @@ impl Builder {
             return self.finish(result, started, &out_dir);
         }
 
-        let mut run = match cached_run {
-            Some(r) => r,
-            None => {
-                let tp = Instant::now();
-                let r = match self
-                    .compile_once(&engine, project_dir, main_file, req.draft, cold, deadline)
-                    .await
-                {
-                    Ok(r) => r,
-                    Err(e) => {
-                        result.message = Some(e.to_string());
-                        return self.finish(result, started, &out_dir);
-                    }
-                };
-                if use_cache && !r.timed_out {
-                    let mut cache = FigCache::load(&out_dir);
-                    cache.plain_ms = tp.elapsed().as_millis() as u64;
-                    cache.save(&out_dir);
-                }
-                r
+        // Missing bundle files mean packages this project uses are not cached yet. They are fetched
+        // with a document of Galley's own (crate::fetch); the author's document always runs offline.
+        let had_cached_run = cached_run.is_some();
+        let tp = Instant::now();
+        let make = || {
+            engine.compile(&self.sandbox, project_dir, main_file, req.draft, self.timeout.as_secs())
+        };
+        let (run, fetched) = match self
+            .compile_fetching(&engine, project_dir, &main_text, &make, cached_run, Some(deadline), progress)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                result.message = Some(e.to_string());
+                return self.finish(result, started, &out_dir);
             }
         };
-        result.fetched_packages = cold;
+        if use_cache && !had_cached_run && !run.timed_out && !fetched {
+            let mut cache = FigCache::load(&out_dir);
+            cache.plain_ms = tp.elapsed().as_millis() as u64;
+            cache.save(&out_dir);
+        }
+        result.fetched_packages = fetched;
         result.profile.compile_ms = t0.elapsed().as_millis() as u64;
 
         if run.timed_out {
@@ -1021,34 +1018,6 @@ impl Builder {
                 self.timeout.as_secs()
             ));
             return self.finish(result, started, &out_dir);
-        }
-
-        // Missing bundle files mean packages this project uses are not cached yet: run once more
-        // with network access so the engine fills the project-local cache.
-        if req.engine == EngineKind::Tectonic && needs_fetch(&run.raw, project_dir) {
-            progress("Fetching packages…".into());
-            let t1 = Instant::now();
-            match self
-                .compile_once(&engine, project_dir, main_file, req.draft, true, deadline)
-                .await
-            {
-                Ok(r2) => {
-                    run = r2;
-                    result.fetched_packages = true;
-                    result.profile.fetch_ms = t1.elapsed().as_millis() as u64;
-                }
-                Err(e) => {
-                    result.message = Some(e.to_string());
-                    return self.finish(result, started, &out_dir);
-                }
-            }
-            if run.timed_out {
-                result.status = BuildStatus::Timeout;
-                result.message = Some(
-                    "Fetching packages took too long. Check the network and build again.".into(),
-                );
-                return self.finish(result, started, &out_dir);
-            }
         }
 
         result.pages = parse_pages(&run.log);
@@ -1149,7 +1118,7 @@ impl Builder {
         }
 
         let pdf = run.output_dir.join(format!("{}.pdf", run.stem));
-        if run.exit_ok && result.error_count == 0 && pdf.exists() {
+        if run.exit_ok && result.error_count == 0 && crate::buildfs::is_file(&pdf) {
             let _gate = if let Some(gate) = control.publication_gate {
                 Some(gate.lock().await)
             } else {
@@ -1159,14 +1128,14 @@ impl Builder {
                 result.status = BuildStatus::Failed;
                 result.stale = true;
                 result.message = Some("A newer build was requested".into());
-                let _ = std::fs::write(out_dir.join(LAST_LOG), &run.log);
+                let _ = crate::buildfs::write(&out_dir.join(LAST_LOG), &run.log);
                 return self.finish(result, started, &out_dir);
             }
             let st = run.output_dir.join(format!("{}.synctex.gz", run.stem));
             match publish_pdf(
                 &out_dir,
                 &pdf,
-                st.is_file().then_some(st.as_path()),
+                crate::buildfs::is_file(&st).then_some(st.as_path()),
                 &result,
             ) {
                 Ok(()) => {
@@ -1189,7 +1158,7 @@ impl Builder {
                 result.message = Some("A newer build was requested".into());
             }
         }
-        let _ = std::fs::write(out_dir.join(LAST_LOG), &run.log);
+        let _ = crate::buildfs::write(&out_dir.join(LAST_LOG), &run.log);
         self.finish(result, started, &out_dir)
     }
 
@@ -1204,13 +1173,15 @@ impl Builder {
         progress: &(dyn Fn(String) + Send + Sync),
         deadline: Instant,
     ) -> FigurePass {
-        let out_dir = project_dir.join(".galley").join("build");
+        let out_dir = crate::zones::build_dir(project_dir);
+        let fig = crate::zones::fig_dir(project_dir);
+        figures::clear_inputs(&crate::zones::inputs_dir(project_dir));
         let mut cache = FigCache::load(&out_dir);
         let key = figures::project_key(project_dir, main_text, &engine.identity());
         if cache.key != key {
             // Wrapper job names are shared across engines. Remove its aux, bibliography,
             // latexmk state, and PDFs before another engine can read them.
-            figures::clear(&out_dir);
+            figures::clear(&fig, &out_dir);
             cache.figures.clear();
             cache.failed.clear();
             cache.key = key;
@@ -1231,8 +1202,8 @@ impl Builder {
         };
 
         let t = Instant::now();
-        let Ok(mut run) = self
-            .wrapper_once(engine, project_dir, main_file, deadline, false)
+        let Ok(run) = self
+            .wrapper_once(engine, project_dir, main_file, main_text, deadline)
             .await
         else {
             return plain(
@@ -1242,15 +1213,12 @@ impl Builder {
                 0,
             );
         };
-        if matches!(engine, ResolvedEngine::Tectonic(_)) && needs_fetch(&run.raw, project_dir) {
-            if let Ok(fetched) = self
-                .wrapper_once(engine, project_dir, main_file, deadline, true)
-                .await
-            {
-                run = fetched;
-            }
-        }
         cache.wrapper_ms = t.elapsed().as_millis() as u64;
+        if run.timed_out {
+            // A stopped compile may still be writing the figure folder for a moment, so the next
+            // build starts from an empty one instead.
+            run.leaf.discard();
+        }
         if run.timed_out || needs_fetch(&run.raw, project_dir) {
             return plain(
                 &cache,
@@ -1259,7 +1227,7 @@ impl Builder {
                 0,
             );
         }
-        let names = figures::figure_list(&out_dir);
+        let names = figures::figure_list(&fig);
         if names.is_empty() {
             let reason = run
                 .raw
@@ -1269,14 +1237,14 @@ impl Builder {
                 .unwrap_or("TikZ is not loaded by the document");
             return plain(&cache, bypass(reason), Vec::new(), 0);
         }
-        let todo = figures::stale(&out_dir, &cache, &names);
+        let todo = figures::stale(&fig, &cache, &names);
         let blocked = todo
             .iter()
             .filter(|n| {
                 cache
                     .failed
                     .get(*n)
-                    .is_some_and(|m| Some(m) == figures::current_md5(&out_dir, n).as_ref())
+                    .is_some_and(|m| Some(m) == figures::current_md5(&fig, n).as_ref())
             })
             .count();
         let total = names.len();
@@ -1344,7 +1312,7 @@ impl Builder {
         }
         progress("Compiling…".into());
         let Ok(run) = self
-            .wrapper_once(engine, project_dir, main_file, deadline, false)
+            .wrapper_once(engine, project_dir, main_file, main_text, deadline)
             .await
         else {
             return plain(
@@ -1354,8 +1322,11 @@ impl Builder {
                 figure_ms,
             );
         };
-        let names = figures::figure_list(&out_dir);
-        let left = figures::stale(&out_dir, &cache, &names);
+        if run.timed_out {
+            run.leaf.discard();
+        }
+        let names = figures::figure_list(&fig);
+        let left = figures::stale(&fig, &cache, &names);
         if run.timed_out || !left.is_empty() {
             let why = Some("figures changed during the build".to_string());
             return plain(
@@ -1379,22 +1350,17 @@ impl Builder {
         engine: &ResolvedEngine,
         project_dir: &Path,
         main_file: &str,
+        main_text: &str,
         deadline: Instant,
-        fetch: bool,
     ) -> Result<RunOutput> {
-        let out_dir = project_dir.join(".galley").join("build");
-        std::fs::create_dir_all(&out_dir)?;
         let file = format!("{}.tex", figures::WRAPPER_STEM);
-        std::fs::write(out_dir.join(&file), figures::wrapper_source(main_file))?;
-        let spec = engine.compile_generated(
-            &self.sandbox,
-            project_dir,
-            &file,
-            figures::WRAPPER_STEM,
-            fetch,
-        )?;
-        self.run_spec_limited(spec, deadline.saturating_duration_since(Instant::now()))
-            .await
+        crate::zones::write_input(project_dir, &file, figures::wrapper_source(main_file))?;
+        let make =
+            || engine.compile_generated(&self.sandbox, project_dir, &file, figures::WRAPPER_STEM);
+        let (run, _) = self
+            .compile_fetching(engine, project_dir, main_text, &make, None, Some(deadline), &|_| {})
+            .await?;
+        Ok(run)
     }
 
     /// Compile `names` on their own, `figure_parallelism()` at a time, recording which picture
@@ -1407,7 +1373,8 @@ impl Builder {
         cache: &mut FigCache,
         deadline: Option<Instant>,
     ) -> usize {
-        let out_dir = project_dir.join(".galley").join("build");
+        let out_dir = crate::zones::build_dir(project_dir);
+        let fig = crate::zones::fig_dir(project_dir);
         let mut failed = 0;
         let mut rounds = 0u64;
         let t = Instant::now();
@@ -1416,15 +1383,19 @@ impl Builder {
             let mut jobs = Vec::new();
             for n in chunk {
                 // The key a PDF is built from is the one the main pass just wrote.
-                let md5 = figures::current_md5(&out_dir, n).unwrap_or_default();
+                let md5 = figures::current_md5(&fig, n).unwrap_or_default();
                 let file = format!("{n}.tex");
-                let spec = std::fs::write(out_dir.join(&file), figures::figure_source())
-                    .map_err(crate::Error::from)
-                    .and_then(|_| {
-                        engine.compile_generated(&self.sandbox, project_dir, &file, n, false)
-                    });
+                // The input goes once its job is over. Left in the inputs folder, pdfTeX would
+                // take `galley-fig-figureN.tex` for the picture while its PDF is missing.
+                let input = crate::zones::write_input(project_dir, &file, figures::figure_source());
+                let spec = match &input {
+                    Ok(_) => engine.compile_generated(&self.sandbox, project_dir, &file, n),
+                    Err(e) => Err(crate::Error::Engine(format!("could not write {file}: {e}"))),
+                };
+                let input = input.ok().map(crate::zones::Cleanup::new);
                 jobs.push(async move {
-                    let ok = match spec {
+                    let _input = input;
+                    let (ok, timed_out) = match spec {
                         Ok(spec) => self
                             .run_spec_limited(
                                 spec,
@@ -1433,16 +1404,30 @@ impl Builder {
                                     .unwrap_or(self.timeout),
                             )
                             .await
-                            .map(|r| r.exit_ok && !r.timed_out)
-                            .unwrap_or(false),
-                        Err(_) => false,
+                            .map(|r| (r.exit_ok && !r.timed_out, r.timed_out))
+                            .unwrap_or((false, false)),
+                        Err(_) => (false, false),
                     };
-                    (n.clone(), md5, ok)
+                    (n.clone(), md5, ok, timed_out)
                 });
             }
-            for (n, md5, ok) in futures_util::future::join_all(jobs).await {
-                let pdf = out_dir.join(format!("{n}.pdf"));
-                if ok && pdf.is_file() && !md5.is_empty() {
+            let done = futures_util::future::join_all(jobs).await;
+            if done.iter().any(|(_, _, _, timed_out)| *timed_out) {
+                // The jobs share the figure folder, and a stopped one may still be writing there.
+                // The folder is thrown away once they are all over. No picture is marked as
+                // failing on its own: the others lost their PDFs with the folder, not by failing.
+                if let Ok(leaf) = crate::zones::Leaf::fig(project_dir) {
+                    leaf.discard();
+                }
+                for (n, ..) in done {
+                    failed += 1;
+                    cache.figures.remove(&n);
+                }
+                continue;
+            }
+            for (n, md5, ok, _) in done {
+                let pdf = fig.join(format!("{n}.pdf"));
+                if ok && crate::buildfs::is_file(&pdf) && !md5.is_empty() {
                     cache.failed.remove(&n);
                     cache.figures.insert(n, md5);
                 } else {
@@ -1476,8 +1461,7 @@ impl Builder {
         let Ok(engine) = self.resolve_engine(engine_kind, &|_| {}).await else {
             return 0;
         };
-        let out_dir = project_dir.join(".galley").join("build");
-        let mut cache = FigCache::load(&out_dir);
+        let mut cache = FigCache::load(&crate::zones::build_dir(project_dir));
         let mut made = 0;
         for chunk in names.chunks(figure_parallelism()) {
             if stop().await {
@@ -1493,7 +1477,10 @@ impl Builder {
 
     /// Clear the figure cache. This removes every figure PDF and the cache state.
     pub fn clear_figures(&self, project_dir: &Path) -> usize {
-        figures::clear(&project_dir.join(".galley").join("build"))
+        figures::clear(
+            &crate::zones::fig_dir(project_dir),
+            &crate::zones::build_dir(project_dir),
+        )
     }
 
     /// Compile on a build worker, then publish its PDF here under the same rules as a local build:
@@ -1509,7 +1496,7 @@ impl Builder {
         control: RunControl<'_>,
         started: Instant,
     ) -> BuildResult {
-        let out_dir = project_dir.join(".galley").join("build");
+        let out_dir = crate::zones::build_dir(project_dir);
         let fail = |mut result: BuildResult, message: String| {
             result.status = BuildStatus::Error;
             result.message = Some(format!("{message}. Your last PDF is unchanged. Try the build again in a moment."));
@@ -1556,7 +1543,7 @@ impl Builder {
         result.pending_figures.clear();
         let _ = std::fs::create_dir_all(&out_dir);
         if let Some(log) = &outcome.log {
-            let _ = std::fs::write(out_dir.join(LAST_LOG), log);
+            let _ = crate::buildfs::write(&out_dir.join(LAST_LOG), log);
         }
         if let (BuildStatus::Ok, Some(pdf)) = (result.status, outcome.pdf) {
             let _gate = match control.publication_gate {
@@ -1571,8 +1558,8 @@ impl Builder {
             }
             let incoming = out_dir.join(".remote-paper.pdf");
             let incoming_st = out_dir.join(".remote-paper.synctex.gz");
-            let written = std::fs::write(&incoming, &pdf).and_then(|()| match &outcome.synctex {
-                Some(st) => std::fs::write(&incoming_st, st),
+            let written = crate::buildfs::write(&incoming, &pdf).and_then(|()| match &outcome.synctex {
+                Some(st) => crate::buildfs::write(&incoming_st, st),
                 None => Ok(()),
             });
             let published = written.and_then(|()| {
@@ -1604,83 +1591,41 @@ impl Builder {
         result.finished_at = Utc::now();
         if let Ok(json) = serde_json::to_vec_pretty(&result.errors) {
             let _ = std::fs::create_dir_all(out_dir);
-            let _ = std::fs::write(out_dir.join(ERRORS_JSON), json);
+            let _ = crate::buildfs::write(&out_dir.join(ERRORS_JSON), json);
         }
         persist_result(out_dir, &result);
         result
     }
 
-    async fn compile_once(
-        &self,
-        engine: &ResolvedEngine,
-        project_dir: &Path,
-        main_file: &str,
-        draft: bool,
-        fetch: bool,
-        deadline: Instant,
-    ) -> Result<RunOutput> {
-        let compile = engine.compile(
-            &self.sandbox,
-            project_dir,
-            main_file,
-            draft,
-            fetch,
-            self.timeout.as_secs(),
-        )?;
-        self.run_spec_limited(compile, deadline.saturating_duration_since(Instant::now()))
-            .await
-    }
-
-    /// Run one prepared compile spec. The normal build and the latexdiff compare both use it.
-    pub(crate) async fn run_spec(&self, compile: crate::engine::CompileSpec) -> Result<RunOutput> {
-        self.run_spec_limited(compile, self.timeout).await
-    }
-
-    async fn run_spec_limited(
+    /// Run one prepared compile spec and read back its log. A run is stopped at `limit`, and a
+    /// docker container is removed even when the caller stops waiting.
+    pub(crate) async fn run_spec_limited(
         &self,
         compile: crate::engine::CompileSpec,
         limit: Duration,
     ) -> Result<RunOutput> {
-        let out_dir = compile.output_dir.clone();
-        if out_dir != compile.spec.out_dir {
-            let _ = std::fs::remove_dir_all(&out_dir);
-            std::fs::create_dir_all(&out_dir)?;
-        }
-        let log_path = out_dir.join(format!("{}.log", compile.stem));
+        let crate::engine::CompileSpec { spec, leaf, stem, inputs } = compile;
+        let out_dir = leaf.path().to_path_buf();
+        // A reused folder (the figure cache) may hold this job's earlier output. `remove_file`
+        // removes a link without following it.
+        let log_path = out_dir.join(format!("{stem}.log"));
         let _ = std::fs::remove_file(&log_path);
-        let _ = std::fs::remove_file(out_dir.join(format!("{}.pdf", compile.stem)));
-
-        let mut cmd = self.sandbox.command(&compile.spec);
-        let child = cmd.spawn().map_err(|e| {
-            crate::Error::Engine(format!(
-                "could not start the {} sandbox: {e}. Run `galley doctor`, or set [build] sandbox in galley.toml.",
-                self.sandbox.kind
-            ))
-        })?;
-        let pid = child.id();
-        let (exit_ok, timed_out, stderr) =
-            match tokio::time::timeout(limit, child.wait_with_output()).await {
-                Ok(Ok(out)) => (
-                    out.status.success(),
-                    false,
-                    format!(
-                        "{}\n{}",
-                        String::from_utf8_lossy(&out.stdout),
-                        String::from_utf8_lossy(&out.stderr)
-                    ),
-                ),
-                Ok(Err(e)) => {
-                    return Err(crate::Error::Engine(format!(
-                        "the engine could not be run: {e}"
-                    )));
-                }
-                Err(_) => {
-                    self.sandbox.kill_group(pid).await;
-                    self.sandbox.kill(&compile.spec).await;
-                    (false, true, String::new())
-                }
-            };
-        let log = std::fs::read_to_string(&log_path).unwrap_or_else(|_| stderr.clone());
+        let _ = std::fs::remove_file(out_dir.join(format!("{stem}.pdf")));
+        let ran = self.run_captured(&spec, limit, crate::buildfs::MAX_LOG).await;
+        drop(inputs);
+        let ran = ran?;
+        let stderr = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&ran.stdout),
+            String::from_utf8_lossy(&ran.stderr)
+        );
+        let log = if ran.timed_out {
+            String::new()
+        } else {
+            crate::buildfs::read_capped(&log_path, crate::buildfs::MAX_LOG)
+                .map(|b| String::from_utf8_lossy(&b).into_owned())
+                .unwrap_or_else(|_| stderr.clone())
+        };
         let mut raw = parse_log(&log);
         for diag in parse_file_line_errors(&stderr)
             .into_iter()
@@ -1707,15 +1652,59 @@ impl Builder {
                 })
             });
         Ok(RunOutput {
-            stem: compile.stem,
+            stem,
             output_dir: out_dir,
-            exit_ok,
-            timed_out,
+            exit_ok: ran.exit_ok,
+            timed_out: ran.timed_out,
             log,
             stderr,
             stderr_summary,
             raw,
+            leaf,
         })
+    }
+
+    /// Start `spec` in the sandbox and collect at most `cap` bytes of each output stream until it
+    /// exits or `limit` passes. A stopped run's whole process group is killed, and its docker
+    /// container removed, before this returns.
+    async fn run_captured(
+        &self,
+        spec: &crate::sandbox::Spec,
+        limit: Duration,
+        cap: u64,
+    ) -> Result<Captured> {
+        spec.check_mounts().map_err(|e| {
+            crate::Error::Engine(format!("the sandbox was not started: {e}"))
+        })?;
+        let mut cmd = self.sandbox.command(spec);
+        let mut child = cmd.spawn().map_err(|e| {
+            crate::Error::Engine(format!(
+                "could not start the {} sandbox: {e}. Run `galley doctor`, or set [build] sandbox in galley.toml.",
+                self.sandbox.kind
+            ))
+        })?;
+        let mut container = self.sandbox.guard(spec);
+        let pid = child.id();
+        let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
+        let waited = tokio::time::timeout(limit, async {
+            tokio::join!(read_capped(stdout, cap), read_capped(stderr, cap), child.wait())
+        })
+        .await;
+        match waited {
+            Ok((stdout, stderr, Ok(status))) => {
+                container.disarm();
+                Ok(Captured { exit_ok: status.success(), timed_out: false, stdout, stderr })
+            }
+            Ok((_, _, Err(e))) => Err(crate::Error::Engine(format!("the engine could not be run: {e}"))),
+            Err(_) => {
+                let _ = child.start_kill();
+                self.sandbox.kill_group(pid).await;
+                self.sandbox.kill(spec).await;
+                container.disarm();
+                let _ = tokio::time::timeout(Duration::from_secs(10), child.wait()).await;
+                Ok(Captured { exit_ok: false, timed_out: true, stdout: Vec::new(), stderr: Vec::new() })
+            }
+        }
     }
 
     /// Tells whether `latexdiff` is available. The UI hides PDF compare when it is not.
@@ -1724,8 +1713,8 @@ impl Builder {
     }
 
     /// Make a marked-up PDF that shows the changes between two versions of a `.tex` file. First run
-    /// latexdiff on the two texts. latexdiff runs on the host because it is a pure text transform.
-    /// Then compile its output with the sandboxed engine. The PDF lands at
+    /// latexdiff on the two texts, then compile its output. Both run in the sandbox, offline and
+    /// with a time limit, because both texts come from the author. The PDF lands at
     /// `.galley/build/last-diff.pdf`. This returns an error if latexdiff is not installed, or if
     /// the marked-up document does not compile.
     pub async fn latexdiff(
@@ -1737,66 +1726,141 @@ impl Builder {
         progress: &(dyn Fn(String) + Send + Sync),
     ) -> Result<()> {
         let bin = latexdiff_bin().ok_or(crate::Error::LatexdiffUnavailable)?;
+        // A comparison is two compiles' worth of work, so it waits its turn like a build.
+        let _slot = match self.slots.try_acquire() {
+            Ok(permit) => Some(permit),
+            Err(_) => self.wait_for_slot(progress).await,
+        };
+        let deadline = Instant::now() + self.timeout;
         let engine = self.resolve_engine(engine_kind, progress).await?;
-        let out_dir = project_dir.join(".galley").join("build");
-        std::fs::create_dir_all(&out_dir)?;
-        let old_path = out_dir.join("galley-diff-old.tex");
-        let new_path = out_dir.join("galley-diff-new.tex");
-        std::fs::write(&old_path, old_text)?;
-        std::fs::write(&new_path, new_text)?;
+        crate::zones::prepare(project_dir)?;
+        let out_dir = crate::zones::build_dir(project_dir);
 
         progress("Marking up changes…".into());
-        let output = tokio::task::spawn_blocking(move || {
-            std::process::Command::new(&bin)
-                .arg(&old_path)
-                .arg(&new_path)
-                .output()
-        })
-        .await
-        .map_err(|e| crate::Error::Engine(format!("latexdiff task failed: {e}")))?
-        .map_err(|e| crate::Error::Engine(format!("could not run latexdiff: {e}")))?;
-        if !output.status.success() {
-            let msg = String::from_utf8_lossy(&output.stderr);
+        // latexdiff sees only the two texts, in a folder of their own mounted as its project.
+        let work = crate::zones::inputs_dir(project_dir).join(crate::zones::unique("diff"));
+        std::fs::create_dir(&work)?;
+        let _work = crate::zones::Cleanup::new(work.clone());
+        crate::buildfs::write(&work.join("old.tex"), old_text)?;
+        crate::buildfs::write(&work.join("new.tex"), new_text)?;
+        let isolated = self.sandbox.kind != crate::SandboxKind::None;
+        let (program, mounts) = match self.sandbox.kind {
+            // The image has its own latexdiff.
+            crate::SandboxKind::Docker => (PathBuf::from("latexdiff"), Vec::new()),
+            // latexdiff is a Perl script; /usr (with Perl) is already mounted. One installed
+            // elsewhere is mounted read-only on its own.
+            crate::SandboxKind::Bwrap if !bin.starts_with("/usr") => (
+                PathBuf::from("/galley/bin/latexdiff"),
+                vec![crate::sandbox::Mount {
+                    host: bin.clone(),
+                    guest: PathBuf::from("/galley/bin/latexdiff"),
+                    writable: false,
+                }],
+            ),
+            _ => (bin.clone(), Vec::new()),
+        };
+        let file = |name: &str| {
+            if isolated {
+                format!("{}/{name}", crate::sandbox::GUEST_WORK)
+            } else {
+                work.join(name).to_string_lossy().into_owned()
+            }
+        };
+        let spec = crate::sandbox::Spec {
+            project_dir: work.clone(),
+            mounts,
+            masked: Vec::new(),
+            env: Vec::new(),
+            network: false,
+            program,
+            args: vec![file("old.tex"), file("new.tex")],
+            name: crate::zones::unique("galley-latexdiff"),
+        };
+        let ran = self
+            .run_captured(&spec, deadline.saturating_duration_since(Instant::now()), MAX_LATEXDIFF)
+            .await?;
+        if ran.timed_out {
+            return Err(crate::Error::Engine(format!(
+                "latexdiff was stopped after {} s",
+                self.timeout.as_secs()
+            )));
+        }
+        if !ran.exit_ok {
+            let msg = String::from_utf8_lossy(&ran.stderr);
             return Err(crate::Error::Engine(format!(
                 "latexdiff failed: {}",
                 msg.lines().next().unwrap_or("unknown error")
             )));
         }
-        std::fs::write(out_dir.join("galley-diff.tex"), &output.stdout)?;
+        if ran.stdout.len() as u64 >= MAX_LATEXDIFF {
+            return Err(crate::Error::Engine("the marked-up document is too large".into()));
+        }
+        let stem = crate::zones::unique("galley-diff");
+        let file = format!("{stem}.tex");
+        let input = crate::zones::write_input(project_dir, &file, &ran.stdout)?;
+        let _input = crate::zones::Cleanup::new(input);
 
         progress("Compiling the comparison…".into());
-        let cold = engine.cold(project_dir);
-        let spec = engine.compile_generated(
-            &self.sandbox,
-            project_dir,
-            "galley-diff.tex",
-            "galley-diff",
-            cold,
-        )?;
-        let mut run = self.run_spec(spec).await?;
-        if engine_kind == EngineKind::Tectonic && needs_fetch(&run.raw, project_dir) {
-            let spec = engine.compile_generated(
-                &self.sandbox,
-                project_dir,
-                "galley-diff.tex",
-                "galley-diff",
-                true,
-            )?;
-            run = self.run_spec(spec).await?;
-        }
-        let pdf = run.output_dir.join("galley-diff.pdf");
+        let make = || engine.compile_generated(&self.sandbox, project_dir, &file, &stem);
+        let new_text = String::from_utf8_lossy(&ran.stdout).into_owned();
+        let (run, _) = self
+            .compile_fetching(&engine, project_dir, &new_text, &make, None, Some(deadline), progress)
+            .await?;
+        let pdf = run.output_dir.join(format!("{stem}.pdf"));
         if run.exit_ok
             && !run.timed_out
             && run.raw.iter().all(|d| d.level != Level::Error)
-            && pdf.is_file()
+            && crate::buildfs::is_file(&pdf)
         {
-            std::fs::copy(&pdf, out_dir.join(LAST_DIFF_PDF))?;
+            crate::buildfs::copy(&pdf, &out_dir.join(LAST_DIFF_PDF))?;
             Ok(())
         } else {
             Err(crate::Error::Engine(
                 "the comparison did not produce a PDF; the marked-up document may not compile"
                     .into(),
             ))
+        }
+    }
+}
+
+pub(crate) struct Packing<'a> {
+    builder: &'a Builder,
+    project_dir: PathBuf,
+}
+
+impl Drop for Packing<'_> {
+    fn drop(&mut self) {
+        let mut busy = self.builder.packing.lock().unwrap_or_else(|e| e.into_inner());
+        busy.remove(&self.project_dir);
+    }
+}
+
+/// The most latexdiff may print. Its output is a marked-up copy of the document.
+const MAX_LATEXDIFF: u64 = 64 << 20;
+
+/// What a sandboxed run printed, and how it ended.
+struct Captured {
+    exit_ok: bool,
+    timed_out: bool,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+/// Read a child's output stream to its end, keeping at most `cap` bytes. The rest is read and
+/// dropped, so a child that prints without end neither fills memory nor blocks on a full pipe.
+async fn read_capped<R: tokio::io::AsyncRead + Unpin>(stream: Option<R>, cap: u64) -> Vec<u8> {
+    use tokio::io::AsyncReadExt;
+    let Some(mut stream) = stream else { return Vec::new() };
+    let cap = usize::try_from(cap).unwrap_or(usize::MAX);
+    let mut kept = Vec::new();
+    let mut chunk = vec![0u8; 64 * 1024];
+    loop {
+        match stream.read(&mut chunk).await {
+            Ok(0) | Err(_) => return kept,
+            Ok(n) => {
+                let room = cap.saturating_sub(kept.len()).min(n);
+                kept.extend_from_slice(&chunk[..room]);
+            }
         }
     }
 }
@@ -1844,6 +1908,8 @@ fn engine_id(engine: &Tectonic) -> String {
 
 pub(crate) struct RunOutput {
     pub(crate) stem: String,
+    /// The folder the run wrote. It lives as long as this value, so its PDF can still be
+    /// published.
     pub(crate) output_dir: PathBuf,
     pub(crate) exit_ok: bool,
     pub(crate) timed_out: bool,
@@ -1851,6 +1917,7 @@ pub(crate) struct RunOutput {
     pub(crate) stderr: String,
     pub(crate) stderr_summary: Option<String>,
     pub(crate) raw: Vec<RawDiag>,
+    pub(crate) leaf: crate::zones::Leaf,
 }
 
 /// A `File not found` for something that is not in the project points at the bundle cache.
@@ -1859,14 +1926,17 @@ pub(crate) struct RunOutput {
 pub(crate) fn cache_cold(engine: &Tectonic, project_dir: &Path) -> bool {
     let local = Tectonic::local_cache_dir(project_dir);
     let dir = if local.is_dir() {
-        &local
+        local
     } else {
-        &engine.cache_dir
+        match engine.shared_cache() {
+            Some(shared) => shared.to_path_buf(),
+            None => return true,
+        }
     };
-    match std::fs::read_dir(dir) {
-        Ok(mut entries) => entries.next().is_none(),
-        Err(_) => true,
-    }
+    // Tectonic builds its format files on first use, and an author's compile cannot write the
+    // cache. A cache without a finished one (empty, or left by a fetch that was cut off) is
+    // filled by Galley's own fetch run first.
+    !Tectonic::has_formats(&dir)
 }
 
 pub(crate) fn needs_fetch(raw: &[RawDiag], project_dir: &Path) -> bool {
@@ -1984,12 +2054,18 @@ impl ProjectBuilds {
         before: Option<BeforeBuild>,
     ) -> Arc<ProjectBuilds> {
         let (events, _) = broadcast::channel(64);
-        let out_dir = project_dir.join(".galley").join("build");
-        let last = std::fs::read(out_dir.join(LAST_RESULT_JSON))
+        let out_dir = crate::zones::build_dir(project_dir);
+        // A build folder from before compiles had their own scratch folders is deleted here.
+        if let Err(e) = crate::zones::prepare(project_dir) {
+            tracing::warn!(project = %project_dir.display(), error = %e, "the build folder could not be prepared");
+        }
+        // Nothing of this project runs yet in this process; folders a stopped server left go.
+        crate::zones::sweep_stale(project_dir, builder.timeout * 4);
+        let last = crate::buildfs::read(&out_dir.join(LAST_RESULT_JSON))
             .ok()
             .and_then(|b| serde_json::from_slice::<BuildResult>(&b).ok())
             .or_else(|| {
-                std::fs::read(out_dir.join(ERRORS_JSON))
+                crate::buildfs::read(&out_dir.join(ERRORS_JSON))
                     .ok()
                     .and_then(|b| serde_json::from_slice::<Vec<Diagnostic>>(&b).ok())
                     .map(|errors| BuildResult {
@@ -2060,12 +2136,14 @@ impl ProjectBuilds {
     }
 
     pub fn out_dir(&self) -> PathBuf {
-        self.project_dir.join(".galley").join("build")
+        crate::zones::build_dir(&self.project_dir)
     }
 
     /// Load SyncTeX for the PDF currently shown (the last good build).
     pub fn synctex(&self) -> Result<SyncTex> {
-        SyncTex::load(&self.out_dir().join(LAST_GOOD_SYNCTEX), &self.project_dir)
+        let path = crate::buildfs::resolve(&self.out_dir(), LAST_GOOD_SYNCTEX)
+            .ok_or_else(|| crate::Error::SyncTex("no SyncTeX for the last good build".into()))?;
+        SyncTex::load(&path, &self.project_dir)
     }
 
     /// Queue a build. This request replaces a request that has not started.
@@ -2184,18 +2262,65 @@ fn own_failures(n: usize) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn starting_a_builder_discards_an_unmarked_shared_cache() {
+        let data = tempfile::tempdir().unwrap();
+        let shared = data.path().join("tectonic/cache");
+        std::fs::create_dir_all(shared.join("formats")).unwrap();
+        std::fs::write(shared.join("planted.cls"), "\\relax").unwrap();
+        let sandbox = Sandbox {
+            kind: crate::SandboxKind::None,
+            docker_image: String::new(),
+            memory_mb: 512,
+            cpus: 1.0,
+            systemd_scope: false,
+        };
+        let _builder = Builder::new(sandbox, Hints::bundled().unwrap(), Duration::from_secs(5), data.path(), None, 1);
+        assert!(!shared.exists());
+        assert!(data.path().join("tectonic").join(crate::engine::TRUSTED_CACHE).is_file());
+    }
+
+    #[test]
+    fn a_cache_without_format_files_is_cold() {
+        let data = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let shared = data.path().join("tectonic/cache");
+        std::fs::create_dir_all(shared.join("formats")).unwrap();
+        std::fs::write(shared.join("formats/latex.fmt"), "fmt").unwrap();
+        let engine = Tectonic { binary: data.path().join("tectonic/tectonic"), cache_dir: shared.clone() };
+        assert!(cache_cold(&engine, project.path()), "an unmarked shared cache does not count");
+        std::fs::write(data.path().join("tectonic").join(crate::engine::TRUSTED_CACHE), "").unwrap();
+        assert!(!cache_cold(&engine, project.path()));
+
+        let local = Tectonic::local_cache_dir(project.path());
+        std::fs::create_dir_all(local.join("bundles")).unwrap();
+        assert!(cache_cold(&engine, project.path()), "bundle files but no formats");
+        std::fs::create_dir_all(local.join("formats")).unwrap();
+        assert!(cache_cold(&engine, project.path()), "an empty formats folder");
+        // What Tectonic leaves when it is stopped while writing a format.
+        std::fs::write(local.join("formats/format_uNXkKt"), "partial").unwrap();
+        assert!(cache_cold(&engine, project.path()), "only a temporary format file");
+        std::fs::write(local.join("formats/broken.fmt"), "").unwrap();
+        assert!(cache_cold(&engine, project.path()), "an empty .fmt");
+        let elsewhere = tempfile::tempdir().unwrap();
+        std::fs::write(elsewhere.path().join("real.fmt"), "fmt").unwrap();
+        std::os::unix::fs::symlink(elsewhere.path().join("real.fmt"), local.join("formats/linked.fmt")).unwrap();
+        assert!(cache_cold(&engine, project.path()), "a .fmt that is a link");
+        std::fs::write(local.join("formats/latex.fmt"), "fmt").unwrap();
+        assert!(!cache_cold(&engine, project.path()));
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn timeout_kills_a_spawned_descendant() {
         let project = tempfile::tempdir().unwrap();
-        let out_dir = project.path().join(".galley/build");
-        std::fs::create_dir_all(&out_dir).unwrap();
-        let started = out_dir.join("child-started");
-        let survived = out_dir.join("child-survived");
+        let leaf = crate::zones::Leaf::run(project.path()).unwrap();
+        let marks = tempfile::tempdir().unwrap();
+        let started = marks.path().join("child-started");
+        let survived = marks.path().join("child-survived");
         let spec = crate::engine::CompileSpec {
             spec: crate::sandbox::Spec {
                 project_dir: project.path().to_path_buf(),
-                out_dir: out_dir.clone(),
                 mounts: Vec::new(),
                 masked: Vec::new(),
                 env: Vec::new(),
@@ -2210,8 +2335,9 @@ mod tests {
                 ],
                 name: "galley-timeout-test".into(),
             },
-            output_dir: out_dir,
+            leaf,
             stem: "main".into(),
+            inputs: Vec::new(),
         };
         let run = one_slot_builder()
             .run_spec_limited(spec, Duration::from_millis(300))
@@ -2224,6 +2350,80 @@ mod tests {
             !survived.exists(),
             "a descendant survived the process-group kill"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn endless_output_is_capped_and_the_run_folder_is_removed() {
+        let project = tempfile::tempdir().unwrap();
+        let leaf = crate::zones::Leaf::run(project.path()).unwrap();
+        let folder = leaf.path().to_path_buf();
+        std::fs::write(folder.join("main.log"), "! Undefined control sequence.").unwrap();
+        let spec = crate::engine::CompileSpec {
+            spec: crate::sandbox::Spec {
+                project_dir: project.path().to_path_buf(),
+                mounts: Vec::new(),
+                masked: Vec::new(),
+                env: Vec::new(),
+                network: false,
+                program: PathBuf::from("/bin/sh"),
+                // 200 MB of output, more than the cap, then a normal exit.
+                args: vec!["-c".into(), "head -c 200000000 /dev/zero; exit 3".into()],
+                name: "galley-output-test".into(),
+            },
+            leaf,
+            stem: "main".into(),
+            inputs: Vec::new(),
+        };
+        let started = Instant::now();
+        let run = one_slot_builder()
+            .run_spec_limited(spec, Duration::from_secs(20))
+            .await
+            .unwrap();
+        assert!(!run.timed_out && !run.exit_ok);
+        assert!(run.stderr.len() as u64 <= 2 * crate::buildfs::MAX_LOG + 2);
+        assert!(started.elapsed() < Duration::from_secs(15));
+        drop(run);
+        assert!(!folder.exists(), "a run folder is deleted once its output is used");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_planted_link_or_pipe_is_never_read_as_the_log() {
+        let project = tempfile::tempdir().unwrap();
+        let secret = tempfile::tempdir().unwrap();
+        std::fs::write(secret.path().join("environ"), "GALLEY_WORKER_TOKEN=secret").unwrap();
+        for plant in ["link", "fifo"] {
+            let leaf = crate::zones::Leaf::run(project.path()).unwrap();
+            let target = secret.path().join("environ");
+            // The "compile" plants the log after Galley removed the old one.
+            let script = match plant {
+                "link" => format!("ln -s {} main.log", target.display()),
+                _ => "mkfifo main.log".to_string(),
+            };
+            let spec = crate::engine::CompileSpec {
+                spec: crate::sandbox::Spec {
+                    project_dir: leaf.path().to_path_buf(),
+                    mounts: Vec::new(),
+                    masked: Vec::new(),
+                    env: Vec::new(),
+                    network: false,
+                    program: PathBuf::from("/bin/sh"),
+                    args: vec!["-c".into(), script],
+                    name: "galley-plant-test".into(),
+                },
+                leaf,
+                stem: "main".into(),
+                inputs: Vec::new(),
+            };
+            let started = Instant::now();
+            let run = one_slot_builder()
+                .run_spec_limited(spec, Duration::from_secs(5))
+                .await
+                .unwrap();
+            assert!(!run.log.contains("secret"), "{plant}");
+            assert!(started.elapsed() < Duration::from_secs(4), "{plant} made the server wait");
+        }
     }
 
     fn one_slot_builder() -> Builder {

@@ -371,8 +371,9 @@ async fn build_status_restores_pdf_producer_after_restart() {
     let admin = signup(&state, "producer@example.com", "Producer").await;
     let (status, _, admin) = rest(&state, &admin, "POST", "/api/projects", Some(json!({"name":"Producer test"}))).await;
     assert_eq!(status, StatusCode::CREATED);
+    // A build folder of the current layout; one from before it would be deleted on start.
+    galley_build::zones::prepare(&dir.path().join("data/producer-test")).unwrap();
     let build_dir = dir.path().join("data/producer-test/.galley/build");
-    std::fs::create_dir_all(&build_dir).unwrap();
     let record = json!({
         "id": 7, "status": "failed", "errors": [], "error_count": 1, "warning_count": 0,
         "profile": {"total_ms": 1, "compile_ms": 1, "fetch_ms": 0, "figure_ms": 0},
@@ -405,6 +406,8 @@ async fn real_mcp_engine_matrix_preserves_project_selection() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("tectonic")).unwrap();
     std::os::unix::fs::symlink(&cache, dir.path().join("tectonic/cache")).unwrap();
+    // The fixture cache is Galley's own warm-up, so the test marks it trusted.
+    std::fs::write(dir.path().join("tectonic").join(galley_build::engine::TRUSTED_CACHE), "").unwrap();
     let mut config = Config::default();
     config.build.sandbox = "bwrap".into();
     config.build.tectonic_path = tectonic;

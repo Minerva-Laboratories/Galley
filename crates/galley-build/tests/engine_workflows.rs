@@ -15,6 +15,12 @@ fn setup(data: &Path) -> Builder {
     let cache = std::env::var("GALLEY_TEST_TECTONIC_CACHE").expect("warm Tectonic cache required");
     std::fs::create_dir_all(data.join("tectonic")).unwrap();
     std::os::unix::fs::symlink(cache, data.join("tectonic/cache")).unwrap();
+    // The fixture cache is Galley's own warm-up, so the test marks it trusted.
+    std::fs::write(data.join("tectonic").join(galley_build::engine::TRUSTED_CACHE), "").unwrap();
+    builder(data)
+}
+
+fn builder(data: &Path) -> Builder {
     Builder::new(
         Sandbox {
             kind: SandboxKind::Bwrap,
@@ -351,9 +357,10 @@ async fn bubblewrap_sources_are_readonly_builds_writable_and_network_is_absent()
         return;
     }
     let project = tempfile::tempdir().unwrap();
-    let out = project.path().join(".galley/build");
-    std::fs::create_dir_all(&out).unwrap();
+    galley_build::zones::prepare(project.path()).unwrap();
+    let leaf = galley_build::zones::Leaf::run(project.path()).unwrap();
     std::fs::write(project.path().join("main.tex"), "original").unwrap();
+    std::fs::write(galley_build::zones::build_dir(project.path()).join("last.log"), "galley's").unwrap();
     let sandbox = Sandbox {
         kind: SandboxKind::Bwrap,
         docker_image: String::new(),
@@ -362,25 +369,32 @@ async fn bubblewrap_sources_are_readonly_builds_writable_and_network_is_absent()
         systemd_scope: false,
     };
     let code = r#"from pathlib import Path
+import os
 try:
     Path('/work/main.tex').write_text('changed')
     raise AssertionError('source was writable')
 except OSError as error:
     assert error.errno in (13, 30), error
-Path('/work/.galley/build/output.txt').write_text('allowed')
+# Galley's own folder is hidden, not just read-only.
+assert not Path('/work/.galley/build').exists(), os.listdir('/work/.galley')
+Path('/tmp/galley-out/output.txt').write_text('allowed')
 assert not Path('/proc/net/route').read_text().splitlines()[1:], 'network route available'
 "#;
     let spec = galley_build::sandbox::Spec {
         project_dir: project.path().into(),
-        out_dir: out.clone(),
-        mounts: Vec::new(),
-        masked: Vec::new(),
+        mounts: vec![galley_build::sandbox::Mount {
+            host: leaf.path().to_path_buf(),
+            guest: galley_build::zones::GUEST_OUT.into(),
+            writable: true,
+        }],
+        masked: vec!["/work/.galley".into()],
         env: Vec::new(),
         network: false,
         program: "/usr/bin/python3".into(),
         args: vec!["-c".into(), code.into()],
         name: "galley-isolation-test".into(),
     };
+    spec.check_mounts().unwrap();
     let output = sandbox.command(&spec).output().await.unwrap();
     assert!(
         output.status.success(),
@@ -392,7 +406,196 @@ assert not Path('/proc/net/route').read_text().splitlines()[1:], 'network route 
         "original"
     );
     assert_eq!(
-        std::fs::read_to_string(out.join("output.txt")).unwrap(),
+        std::fs::read_to_string(leaf.path().join("output.txt")).unwrap(),
         "allowed"
     );
+}
+
+/// A document that plants links where Galley reads, and tries to reach Galley's own folder, gets
+/// nothing out of either: the PDF is its own, the log is not another file, and nothing outside its
+/// scratch folder changes.
+#[tokio::test]
+async fn a_document_that_plants_links_reaches_nothing_outside_its_scratch_folder() {
+    if !enabled() {
+        return;
+    }
+    let data = tempfile::tempdir().unwrap();
+    let builder = setup(data.path());
+    let secrets = tempfile::tempdir().unwrap();
+    let canary = secrets.path().join("canary.txt");
+    std::fs::write(&canary, "GALLEY-CANARY").unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let target = canary.display().to_string();
+    let plant = |names: &[&str]| -> String {
+        names
+            .iter()
+            .map(|n| format!("lfs.link('{target}', '/tmp/galley-out/{n}', true) "))
+            .collect()
+    };
+    let source = format!(
+        "\\documentclass{{article}}\n\\begin{{document}}\nHello.\n\\directlua{{\n         {}\n         lfs.link('/', '/tmp/galley-out/root', true)\n         local f = io.open('/work/.galley/build/last-good.pdf', 'w')\n         if f then f:write('planted') f:close() end\n         }}\n\\end{{document}}\n",
+        plant(&["main.bbl", "last.log", "last-good.pdf", "current", "galley-fig.figlist"])
+    );
+    std::fs::write(project.path().join("main.tex"), &source).unwrap();
+    let result = builder
+        .run(1, project.path(), "main.tex", &request(EngineKind::LuaLatex), &|_| {})
+        .await;
+    assert_eq!(result.status, BuildStatus::Ok, "{result:#?}");
+    let out = galley_build::zones::build_dir(project.path());
+    let pdf = std::fs::read(out.join("last-good.pdf")).unwrap();
+    assert!(pdf.starts_with(b"%PDF"), "the published PDF is the compile's own");
+    let log = std::fs::read_to_string(out.join("last.log")).unwrap();
+    assert!(!log.contains("GALLEY-CANARY"));
+    assert_eq!(std::fs::read_to_string(&canary).unwrap(), "GALLEY-CANARY");
+    // Galley's folder holds only Galley's links.
+    for entry in std::fs::read_dir(&out).unwrap().flatten() {
+        if entry.file_type().unwrap().is_symlink() {
+            let link = std::fs::read_link(entry.path()).unwrap();
+            assert!(link.starts_with("current") || link.starts_with("published"), "{link:?}");
+        }
+    }
+
+    // A log swapped for a link at the end of the run is not read either.
+    let swap = format!(
+        "\\documentclass{{article}}\n\\begin{{document}}\nHello.\n\\directlua{{\n         os.remove('/tmp/galley-out/main.log') lfs.link('{target}', '/tmp/galley-out/main.log', true)\n         }}\n\\end{{document}}\n"
+    );
+    std::fs::write(project.path().join("main.tex"), &swap).unwrap();
+    let _ = builder
+        .run(2, project.path(), "main.tex", &request(EngineKind::LuaLatex), &|_| {})
+        .await;
+    let log = std::fs::read_to_string(out.join("last.log")).unwrap_or_default();
+    assert!(!log.contains("GALLEY-CANARY"));
+    assert_eq!(std::fs::read_to_string(&canary).unwrap(), "GALLEY-CANARY");
+}
+
+/// The split into scratch folders must not slow a warm build down. The times are printed so CI
+/// keeps a record; the bound only catches a large regression.
+#[tokio::test]
+async fn warm_builds_stay_fast() {
+    if !enabled() {
+        return;
+    }
+    let data = tempfile::tempdir().unwrap();
+    let builder = setup(data.path());
+    let project = tempfile::tempdir().unwrap();
+    for engine in [EngineKind::Tectonic, EngineKind::PdfLatex] {
+        std::fs::write(
+            project.path().join("main.tex"),
+            "\\documentclass{article}\n\\begin{document}\nHello Galley.\n\\end{document}\n",
+        )
+        .unwrap();
+        let cold = std::time::Instant::now();
+        let first = builder.run(1, project.path(), "main.tex", &request(engine), &|_| {}).await;
+        assert_eq!(first.status, BuildStatus::Ok, "{first:#?}");
+        let cold = cold.elapsed();
+        let mut warm = Vec::new();
+        for i in 0..3 {
+            std::fs::write(
+                project.path().join("main.tex"),
+                format!("\\documentclass{{article}}\n\\begin{{document}}\nHello {i}.\n\\end{{document}}\n"),
+            )
+            .unwrap();
+            let t = std::time::Instant::now();
+            let r = builder.run(2 + i, project.path(), "main.tex", &request(engine), &|_| {}).await;
+            assert_eq!(r.status, BuildStatus::Ok, "{r:#?}");
+            warm.push(t.elapsed());
+        }
+        let best = warm.iter().min().unwrap();
+        println!("{engine:?}: cold {cold:?}, warm {warm:?}");
+        assert!(*best < Duration::from_secs(20), "{engine:?} warm build took {best:?}");
+        // No scratch folder is left behind by finished builds.
+        let scratch = project.path().join(".galley/scratch");
+        let runs = std::fs::read_dir(&scratch)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("run-"))
+            .count();
+        assert_eq!(runs, 0);
+    }
+}
+
+/// Every file below `dir`, with its size, to compare a folder before and after a build.
+fn listing(dir: &Path) -> Vec<(std::path::PathBuf, u64)> {
+    let mut out = Vec::new();
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(d) = todo.pop() {
+        for entry in std::fs::read_dir(&d).unwrap().flatten() {
+            let meta = std::fs::symlink_metadata(entry.path()).unwrap();
+            if meta.is_dir() {
+                todo.push(entry.path());
+            } else {
+                out.push((entry.path().strip_prefix(dir).unwrap().to_path_buf(), meta.len()));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The online package fetch loads files from the project's Tectonic cache, so a document must
+/// not be able to write there. A new project still compiles from the warm cache it is given.
+#[tokio::test]
+async fn a_tectonic_document_cannot_plant_files_in_the_package_cache() {
+    if !enabled() {
+        return;
+    }
+    let data = tempfile::tempdir().unwrap();
+    let builder = setup(data.path());
+    let project = tempfile::tempdir().unwrap();
+    let cache = galley_build::zones::cache_dir(project.path());
+    std::fs::write(
+        project.path().join("main.tex"),
+        "\\documentclass{article}\n\\begin{document}\nHello Galley.\n\\end{document}\n",
+    )
+    .unwrap();
+    assert!(!cache.exists(), "a new project has no cache of its own yet");
+    let first = builder.run(1, project.path(), "main.tex", &request(EngineKind::Tectonic), &|_| {}).await;
+    assert_eq!(first.status, BuildStatus::Ok, "{first:#?}");
+    assert!(first.pdf_fresh);
+    let before = listing(&cache);
+    assert!(!before.is_empty());
+
+    let plant = "\\documentclass{article}\n\\begin{document}\n\\newwrite\\plant\n\\immediate\\openout\\plant=/galley/cache/planted.cls\n\\immediate\\write\\plant{\\relax}\n\\immediate\\closeout\\plant\n\\immediate\\openout\\plant=/galley/cache/formats/planted.fmt\n\\immediate\\write\\plant{\\relax}\n\\immediate\\closeout\\plant\nHello.\n\\end{document}\n";
+    std::fs::write(project.path().join("main.tex"), plant).unwrap();
+    let _ = builder.run(2, project.path(), "main.tex", &request(EngineKind::Tectonic), &|_| {}).await;
+    assert_eq!(listing(&cache), before, "the compile changed the package cache");
+}
+
+/// With no warm cache, the first build fetches what it needs with Galley's own document, which
+/// also builds Tectonic's format files, and the author's compile then runs from a read-only cache.
+/// A package added later is fetched the same way. Needs network: set GALLEY_TEST_NETWORK=1.
+#[tokio::test]
+async fn a_cold_cache_is_filled_by_galleys_fetch_and_then_read_only() {
+    if !enabled() || std::env::var("GALLEY_TEST_NETWORK").as_deref() != Ok("1") {
+        return;
+    }
+    let data = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(data.path().join("tectonic/cache")).unwrap();
+    let builder = builder(data.path());
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(
+        project.path().join("main.tex"),
+        "\\documentclass{article}\n\\begin{document}\nHello Galley.\n\\end{document}\n",
+    )
+    .unwrap();
+    let first = builder.run(1, project.path(), "main.tex", &request(EngineKind::Tectonic), &|_| {}).await;
+    assert_eq!(first.status, BuildStatus::Ok, "{first:#?}");
+    let formats = galley_build::zones::cache_dir(project.path()).join("formats");
+    assert!(std::fs::read_dir(&formats).is_ok_and(|mut d| d.next().is_some()), "the fetch built the formats");
+
+    std::fs::write(
+        project.path().join("main.tex"),
+        "\\documentclass{article}\n\\usepackage{lipsum}\n\\begin{document}\n\\lipsum[1]\n\\end{document}\n",
+    )
+    .unwrap();
+    let added = builder.run(2, project.path(), "main.tex", &request(EngineKind::Tectonic), &|_| {}).await;
+    assert_eq!(added.status, BuildStatus::Ok, "{added:#?}");
+    assert!(added.pdf_fresh);
+
+    // A fetch cut off before it built the formats leaves a cache the author's compile cannot
+    // finish. It counts as cold, so the next build fetches again instead of failing for good.
+    std::fs::remove_dir_all(&formats).unwrap();
+    let recovered = builder.run(3, project.path(), "main.tex", &request(EngineKind::Tectonic), &|_| {}).await;
+    assert_eq!(recovered.status, BuildStatus::Ok, "{recovered:#?}");
+    assert!(std::fs::read_dir(&formats).is_ok_and(|mut d| d.next().is_some()));
 }

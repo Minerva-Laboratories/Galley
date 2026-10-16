@@ -231,8 +231,9 @@ pub async fn latexdiff_pdf(
     app.require(&user, &id, Role::can_view, "viewing the comparison").await?;
     let builds = app.builds(&id).await?;
     let path = builds.out_dir().join(LAST_DIFF_PDF);
-    let bytes = tokio::fs::read(&path)
+    let bytes = tokio::task::spawn_blocking(move || galley_build::buildfs::read(&path))
         .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
         .map_err(|_| AppError::NotFound("No comparison yet. Run Compare PDFs first.".into()))?;
     Ok((
         [

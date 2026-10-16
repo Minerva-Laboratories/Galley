@@ -17,6 +17,8 @@ if [[ -n "${GALLEY_TEST_TECTONIC:-}" || -n "${GALLEY_TEST_TECTONIC_CACHE:-}" ]];
   fi
   if [[ -n "${GALLEY_TEST_TECTONIC_CACHE:-}" ]]; then
     ln -s "$GALLEY_TEST_TECTONIC_CACHE" "$DATA/tectonic/cache"
+    # The fixture cache is Galley's own warm-up, so mark it trusted (see TRUSTED_CACHE in engine.rs).
+    touch "$DATA/tectonic/.cache-trusted-1"
   fi
 fi
 E2E_ARGS=(--data-dir "$DATA")

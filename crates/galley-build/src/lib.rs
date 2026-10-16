@@ -3,7 +3,9 @@
 //! then the artifacts. Every child process is spawned through [`sandbox::Sandbox`], never with a
 //! bare `Command::new`.
 
+pub mod buildfs;
 pub mod engine;
+mod fetch;
 pub mod figures;
 pub mod hints;
 pub mod install;
@@ -15,6 +17,7 @@ pub mod runner;
 pub mod sandbox;
 pub mod svg;
 pub mod synctex;
+pub mod zones;
 
 pub use engine::{EngineAvailability, EngineKind};
 pub use hints::Hints;

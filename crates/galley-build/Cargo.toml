@@ -10,6 +10,8 @@ chrono.workspace = true
 flate2.workspace = true
 futures-util.workspace = true
 galley-index.workspace = true
+# Only for the `O_NOFOLLOW` and `O_NONBLOCK` flags used when opening files a compile wrote.
+libc = "0.2"
 svg2pdf = "0.13"
 regex.workspace = true
 reqwest.workspace = true

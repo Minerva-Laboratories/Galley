@@ -1148,6 +1148,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "galley-index",
+ "libc",
  "regex",
  "reqwest",
  "serde",

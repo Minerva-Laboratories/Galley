@@ -13,7 +13,8 @@ use serde::Serialize;
 use crate::Result;
 use crate::hints::ProjectView;
 use crate::log::{Diagnostic, Level};
-use crate::runner::{Builder, needs_fetch, parse_pages};
+use crate::runner::{Builder, parse_pages};
+use galley_index::paths::{clean_name, inside};
 
 pub const STAGE: &str = ".galley/pack/stage";
 pub const ARCHIVE: &str = ".galley/pack/package.tar.gz";
@@ -59,7 +60,9 @@ const DVI_GRAPHIC_EXTS: &[&str] = &["eps", "ps", "pdf", "png", "jpg", "jpeg"];
 pub fn flatten(project_dir: &Path, main_file: &str) -> (String, Vec<String>) {
     let mut inlined = Vec::new();
     let mut seen = BTreeSet::new();
-    let text = std::fs::read_to_string(project_dir.join(main_file)).unwrap_or_default();
+    let text = inside(project_dir, main_file)
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .unwrap_or_default();
     seen.insert(main_file.to_string());
     let out = inline(project_dir, &text, &mut inlined, &mut seen, 0);
     (out, inlined)
@@ -82,18 +85,23 @@ fn inline(
             out.push_str(line);
             continue;
         };
-        let raw = m[1].trim().trim_start_matches("./");
-        let rel = if raw.ends_with(".tex") {
+        let raw = m[1].trim();
+        let named = if raw.ends_with(".tex") {
             raw.to_string()
         } else {
             format!("{raw}.tex")
+        };
+        // A name that leaves the project is left as it is, so the venue's compile fails on it too.
+        let Some(rel) = clean_name(&named) else {
+            out.push_str(line);
+            continue;
         };
         if !seen.insert(rel.clone()) {
             out.push_str(line);
             continue;
         }
-        match std::fs::read_to_string(root.join(&rel)) {
-            Ok(sub) => {
+        match inside(root, &rel).map(std::fs::read_to_string) {
+            Some(Ok(sub)) => {
                 inlined.push(rel.clone());
                 let before = &line[..m.get(0).unwrap().start()];
                 let after = &line[m.get(0).unwrap().end()..];
@@ -111,7 +119,7 @@ fn inline(
                     out.push_str(after.trim_start_matches(' '));
                 }
             }
-            Err(_) => out.push_str(line),
+            _ => out.push_str(line),
         }
     }
     out
@@ -180,8 +188,9 @@ fn referenced_graphics_with_extensions(
                 extensions.iter().map(|e| format!("{base}.{e}")).collect()
             };
             for c in candidates {
-                if project_dir.join(&c).is_file() {
-                    hit = Some(c);
+                let Some(rel) = clean_name(&c) else { continue };
+                if inside(project_dir, &rel).is_some_and(|p| p.is_file()) {
+                    hit = Some(rel);
                     break 'outer;
                 }
             }
@@ -271,6 +280,13 @@ impl Builder {
         engine_kind: crate::EngineKind,
         progress: &(dyn Fn(String) + Send + Sync),
     ) -> Result<PackReport> {
+        // The staging folder is one per project, so one package is made at a time.
+        let _packing = self.start_packing(project_dir)?;
+        // The clean compile is a build's worth of work, so it waits its turn like one.
+        let _slot = match self.slots.try_acquire() {
+            Ok(permit) => Some(permit),
+            Err(_) => self.wait_for_slot(progress).await,
+        };
         let stage = project_dir.join(STAGE);
         let _ = std::fs::remove_dir_all(&stage);
         std::fs::create_dir_all(&stage)?;
@@ -312,11 +328,13 @@ impl Builder {
             },
         );
         for f in &figs {
-            let dest = stage.join(f);
+            let (Some(src), Some(dest)) = (inside(project_dir, f), inside(&stage, f)) else {
+                continue;
+            };
             if let Some(p) = dest.parent() {
                 std::fs::create_dir_all(p)?;
             }
-            std::fs::copy(project_dir.join(f), &dest)?;
+            std::fs::copy(src, &dest)?;
             included.push(PackItem {
                 path: f.clone(),
                 why: "referenced".into(),
@@ -335,11 +353,18 @@ impl Builder {
         }
         let mut svgs_seen = BTreeSet::new();
         for m in INCLUDESVG.captures_iter(&text) {
-            let raw = m[1].trim().trim_start_matches("./");
-            let rel = if raw.to_ascii_lowercase().ends_with(".svg") {
+            let raw = m[1].trim();
+            let named = if raw.to_ascii_lowercase().ends_with(".svg") {
                 raw.to_string()
             } else {
                 format!("{raw}.svg")
+            };
+            let Some(rel) = clean_name(&named) else {
+                left_out.push(PackItem {
+                    path: named,
+                    why: "an \\includesvg figure outside the project".into(),
+                });
+                continue;
             };
             if !svgs_seen.insert(rel.clone()) {
                 continue;
@@ -350,20 +375,24 @@ impl Builder {
                 .unwrap_or("")
                 .to_string();
             let converted = project_dir.join(crate::svg::ROOT).join("svg-inkscape");
-            if !project_dir.join(&rel).is_file()
-                || !converted.join(format!("{stem}_svg-tex.pdf")).is_file()
-            {
+            let (Some(src), Some(dest)) = (inside(project_dir, &rel), inside(&stage, &rel)) else {
+                left_out.push(PackItem {
+                    path: rel,
+                    why: "an \\includesvg figure outside the project".into(),
+                });
+                continue;
+            };
+            if !src.is_file() || !converted.join(format!("{stem}_svg-tex.pdf")).is_file() {
                 left_out.push(PackItem {
                     path: rel,
                     why: "an \\includesvg figure that is missing or could not be converted".into(),
                 });
                 continue;
             }
-            let dest = stage.join(&rel);
             if let Some(p) = dest.parent() {
                 std::fs::create_dir_all(p)?;
             }
-            std::fs::copy(project_dir.join(&rel), &dest)?;
+            std::fs::copy(&src, &dest)?;
             std::fs::create_dir_all(stage.join("svg-inkscape"))?;
             for suffix in ["_svg-tex.pdf", "_svg-tex.pdf_tex", "_svg-raw.pdf"] {
                 let name = format!("{stem}{suffix}");
@@ -379,8 +408,17 @@ impl Builder {
         }
 
         let (cited, keep_all) = cited_keys(&text);
-        for b in bib_files(&text) {
-            let Ok(src) = std::fs::read_to_string(project_dir.join(&b)) else {
+        for named in bib_files(&text) {
+            let resolved = clean_name(&named)
+                .and_then(|b| Some((inside(project_dir, &b)?, inside(&stage, &b)?, b)));
+            let Some((src, dest, b)) = resolved else {
+                left_out.push(PackItem {
+                    path: named,
+                    why: "named in \\bibliography but outside the project".into(),
+                });
+                continue;
+            };
+            let Ok(src) = std::fs::read_to_string(src) else {
                 left_out.push(PackItem {
                     path: b,
                     why: "named in \\bibliography but not found".into(),
@@ -388,7 +426,7 @@ impl Builder {
                 continue;
             };
             let (filtered, kept, total) = filter_bib(&src, &cited, keep_all);
-            std::fs::write(stage.join(&b), filtered)?;
+            std::fs::write(dest, filtered)?;
             let dropped = total - kept;
             included.push(PackItem {
                 path: b,
@@ -433,27 +471,12 @@ impl Builder {
             path: "galley-build.json".into(),
             why: "compiler used for the clean package build".into(),
         });
-        let cold = engine.cold(&stage);
-        let spec = engine.compile(
-            &self.sandbox,
-            &stage,
-            &main_name,
-            false,
-            cold,
-            self.timeout.as_secs(),
-        )?;
-        let mut run = self.run_spec(spec).await?;
-        if engine_kind == crate::EngineKind::Tectonic && needs_fetch(&run.raw, &stage) {
-            let spec = engine.compile(
-                &self.sandbox,
-                &stage,
-                &main_name,
-                false,
-                true,
-                self.timeout.as_secs(),
-            )?;
-            run = self.run_spec(spec).await?;
-        }
+        let make = || {
+            engine.compile(&self.sandbox, &stage, &main_name, false, self.timeout.as_secs())
+        };
+        let (run, _) = self
+            .compile_fetching(&engine, &stage, &text, &make, None, None, progress)
+            .await?;
         let view = ProjectView {
             main_file: &main_name,
             main_text: &text,
@@ -464,16 +487,17 @@ impl Builder {
             .map(|d| self.hints.annotate(d, &view))
             .collect();
         let stage_out = run.output_dir.clone();
-        let pdf_ok =
-            run.exit_ok && !run.timed_out && stage_out.join(format!("{}.pdf", run.stem)).is_file();
+        let pdf_ok = run.exit_ok
+            && !run.timed_out
+            && crate::buildfs::is_file(&stage_out.join(format!("{}.pdf", run.stem)));
         let build_ok = pdf_ok && !errors.iter().any(|d| d.level == Level::Error);
         let pages = parse_pages(&run.log);
 
         // The bibliography as the venue sees it. Put the .bbl of the clean build next to the sources.
         let stem = main_name.trim_end_matches(".tex").to_string();
         let bbl = stage_out.join(format!("{stem}.bbl"));
-        if bbl.is_file() {
-            std::fs::copy(&bbl, stage.join(format!("{stem}.bbl")))?;
+        if crate::buildfs::is_file(&bbl) {
+            crate::buildfs::copy(&bbl, &stage.join(format!("{stem}.bbl")))?;
             included.push(PackItem {
                 path: format!("{stem}.bbl"),
                 why: format!(
@@ -583,5 +607,41 @@ mod tests {
             bib_files("\\bibliography{refs,extra.bib}"),
             vec!["refs.bib", "extra.bib"]
         );
+    }
+
+    #[test]
+    fn never_reaches_outside_the_project() {
+        let parent = tempfile::tempdir().unwrap();
+        let other = parent.path().join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(other.join("main.tex"), "STOLEN").unwrap();
+        std::fs::write(other.join("fig.pdf"), b"x").unwrap();
+        let mine = parent.path().join("mine");
+        std::fs::create_dir_all(&mine).unwrap();
+        std::fs::write(
+            mine.join("main.tex"),
+            "A\n\\input{../other/main}\n\\include{/etc/hosts}\nZ\n",
+        )
+        .unwrap();
+        let (text, inlined) = flatten(&mine, "main.tex");
+        assert!(!text.contains("STOLEN"), "{text}");
+        assert!(inlined.is_empty());
+
+        let (found, missing) = referenced_graphics(
+            &mine,
+            "\\graphicspath{{../other/}}\\includegraphics{fig}\\includegraphics{../other/fig.pdf}",
+        );
+        assert!(found.is_empty(), "{found:?}");
+        assert_eq!(missing.len(), 2);
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&other, mine.join("link")).unwrap();
+            std::fs::write(mine.join("main.tex"), "\\input{link/main}\n").unwrap();
+            let (text, _) = flatten(&mine, "main.tex");
+            assert!(!text.contains("STOLEN"), "{text}");
+            let (found, _) = referenced_graphics(&mine, "\\includegraphics{link/fig}");
+            assert!(found.is_empty(), "{found:?}");
+        }
     }
 }

@@ -84,10 +84,20 @@ pub async fn pdf(
 ) -> Result<Response, AppError> {
     app.require(&user, &id, Role::can_view, "viewing the PDF").await?;
     let builds = app.builds(&id).await?;
-    let path = builds.out_dir().join(LAST_GOOD_PDF);
-    let meta = tokio::fs::metadata(&path)
-        .await
-        .map_err(|_| AppError::NotFound("No PDF yet. Build the project first.".into()))?;
+    // A compile can leave links in the build folder, so only Galley's own published file is served.
+    let no_pdf = || AppError::NotFound("No PDF yet. Build the project first.".into());
+    let path = galley_build::buildfs::resolve(&builds.out_dir(), LAST_GOOD_PDF).ok_or_else(no_pdf)?;
+    let (meta, bytes) = tokio::task::spawn_blocking(move || -> std::io::Result<_> {
+        use std::io::Read;
+        let mut file = galley_build::buildfs::open(&path)?;
+        let meta = file.metadata()?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        Ok((meta, bytes))
+    })
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))?
+    .map_err(|_| no_pdf())?;
     let modified = meta
         .modified()
         .ok()
@@ -102,7 +112,6 @@ pub async fn pdf(
     if headers.get(header::IF_NONE_MATCH).and_then(|v| v.to_str().ok()) == Some(etag.as_str()) {
         return Ok(StatusCode::NOT_MODIFIED.into_response());
     }
-    let bytes = tokio::fs::read(&path).await?;
     Ok((
         [
             (header::CONTENT_TYPE, HeaderValue::from_static("application/pdf")),
@@ -125,8 +134,10 @@ pub async fn log(
 ) -> Result<Response, AppError> {
     app.require(&user, &id, Role::can_view, "reading the build log").await?;
     let builds = app.builds(&id).await?;
-    let text = tokio::fs::read_to_string(builds.out_dir().join(LAST_LOG))
+    let path = builds.out_dir().join(LAST_LOG);
+    let text = tokio::task::spawn_blocking(move || galley_build::buildfs::read_to_string(&path))
         .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
         .map_err(|_| AppError::NotFound("No build log yet. Build the project first.".into()))?;
     Ok(([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], text).into_response())
 }

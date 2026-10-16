@@ -1,5 +1,6 @@
 //! One way to run a child process, with three backends. The project directory is mounted read-only
-//! at `/work`. Only `.galley/build` is writable. The git internals and the Galley state are masked.
+//! at `/work`, with `.git` and `.galley` hidden. A compile writes only into the scratch folders
+//! mounted for it (see [`crate::zones`]).
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -48,7 +49,7 @@ pub struct Mount {
 #[derive(Debug, Clone)]
 pub struct Spec {
     pub project_dir: PathBuf,
-    pub out_dir: PathBuf,
+    /// Mounted in order, after `masked`, so a mount can show one folder inside a masked one.
     pub mounts: Vec<Mount>,
     /// Guest paths hidden behind an empty tmpfs even though they sit under a mounted directory.
     pub masked: Vec<PathBuf>,
@@ -91,6 +92,65 @@ impl Mounts {
 }
 
 pub const GUEST_WORK: &str = "/work";
+
+impl Spec {
+    /// The whole environment of a compile. The server's own environment holds its secrets (the
+    /// worker token, backup keys, the OpenID Connect client secret), and a document can read
+    /// environment variables, so nothing is inherited: only what the engine set, plus a search path
+    /// and a locale when the engine did not set them.
+    fn environment(&self, isolated: bool) -> Vec<(String, String)> {
+        let mut env = self.env.clone();
+        let has = |env: &[(String, String)], key: &str| env.iter().any(|(k, _)| k == key);
+        if !has(&env, "PATH") {
+            let path = std::env::var("PATH")
+                .unwrap_or_else(|_| "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into());
+            env.push(("PATH".into(), path));
+        }
+        if isolated {
+            if !has(&env, "LANG") {
+                env.push(("LANG".into(), "C.UTF-8".into()));
+            }
+        } else {
+            // Without a sandbox the compile runs on this machine, whose locale names may differ.
+            for key in ["LANG", "LC_ALL", "LC_CTYPE", "TMPDIR"] {
+                if let (false, Ok(value)) = (has(&env, key), std::env::var(key)) {
+                    env.push((key.into(), value));
+                }
+            }
+        }
+        env
+    }
+
+    /// Refuse to start when a mount could reach outside what Galley meant to share. A writable
+    /// mount must be one of Galley's scratch folders. Bind mounts follow links, so no source
+    /// inside a project (anything below the folder holding `.galley`, or below the project
+    /// mounted at /work) may be or pass through a link. System sources such as the TeX tree or
+    /// the Tectonic binary are the server's own and may be links.
+    pub fn check_mounts(&self) -> std::io::Result<()> {
+        let refuse = |why: String| Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, why));
+        for m in &self.mounts {
+            if m.writable && !crate::zones::is_scratch(&m.host) {
+                return refuse(format!("{} is not a scratch folder", m.host.display()));
+            }
+            let project = m
+                .host
+                .ancestors()
+                .find(|a| a.file_name().is_some_and(|n| n == ".galley"))
+                .and_then(Path::parent)
+                .or_else(|| m.host.starts_with(&self.project_dir).then_some(self.project_dir.as_path()));
+            let Some(project) = project else { continue };
+            let Ok(rest) = m.host.strip_prefix(project) else { continue };
+            let mut at = project.to_path_buf();
+            for part in rest.components() {
+                at.push(part);
+                if std::fs::symlink_metadata(&at)?.file_type().is_symlink() {
+                    return refuse(format!("{} is a link", at.display()));
+                }
+            }
+        }
+        Ok(())
+    }
+}
 
 impl Sandbox {
     /// Resolve `auto` with a probe, in the order of the spec: bwrap, then docker, then none.
@@ -149,8 +209,8 @@ impl Sandbox {
         let mut cmd = match self.kind {
             SandboxKind::None => {
                 let mut c = Command::new(&spec.program);
-                c.args(&spec.args).current_dir(&spec.project_dir);
-                for (k, v) in &spec.env {
+                c.args(&spec.args).current_dir(&spec.project_dir).env_clear();
+                for (k, v) in spec.environment(false) {
                     c.env(k, v);
                 }
                 c
@@ -227,22 +287,14 @@ impl Sandbox {
         argv.extend(
             ["--ro-bind", &spec.project_dir.to_string_lossy(), GUEST_WORK].map(String::from),
         );
-        argv.extend(
-            [
-                "--bind",
-                &spec.out_dir.to_string_lossy(),
-                &format!("{GUEST_WORK}/.galley/build"),
-            ]
-            .map(String::from),
-        );
+        for p in &spec.masked {
+            argv.extend(["--tmpfs", &p.to_string_lossy()].map(String::from));
+        }
         for m in &spec.mounts {
             let flag = if m.writable { "--bind" } else { "--ro-bind" };
             argv.extend(
                 [flag, &m.host.to_string_lossy(), &m.guest.to_string_lossy()].map(String::from),
             );
-        }
-        for p in &spec.masked {
-            argv.extend(["--tmpfs", &p.to_string_lossy()].map(String::from));
         }
         argv.extend(
             [
@@ -260,8 +312,10 @@ impl Sandbox {
         argv.extend(
             ["--die-with-parent", "--new-session", "--chdir", GUEST_WORK].map(String::from),
         );
-        for (k, v) in &spec.env {
-            argv.extend(["--setenv", k, v].map(String::from));
+        // `--clearenv` drops everything bwrap inherited, so it comes before the settings below.
+        argv.push("--clearenv".into());
+        for (k, v) in spec.environment(true) {
+            argv.extend(["--setenv".into(), k, v]);
         }
         argv.push("--".into());
         argv.push(spec.program.to_string_lossy().into_owned());
@@ -303,19 +357,15 @@ impl Sandbox {
             "-v",
             &format!("{}:{GUEST_WORK}:ro", spec.project_dir.display()),
         ]);
-        c.args([
-            "-v",
-            &format!("{}:{GUEST_WORK}/.galley/build", spec.out_dir.display()),
-        ]);
+        for p in &spec.masked {
+            c.args(["--tmpfs", &p.to_string_lossy()]);
+        }
         for m in &spec.mounts {
             let ro = if m.writable { "" } else { ":ro" };
             c.args([
                 "-v",
                 &format!("{}:{}{ro}", m.host.display(), m.guest.display()),
             ]);
-        }
-        for p in &spec.masked {
-            c.args(["--tmpfs", &p.to_string_lossy()]);
         }
         for (k, v) in &spec.env {
             c.args(["-e", &format!("{k}={v}")]);
@@ -327,16 +377,23 @@ impl Sandbox {
     }
 
     /// Clean up after a timeout if possible. A docker container keeps running after the client is
-    /// killed.
+    /// killed. `docker rm -f` returns once the container is gone, so it no longer writes anywhere.
     pub async fn kill(&self, spec: &Spec) {
         if self.kind == SandboxKind::Docker {
             let _ = Command::new("docker")
-                .args(["kill", &spec.name])
+                .args(["rm", "-f", &spec.name])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status()
                 .await;
         }
+    }
+
+    /// Something that removes the run's docker container if the run is abandoned: a request that
+    /// went away drops the future that waits for the container, and the container would keep
+    /// running, still writing to its scratch folder.
+    pub fn guard(&self, spec: &Spec) -> ContainerGuard {
+        ContainerGuard((self.kind == SandboxKind::Docker).then(|| spec.name.clone()))
     }
 
     /// A timed-out command may have spawned latexmk, bibliography tools, and converters.
@@ -352,6 +409,30 @@ impl Sandbox {
                 .stderr(Stdio::null())
                 .status()
                 .await;
+        }
+    }
+}
+
+/// See [`Sandbox::guard`].
+pub struct ContainerGuard(Option<String>);
+
+impl ContainerGuard {
+    /// The run ended on its own, so there is nothing left to remove.
+    pub fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for ContainerGuard {
+    fn drop(&mut self) {
+        if let Some(name) = self.0.take() {
+            std::thread::spawn(move || {
+                let _ = std::process::Command::new("docker")
+                    .args(["rm", "-f", &name])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            });
         }
     }
 }
@@ -413,8 +494,12 @@ mod tests {
     fn spec(network: bool) -> Spec {
         Spec {
             project_dir: "/data/p1".into(),
-            out_dir: "/data/p1/.galley/build".into(),
             mounts: vec![
+                Mount {
+                    host: "/data/p1/.galley/scratch/run-1".into(),
+                    guest: "/tmp/galley-out".into(),
+                    writable: true,
+                },
                 Mount {
                     host: "/opt/tectonic".into(),
                     guest: "/galley/bin/tectonic".into(),
@@ -426,7 +511,7 @@ mod tests {
                     writable: network,
                 },
             ],
-            masked: vec!["/work/.git".into()],
+            masked: vec!["/work/.git".into(), "/work/.galley".into()],
             env: vec![("TECTONIC_CACHE_DIR".into(), "/galley/cache".into())],
             network,
             program: "/galley/bin/tectonic".into(),
@@ -447,8 +532,8 @@ mod tests {
         let sb = sandbox(SandboxKind::Docker);
         let m = sb.mounts(Path::new("/data/p1"), &spec(false).mounts);
         assert_eq!(
-            m.guest(Path::new("/data/p1/.galley/build")),
-            PathBuf::from("/work/.galley/build")
+            m.guest(Path::new("/data/p1/.galley/scratch/run-1/main.pdf")),
+            PathBuf::from("/tmp/galley-out/main.pdf")
         );
         assert_eq!(
             m.guest(Path::new("/cache/x")),
@@ -476,7 +561,9 @@ mod tests {
         let joined = a.join(" ");
         assert!(joined.contains("--network none"));
         assert!(joined.contains("-v /data/p1:/work:ro"));
-        assert!(joined.contains("-v /data/p1/.galley/build:/work/.galley/build"));
+        assert!(joined.contains("-v /data/p1/.galley/scratch/run-1:/tmp/galley-out "));
+        assert!(!joined.contains(".galley/build"));
+        assert!(joined.contains("--tmpfs /work/.galley"));
         assert!(joined.contains("-v /cache:/galley/cache:ro"));
         assert!(joined.contains("--tmpfs /work/.git"));
         assert!(joined.contains("--cap-drop ALL"));
@@ -497,13 +584,84 @@ mod tests {
         let a = argv(&sandbox(SandboxKind::Bwrap).command(&spec(false))).join(" ");
         assert!(a.starts_with("bwrap "));
         assert!(a.contains("--ro-bind /data/p1 /work"));
-        assert!(a.contains("--bind /data/p1/.galley/build /work/.galley/build"));
+        assert!(a.contains("--bind /data/p1/.galley/scratch/run-1 /tmp/galley-out"));
+        assert!(!a.contains(".galley/build"));
         assert!(a.contains("--unshare-net"));
         assert!(a.contains("--tmpfs /work/.git"));
         assert!(a.contains("--setenv TECTONIC_CACHE_DIR /galley/cache"));
         assert!(a.ends_with("-- /galley/bin/tectonic -X compile main.tex"));
         let net = argv(&sandbox(SandboxKind::Bwrap).command(&spec(true))).join(" ");
         assert!(!net.contains("--unshare-net"));
+    }
+
+    #[test]
+    fn compiles_inherit_no_environment() {
+        let a = argv(&sandbox(SandboxKind::Bwrap).command(&spec(false)));
+        let clear = a.iter().position(|x| x == "--clearenv").expect("--clearenv");
+        let first_set = a.iter().position(|x| x == "--setenv").expect("--setenv");
+        assert!(clear < first_set, "--clearenv must come before the settings");
+        let joined = a.join(" ");
+        assert!(joined.contains("--setenv LANG C.UTF-8"));
+        assert!(joined.contains("--setenv PATH "));
+        // A secret in the server's environment is never named on the command line either.
+        assert!(!joined.contains("GALLEY_WORKER_TOKEN"));
+
+        let none = sandbox(SandboxKind::None).command(&spec(false));
+        let set: Vec<String> = none
+            .as_std()
+            .get_envs()
+            .filter_map(|(k, v)| v.map(|_| k.to_string_lossy().into_owned()))
+            .collect();
+        assert!(set.contains(&"TECTONIC_CACHE_DIR".to_string()));
+        assert!(set.contains(&"PATH".to_string()));
+        assert!(!set.iter().any(|k| k.starts_with("GALLEY_") || k.starts_with("AWS_")), "{set:?}");
+    }
+
+    #[test]
+    fn masks_come_before_mounts_so_a_mount_can_show_through_one() {
+        let mut s = spec(false);
+        s.mounts.push(Mount {
+            host: "/data/p1/.galley/svg".into(),
+            guest: "/work/.galley/svg".into(),
+            writable: false,
+        });
+        let a = argv(&sandbox(SandboxKind::Bwrap).command(&s)).join(" ");
+        let mask = a.find("--tmpfs /work/.galley").unwrap();
+        let svg = a.find("--ro-bind /data/p1/.galley/svg /work/.galley/svg").unwrap();
+        assert!(mask < svg, "{a}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_scratch_folders_are_writable_and_no_source_is_a_link() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("p1");
+        std::fs::create_dir(&project).unwrap();
+        crate::zones::prepare(&project).unwrap();
+        let leaf = crate::zones::Leaf::run(&project).unwrap();
+        let ok = |host: PathBuf, writable: bool| Spec {
+            project_dir: project.clone(),
+            mounts: vec![Mount { host, guest: "/tmp/galley-out".into(), writable }],
+            ..spec(false)
+        };
+        assert!(ok(leaf.path().to_path_buf(), true).check_mounts().is_ok());
+        // Galley's own folder is never writable by a compile.
+        assert!(ok(crate::zones::build_dir(&project), true).check_mounts().is_err());
+        assert!(ok(crate::zones::inputs_dir(&project), true).check_mounts().is_err());
+        assert!(ok(crate::zones::inputs_dir(&project), false).check_mounts().is_ok());
+        // A source that is a link, or that sits below one, is refused even read-only.
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir_all(elsewhere.join("svg")).unwrap();
+        symlink(&elsewhere, project.join(".galley/svg")).unwrap();
+        assert!(ok(project.join(".galley/svg"), false).check_mounts().is_err());
+        std::fs::remove_file(project.join(".galley/svg")).unwrap();
+        symlink(&elsewhere, project.join("figs")).unwrap();
+        assert!(ok(project.join("figs/svg"), false).check_mounts().is_err());
+        // A system source outside the project may be a link (a linked TeX tree or binary).
+        let tool = dir.path().join("bin-latexdiff");
+        symlink(elsewhere.join("svg"), &tool).unwrap();
+        assert!(ok(tool, false).check_mounts().is_ok());
     }
 
     #[test]

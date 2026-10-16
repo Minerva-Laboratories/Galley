@@ -29,6 +29,8 @@ fn setup(data: &Path, timeout: Duration) -> Builder {
     );
     std::fs::create_dir_all(data.join("tectonic")).unwrap();
     std::os::unix::fs::symlink(cache, data.join("tectonic/cache")).unwrap();
+    // The fixture cache is Galley's own warm-up, so the test marks it trusted.
+    std::fs::write(data.join("tectonic").join(galley_build::engine::TRUSTED_CACHE), "").unwrap();
     let kind = if std::env::var("GALLEY_TEST_SANDBOX").as_deref() == Ok("bwrap") {
         SandboxKind::Bwrap
     } else {
@@ -143,34 +145,19 @@ async fn all_engines_and_auxiliary_workflows() {
     std::fs::write(project.path().join("refs.bib"), "@article{knuth1984,author={Knuth, Donald},title={Literate Programming},journal={Computer Journal},year={1984}}\n").unwrap();
     let bibtex = "\\documentclass{article}\n\\begin{document}A citation~\\cite{knuth1984}.\\bibliographystyle{plain}\\bibliography{refs}\\end{document}\n";
     good(&builder, project.path(), 20, EngineKind::PdfLatex, bibtex).await;
-    let bbl = project
-        .path()
-        .join(".galley/build/engines/pdflatex/main.bbl");
-    assert!(std::fs::read_to_string(bbl).unwrap().contains("knuth1984"));
+    // The run's own folder is gone once the PDF is published, so the bibliography is checked in
+    // the PDF: it is typeset only if bibtex ran. The plain style lowercases the title.
+    assert!(pdf_text(project.path()).to_lowercase().contains("literate programming"));
 
     let biber = "\\documentclass{article}\n\\usepackage[backend=biber]{biblatex}\n\\addbibresource{refs.bib}\n\\begin{document}A citation~\\cite{knuth1984}.\\printbibliography\\end{document}\n";
     good(&builder, project.path(), 21, EngineKind::XeLatex, biber).await;
-    let bbl = project
-        .path()
-        .join(".galley/build/engines/xelatex/main.bbl");
-    assert!(std::fs::read_to_string(bbl).unwrap().contains("knuth1984"));
+    assert!(pdf_text(project.path()).to_lowercase().contains("literate programming"));
 
     let eps = "%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 60 60\nnewpath 5 5 moveto 55 55 lineto 2 setlinewidth stroke\nshowpage\n";
     std::fs::write(project.path().join("figure.eps"), eps).unwrap();
     let dvi = "\\documentclass{article}\n\\usepackage{graphicx}\n\\usepackage{pstricks}\n\\begin{document}\\includegraphics{figure.eps}\\begin{pspicture}(0,0)(1,1)\\psline(0,0)(1,1)\\end{pspicture}\\end{document}\n";
+    // The DVI to PostScript to PDF chain ran, or there would be no fresh PDF.
     good(&builder, project.path(), 22, EngineKind::Latex, dvi).await;
-    assert!(
-        project
-            .path()
-            .join(".galley/build/engines/latex/main.dvi")
-            .is_file()
-    );
-    assert!(
-        project
-            .path()
-            .join(".galley/build/engines/latex/main.ps")
-            .is_file()
-    );
 
     let last_good = std::fs::read(project.path().join(".galley/build/last-good.pdf")).unwrap();
     std::fs::write(
@@ -204,4 +191,14 @@ async fn all_engines_and_auxiliary_workflows() {
         .unwrap();
     assert_eq!(restored.engine, "pdflatex");
     assert_eq!(restored.pdf_engine.as_deref(), Some("latex"));
+}
+
+/// The text of the published PDF.
+fn pdf_text(project: &Path) -> String {
+    let out = std::process::Command::new("pdftotext")
+        .arg(project.join(".galley/build/last-good.pdf"))
+        .arg("-")
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).into_owned()
 }

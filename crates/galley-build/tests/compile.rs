@@ -17,6 +17,8 @@ fn builder(data_dir: &std::path::Path, bin: &std::path::Path, cache: &std::path:
     // Point the cache of the data dir at the warm cache, so that no network is needed.
     std::fs::create_dir_all(data_dir.join("tectonic")).unwrap();
     std::os::unix::fs::symlink(cache, data_dir.join("tectonic/cache")).unwrap();
+    // The fixture cache is Galley's own warm-up, so the test marks it trusted.
+    std::fs::write(data_dir.join("tectonic").join(galley_build::engine::TRUSTED_CACHE), "").unwrap();
     let sandbox = Sandbox {
         kind,
         docker_image: "debian:bookworm-slim".into(),

@@ -28,7 +28,7 @@ use crate::db::Db;
 
 /// Directories under a project's `.galley` that a build recreates. Backing them up would cost
 /// storage and upload time for nothing.
-const DERIVED: [&str; 3] = ["build", "pack", "svg"];
+const DERIVED: [&str; 6] = ["build", "pack", "svg", "in", "scratch", "fetch"];
 /// How long a signed request stays valid. Long enough for a slow upload of a large project.
 const SIGNED_FOR: Duration = Duration::from_secs(3600);
 const STATE_FILE: &str = "backup-state.json";

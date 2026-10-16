@@ -85,14 +85,31 @@ impl RemoteWorker {
             let body = response.text().await.unwrap_or_default();
             return Err(format!("The build worker refused the build (HTTP {status}): {}", body.trim()));
         }
-        let bytes = response.bytes().await.map_err(|_| "The build worker's reply was cut off".to_string())?;
+        // The reply carries a PDF. One far larger than any paper is refused before it fills memory.
+        let mut response = response;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|_| "The build worker's reply was cut off".to_string())? {
+            if (bytes.len() + chunk.len()) as u64 > MAX_REPLY {
+                return Err("The build worker's reply was too large".into());
+            }
+            bytes.extend_from_slice(&chunk);
+        }
         unpack_outcome(&bytes).map_err(|e| format!("The build worker's reply was unreadable: {e}"))
     }
 }
 
+/// The most a worker's reply may hold. It is kept in memory, so it stays well below the memory of
+/// a small server while leaving room for any real paper's PDF, SyncTeX and log.
+const MAX_REPLY: u64 = 512 << 20;
+
 /// Skip what a build makes or what history holds. The worker builds from the files alone.
 fn skip_source(rel: &Path) -> bool {
-    let first = rel.components().next().map(|c| c.as_os_str().to_string_lossy().into_owned()).unwrap_or_default();
+    // The first real part: `./.galley/x` is `.galley/x`.
+    let first = rel
+        .components()
+        .find(|c| matches!(c, std::path::Component::Normal(_)))
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .unwrap_or_default();
     first == ".git" || first == ".galley" || rel.to_string_lossy().ends_with(".galley-tmp")
 }
 
@@ -151,6 +168,10 @@ pub fn unpack_sources(bytes: &[u8], dest: &Path) -> std::io::Result<()> {
         if skip_source(&rel) {
             continue;
         }
+        // Sources are plain files and folders. A link in a crafted archive is not unpacked.
+        if !matches!(entry.header().entry_type(), tar::EntryType::Regular | tar::EntryType::Directory) {
+            continue;
+        }
         // `unpack_in` refuses paths that would land outside `dest`.
         entry.unpack_in(dest)?;
     }
@@ -168,12 +189,19 @@ pub fn pack_outcome(result: &BuildResult, out_dir: &Path) -> std::io::Result<Vec
         tar.append_data(&mut header, name, bytes)
     };
     add(RESULT, &serde_json::to_vec(result).map_err(std::io::Error::other)?)?;
-    if let Ok(log) = std::fs::read(out_dir.join(crate::runner::LAST_LOG)) {
+    // The worker keeps copies of many projects, so a link a compile left must not send another
+    // project's file back.
+    if let Ok(log) = crate::buildfs::read(&out_dir.join(crate::runner::LAST_LOG)) {
         add(LOG, &log)?;
     }
     if result.pdf_fresh {
-        add(PDF, &std::fs::read(out_dir.join(crate::runner::LAST_GOOD_PDF))?)?;
-        if let Ok(st) = std::fs::read(out_dir.join(crate::runner::LAST_GOOD_SYNCTEX)) {
+        let published = |alias| {
+            crate::buildfs::resolve(out_dir, alias)
+                .ok_or_else(|| std::io::Error::other("the published PDF is not where Galley put it"))
+                .and_then(|p| crate::buildfs::read(&p))
+        };
+        add(PDF, &published(crate::runner::LAST_GOOD_PDF)?)?;
+        if let Ok(st) = published(crate::runner::LAST_GOOD_SYNCTEX) {
             add(SYNCTEX, &st)?;
         }
     }

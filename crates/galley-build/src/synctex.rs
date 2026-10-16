@@ -46,6 +46,9 @@ pub struct SourceLocation {
     pub line: u32,
 }
 
+/// The most SyncTeX text Galley unzips.
+const MAX_UNZIPPED: u64 = 1 << 30;
+
 pub struct SyncTex {
     inputs: HashMap<u32, String>,
     records: Vec<Record>,
@@ -54,10 +57,16 @@ pub struct SyncTex {
 
 impl SyncTex {
     pub fn load(path: &Path, project_dir: &Path) -> Result<SyncTex> {
-        let bytes = std::fs::read(path)?;
+        let bytes = crate::buildfs::read(path)?;
         let text = if path.extension().is_some_and(|e| e == "gz") {
+            // A small file can unzip to a huge one, so the unzipped text is capped too.
             let mut s = String::new();
-            flate2::read::GzDecoder::new(&bytes[..]).read_to_string(&mut s)?;
+            let read = flate2::read::GzDecoder::new(&bytes[..])
+                .take(MAX_UNZIPPED + 1)
+                .read_to_string(&mut s)?;
+            if read as u64 > MAX_UNZIPPED {
+                return Err(crate::Error::SyncTex("the SyncTeX data is too large".into()));
+            }
             s
         } else {
             String::from_utf8_lossy(&bytes).into_owned()

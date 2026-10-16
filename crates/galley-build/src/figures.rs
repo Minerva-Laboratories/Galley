@@ -1,7 +1,9 @@
 //! Persistent figure cache (SPEC §13.1). The `external` library of TikZ runs in `list and make`
 //! mode, without shell escape, through a wrapper that loads it when tikz loads. Galley compiles
-//! each picture on its own into `.galley/build/galley-fig-figure<N>.pdf`. The main pass includes
-//! those PDFs.
+//! each picture on its own into `galley-fig-figure<N>.pdf` in the figure cache folder (see
+//! [`crate::zones::fig_dir`]). The main pass includes those PDFs. The compiles write that folder,
+//! so everything read from it goes through [`crate::buildfs`]; the cache state is kept in
+//! `.galley/build`, which no compile can write.
 //!
 //! TikZ includes a figure PDF whenever it exists, even if the picture changed. Galley must
 //! therefore find the stale figures itself. It compares the `.md5` of each figure, which TikZ
@@ -40,12 +42,12 @@ pub struct FigCache {
 
 impl FigCache {
     pub fn load(out_dir: &Path) -> FigCache {
-        std::fs::read(out_dir.join(STATE)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+        crate::buildfs::read(&out_dir.join(STATE)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
     }
 
     pub fn save(&self, out_dir: &Path) {
         if let Ok(json) = serde_json::to_vec_pretty(self) {
-            let _ = std::fs::write(out_dir.join(STATE), json);
+            let _ = crate::buildfs::write(&out_dir.join(STATE), json);
         }
     }
 }
@@ -191,31 +193,41 @@ impl Fnv {
     }
 }
 
-/// The figures the last wrapper pass listed, in document order.
-pub fn figure_list(out_dir: &Path) -> Vec<String> {
-    std::fs::read_to_string(out_dir.join(format!("{WRAPPER_STEM}.figlist")))
+fn read_small(path: &Path) -> Option<String> {
+    crate::buildfs::read_capped(path, crate::buildfs::MAX_SMALL)
+        .ok()
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+}
+
+/// The figures the last wrapper pass listed in the figure folder `fig`, in document order.
+pub fn figure_list(fig: &Path) -> Vec<String> {
+    read_small(&fig.join(format!("{WRAPPER_STEM}.figlist")))
         .unwrap_or_default()
         .lines()
         .map(str::trim)
-        .filter(|l| l.starts_with(FIGURE_PREFIX))
+        // The list is written by the compile, so a name becomes a file name only if it is plain.
+        .filter(|l| {
+            l.strip_prefix(FIGURE_PREFIX)
+                .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+        })
         .map(str::to_string)
         .collect()
 }
 
 /// The md5 TikZ computed for each figure on the last pass.
-pub fn current_md5(out_dir: &Path, name: &str) -> Option<String> {
-    let text = std::fs::read_to_string(out_dir.join(format!("{name}.md5"))).ok()?;
+pub fn current_md5(fig: &Path, name: &str) -> Option<String> {
+    let text = read_small(&fig.join(format!("{name}.md5")))?;
     MD5.captures(&text).map(|c| c[1].to_ascii_uppercase())
 }
 
 /// Figures whose PDF is missing, or was built from different picture code.
-pub fn stale(out_dir: &Path, cache: &FigCache, names: &[String]) -> Vec<String> {
+pub fn stale(fig: &Path, cache: &FigCache, names: &[String]) -> Vec<String> {
     names
         .iter()
         .filter(|n| {
-            let pdf = out_dir.join(format!("{n}.pdf"));
-            let now = current_md5(out_dir, n);
-            !pdf.is_file() || now.is_none() || cache.figures.get(*n) != now.as_ref()
+            let pdf = fig.join(format!("{n}.pdf"));
+            let now = current_md5(fig, n);
+            !crate::buildfs::is_file(&pdf) || now.is_none() || cache.figures.get(*n) != now.as_ref()
         })
         .cloned()
         .collect()
@@ -236,21 +248,38 @@ pub fn figure_source() -> String {
     format!("\\def\\tikzexternalrealjob{{{WRAPPER_STEM}}}\\input{{{WRAPPER_STEM}}}\n")
 }
 
-/// Remove every cached figure and the state file.
-pub fn clear(out_dir: &Path) -> usize {
-    let mut n = 0;
-    if let Ok(rd) = std::fs::read_dir(out_dir) {
+/// Remove every cached figure from the figure folder `fig`, and the state file from `out_dir`.
+/// Returns how many figure PDFs there were.
+pub fn clear(fig: &Path, out_dir: &Path) -> usize {
+    let n = std::fs::read_dir(fig)
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    name.starts_with(FIGURE_PREFIX) && name.ends_with(".pdf")
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    // The folder is the compiles', so it goes whole; `remove_dir_all` never follows a link.
+    let _ = std::fs::remove_dir_all(fig);
+    let _ = std::fs::remove_file(out_dir.join(STATE));
+    n
+}
+
+/// Remove per-figure inputs a stopped server left in the inputs folder. Without its PDF, pdfTeX
+/// would take `galley-fig-figureN.tex` for the picture. Called only from the build queue, so no
+/// figure job of the project is running.
+pub fn clear_inputs(inputs: &Path) {
+    if let Ok(rd) = std::fs::read_dir(inputs) {
         for entry in rd.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with(WRAPPER_STEM) || name == STATE {
-                if name.starts_with(FIGURE_PREFIX) && name.ends_with(".pdf") {
-                    n += 1;
-                }
+            if name.starts_with(FIGURE_PREFIX) && name.ends_with(".tex") {
+                // `remove_file` removes a link itself, never its target.
                 let _ = std::fs::remove_file(entry.path());
             }
         }
     }
-    n
 }
 
 #[cfg(test)]
@@ -259,6 +288,22 @@ mod tests {
 
     fn tex(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs.iter().map(|(p, t)| (p.to_string(), t.to_string())).collect()
+    }
+
+    #[test]
+    fn clear_inputs_removes_only_leftover_figure_inputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let keep = tempfile::tempdir().unwrap();
+        std::fs::write(keep.path().join("x.tex"), "keep").unwrap();
+        std::fs::write(dir.path().join("galley-fig-figure0.tex"), "").unwrap();
+        std::fs::write(dir.path().join("galley-fig.tex"), "").unwrap();
+        std::os::unix::fs::symlink(keep.path().join("x.tex"), dir.path().join("galley-fig-figure1.tex"))
+            .unwrap();
+        clear_inputs(dir.path());
+        assert!(!dir.path().join("galley-fig-figure0.tex").exists());
+        assert!(std::fs::symlink_metadata(dir.path().join("galley-fig-figure1.tex")).is_err());
+        assert!(dir.path().join("galley-fig.tex").exists());
+        assert_eq!(std::fs::read_to_string(keep.path().join("x.tex")).unwrap(), "keep");
     }
 
     #[test]
@@ -297,6 +342,7 @@ mod tests {
     #[test]
     fn stale_compares_md5_with_what_was_built() {
         let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
         let out = dir.path();
         std::fs::write(out.join("galley-fig.figlist"), "galley-fig-figure0\ngalley-fig-figure1\n").unwrap();
         for (n, k) in [("galley-fig-figure0", "AAA1"), ("galley-fig-figure1", "BBB2")] {
@@ -312,7 +358,19 @@ mod tests {
         assert_eq!(stale(out, &cache, &names), vec!["galley-fig-figure1"]);
         std::fs::remove_file(out.join("galley-fig-figure0.pdf")).unwrap();
         assert_eq!(stale(out, &cache, &names).len(), 2);
-        assert_eq!(clear(out), 1);
+        // A link planted where a figure should be does not count as one.
+        #[cfg(unix)]
+        {
+            cache.figures.insert("galley-fig-figure1".into(), "BBB2".into());
+            assert_eq!(stale(out, &cache, &names), vec!["galley-fig-figure0"]);
+            std::fs::remove_file(out.join("galley-fig-figure1.pdf")).unwrap();
+            std::os::unix::fs::symlink("/etc/hosts", out.join("galley-fig-figure1.pdf")).unwrap();
+            assert_eq!(stale(out, &cache, &names).len(), 2);
+        }
+        FigCache::default().save(state.path());
+        assert!(state.path().join(STATE).exists());
+        assert_eq!(clear(out, state.path()), 1);
         assert!(figure_list(out).is_empty());
+        assert!(!state.path().join(STATE).exists());
     }
 }
