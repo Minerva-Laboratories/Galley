@@ -63,6 +63,8 @@ pub enum RegistryError {
 
 pub struct Registry {
     root: PathBuf,
+    deleted_root: PathBuf,
+    ids_root: PathBuf,
     sync_config: SyncConfig,
     default_engine: EngineKind,
     meta_lock: Mutex<()>,
@@ -77,13 +79,62 @@ impl Registry {
     pub fn new_with_engine(data_dir: &Path, sync_config: SyncConfig, default_engine: EngineKind) -> std::io::Result<Registry> {
         let root = data_dir.join("data");
         std::fs::create_dir_all(&root)?;
+        // Keep interrupted cleanup outside the live project tree. Renaming into this directory
+        // makes removal atomic for readers even when wiping a protected file fails halfway.
+        let deleted_root = data_dir.join(".deleted-projects");
+        match std::fs::create_dir(&deleted_root) {
+            Ok(()) => {},
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {},
+            Err(e) => return Err(e),
+        }
+        if !std::fs::symlink_metadata(&deleted_root)?.file_type().is_dir() {
+            return Err(std::io::Error::other("deleted-projects storage must be a directory, not a symlink"));
+        }
+        for entry in std::fs::read_dir(&deleted_root)? {
+            let entry = entry?;
+            let result = if entry.file_type()?.is_dir() {
+                std::fs::remove_dir_all(entry.path())
+            } else {
+                std::fs::remove_file(entry.path())
+            };
+            if let Err(e) = result { tracing::warn!(path = %entry.path().display(), error = %e, "will retry deleted project cleanup on next startup"); }
+        }
+        let ids_root = data_dir.join(".project-ids");
+        match std::fs::create_dir(&ids_root) {
+            Ok(()) => {},
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {},
+            Err(e) => return Err(e),
+        }
+        if !std::fs::symlink_metadata(&ids_root)?.file_type().is_dir() {
+            return Err(std::io::Error::other("project-id storage must be a directory, not a symlink"));
+        }
         Ok(Registry {
             root,
+            deleted_root,
+            ids_root,
             sync_config,
             default_engine,
             meta_lock: Mutex::new(()),
             open: RwLock::new(HashMap::new()),
         })
+    }
+
+    /// Project links are identities: never reuse a retired slug, even during database cleanup
+    /// or after a restart. create_new also makes concurrent imports choose distinct ids.
+    fn reserve_id(&self, base: &str) -> Result<String, RegistryError> {
+        let mut id = base.to_string();
+        let mut n = 2;
+        loop {
+            if !self.root.join(&id).exists() {
+                match std::fs::OpenOptions::new().write(true).create_new(true).open(self.ids_root.join(&id)) {
+                    Ok(_) => return Ok(id),
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {},
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            id = format!("{base}-{n}");
+            n += 1;
+        }
     }
 
     pub fn root(&self) -> &Path {
@@ -125,12 +176,7 @@ impl Registry {
         if base.is_empty() {
             return Err(RegistryError::BadName);
         }
-        let mut id = base.clone();
-        let mut n = 2;
-        while self.root.join(&id).exists() {
-            id = format!("{base}-{n}");
-            n += 1;
-        }
+        let id = self.reserve_id(&base)?;
         let dir = self.root.join(&id);
         std::fs::create_dir_all(dir.join(".galley"))?;
         for (path, text) in template.files {
@@ -191,12 +237,7 @@ impl Registry {
         if base.is_empty() {
             return Err(RegistryError::BadName);
         }
-        let mut id = base.clone();
-        let mut n = 2;
-        while self.root.join(&id).exists() {
-            id = format!("{base}-{n}");
-            n += 1;
-        }
+        let id = self.reserve_id(&base)?;
         let dir = self.root.join(&id);
         std::fs::create_dir_all(dir.join(".galley"))?;
         let count = files.len();
@@ -244,14 +285,42 @@ impl Registry {
         if let Some(p) = self.open.read().await.get(id) {
             return Ok(Arc::clone(p));
         }
-        let dir = self.dir_for(id)?;
         let mut open = self.open.write().await;
         if let Some(p) = open.get(id) {
             return Ok(Arc::clone(p));
         }
+        let dir = self.dir_for(id)?;
         let project = ProjectSync::open(id, &dir, self.sync_config.clone())?;
         open.insert(id.to_string(), Arc::clone(&project));
         Ok(project)
+    }
+
+    /// Remove a project only after its live writer has stopped. Never traverse a project symlink.
+    pub async fn delete(&self, id: &str) -> Result<(), RegistryError> {
+        let mut open = self.open.write().await;
+        let dir = self.dir_for(id)?;
+        if !std::fs::symlink_metadata(&dir)?.file_type().is_dir() {
+            return Err(RegistryError::NotFound(id.to_string()));
+        }
+        // Older projects predate reservations. Retain their identity before the live path moves.
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(self.ids_root.join(id)) {
+            Ok(_) => {},
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {},
+            Err(e) => return Err(e.into()),
+        }
+        if let Some(project) = open.remove(id) { project.shutdown().await?; }
+        let retired = self.deleted_root.join(format!("{id}-{}", crate::auth::new_id()));
+        {
+            let _guard = self.meta_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::fs::rename(dir, &retired)?;
+        }
+        drop(open);
+        // The project is gone from the live namespace. A failed disk cleanup must not leave a
+        // half-deleted project visible; startup retries retired directories.
+        if let Err(e) = std::fs::remove_dir_all(&retired) {
+            tracing::warn!(path = %retired.display(), error = %e, "will retry deleted project cleanup on next startup");
+        }
+        Ok(())
     }
 
     /// Read-modify-write the project's metadata file.
@@ -385,6 +454,59 @@ mod tests {
             .collect();
         assert_eq!(files, vec!["main.tex", "refs.bib"]);
         assert!(reg.open("nope").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn failed_retirement_leaves_project_reopenable_and_startup_retries_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = Registry::new(dir.path(), SyncConfig::default()).unwrap();
+        let meta = reg.create("Protected project").await.unwrap();
+        let original = reg.open(&meta.id).await.unwrap();
+        // A failure to rename must leave the original project intact and able to reopen.
+        std::fs::remove_dir(&reg.deleted_root).unwrap();
+        std::fs::write(&reg.deleted_root, "blocked").unwrap();
+        assert!(reg.delete(&meta.id).await.is_err());
+        assert!(original.is_deleted());
+        let reopened = reg.open(&meta.id).await.unwrap();
+        assert!(!reopened.is_deleted());
+        assert!(reopened.exists("main.tex"));
+        assert!(!reopened.doc("main.tex").await.unwrap().text().await.is_empty());
+        std::fs::remove_file(&reg.deleted_root).unwrap();
+        std::fs::create_dir(&reg.deleted_root).unwrap();
+        reg.delete(&meta.id).await.unwrap();
+        assert!(reg.list().unwrap().is_empty());
+        assert_eq!(std::fs::read_dir(&reg.deleted_root).unwrap().count(), 0);
+        // Reproduce an interrupted cleanup, including a symlink to unrelated data.
+        let retired = reg.deleted_root.join("leftover");
+        std::fs::create_dir(&retired).unwrap();
+        std::fs::write(retired.join("partial.tex"), "leftover").unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("keep.tex"), "keep").unwrap();
+        #[cfg(unix)] {
+            std::os::unix::fs::symlink(outside.path(), retired.join("linked")).unwrap();
+        }
+        let restarted = Registry::new(dir.path(), SyncConfig::default()).unwrap();
+        let replacement = restarted.create("Protected project").await.unwrap();
+        assert_ne!(replacement.id, meta.id, "retired project ids must never be reused");
+        assert_eq!(std::fs::read_dir(&restarted.deleted_root).unwrap().count(), 0);
+        assert!(outside.path().join("keep.tex").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn deletion_rejects_traversal_and_project_symlinks() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let reg = Registry::new(dir.path(), SyncConfig::default()).unwrap();
+        let external = Registry::new(outside.path(), SyncConfig::default()).unwrap();
+        let meta = external.create("External paper").await.unwrap();
+        let target = external.root().join(&meta.id);
+        symlink(&target, reg.root().join("linked")).unwrap();
+        assert!(reg.delete("linked").await.is_err());
+        assert!(reg.delete("../external-paper").await.is_err());
+        assert!(target.join("main.tex").exists());
+        assert_eq!(external.list().unwrap().len(), 1);
     }
 
     #[tokio::test]

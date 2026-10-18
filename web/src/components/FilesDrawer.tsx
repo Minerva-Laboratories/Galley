@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { api, ApiError, type FileEntry } from '../api';
 import { saveSettings } from '../store/settings';
-import { canEdit, currentFile, files, folders, forgetFile, movedFile, openFile, project, showToast } from '../store/store';
+import { canEdit, currentFile, files, folders, forgetFile, movedFile, openFile, openTabs, project, showToast } from '../store/store';
 import { closeDoc } from '../sync/docs';
 import { fileTree } from '../util/fileTree';
 import { FileIcon } from './FileIcon';
@@ -219,6 +219,31 @@ export function FilesDrawer() {
     }
   };
 
+  const removeFolder = async (path: string) => {
+    if (!id) return;
+    const descendants = files.value.filter((f) => f.path.startsWith(`${path}/`));
+    if (!window.confirm(`Delete folder ${path} and all ${descendants.length} file${descendants.length === 1 ? '' : 's'} inside it? Deleted files can be restored from History. Empty folders will need to be created again.`)) return;
+    try {
+      const result = await api.deleteFolder(id, path);
+      if (project.value?.id !== id) return;
+      const removed = new Set([
+        ...result.deleted_files,
+        ...files.value.filter((file) => file.path.startsWith(`${path}/`)).map((file) => file.path),
+        ...openTabs.value.filter((file) => file.startsWith(`${path}/`)),
+      ]);
+      for (const file of removed) {
+        forgetFile(file);
+        closeDoc(file);
+      }
+      folders.value = folders.value.filter((folder) => folder !== path && !folder.startsWith(`${path}/`));
+      setSelectedFolder((folder) => folder === path || folder.startsWith(`${path}/`) ? '' : folder);
+      setCollapsed((old) => new Set([...old].filter((folder) => folder !== path && !folder.startsWith(`${path}/`))));
+      showToast(`Deleted ${path} and its contents.`);
+    } catch (e) {
+      showToast(message(e, 'Could not delete the folder.'));
+    }
+  };
+
   const makeMain = async (f: FileEntry) => {
     if (await saveSettings({ main_file: f.path })) showToast(`${f.path} is now the main file. Builds compile it.`);
   };
@@ -318,26 +343,45 @@ export function FilesDrawer() {
           </div>
         )}
         {rows.map(({ path, name: basename, depth: level, file: f }) => !f ? (
-          <button
-            key={path}
-            class={`row folder-row ${target === path ? 'on' : ''}`}
-            style={{ paddingLeft: 8 + level * 16 }}
-            aria-label={`Folder ${path}`}
-            aria-expanded={!collapsed.has(path)}
-            title={`${path} — select as destination; click to expand or collapse`}
-            onClick={() => {
-              setSelectedFolder(path);
-              setCollapsed((old) => {
-                const next = new Set(old);
-                if (next.has(path)) next.delete(path); else next.add(path);
-                return next;
-              });
-            }}
-          >
-            <span class="folder-chevron"><Icon name="chevron" /></span>
-            <Icon name="folder" />
-            <span class="n">{basename}</span>
-          </button>
+          <div key={path} class={`row filerow folder-row ${target === path ? 'on' : ''}`} style={{ paddingLeft: 8 + level * 16 }}>
+            <button
+              class="fname"
+              aria-label={`Folder ${path}`}
+              aria-expanded={!collapsed.has(path)}
+              title={`${path} — select as destination; click to expand or collapse`}
+              onClick={() => {
+                setSelectedFolder(path);
+                setCollapsed((old) => {
+                  const next = new Set(old);
+                  if (next.has(path)) next.delete(path); else next.add(path);
+                  return next;
+                });
+              }}
+            >
+              <span class="folder-chevron"><Icon name="chevron" /></span>
+              <Icon name="folder" />
+              <span class="n">{basename}</span>
+            </button>
+            {editable && <button
+              class="more"
+              aria-label={`Actions for folder ${path}`}
+              aria-haspopup="menu"
+              aria-expanded={menu === `folder:${path}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                setMenu(menu === `folder:${path}` ? null : `folder:${path}`);
+              }}
+            >⋯</button>}
+            {editable && menu === `folder:${path}` && <div class="filemenu" role="menu" onClick={(e) => e.stopPropagation()}>
+              <button
+                role="menuitem"
+                class="danger"
+                disabled={main?.startsWith(`${path}/`)}
+                title={main?.startsWith(`${path}/`) ? 'Set a main file outside this folder first' : undefined}
+                onClick={() => { setMenu(null); void removeFolder(path); }}
+              >Delete folder and contents…</button>
+            </div>}
+          </div>
         ) : (
           <div key={f.path} style={{ paddingLeft: 8 + level * 16 }} class={`row filerow ${f.path === currentFile.value ? 'on' : ''}`}>
             <button class="fname" onClick={() => open(f)} title={f.kind === 'text' ? `Open ${f.path}` : `${f.path} · ${sizeLabel(f.size)}`}>

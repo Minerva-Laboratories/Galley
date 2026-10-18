@@ -1,9 +1,8 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { api, ApiError, type ImportReport, type ProjectMeta, type Template } from '../api';
-import { ago } from '../util/time';
 import { logout } from '../store/auth';
 import { currentUser, navigate, showToast, theme, toggleTheme } from '../store/store';
-import { EditableName } from './EditableName';
+import { ProjectCard } from './ProjectCard';
 import { AppearanceButton } from './Appearance';
 import { Icon } from './Icon';
 
@@ -19,15 +18,68 @@ export function ProjectsPage() {
   const zipInput = useRef<HTMLInputElement>(null);
   const [importing, setImporting] = useState(false);
   const [imported, setImported] = useState<{ id: string; report: ImportReport } | null>(null);
+  const [previews, setPreviews] = useState(() => {
+    try { return localStorage.getItem('galley.project-previews') !== 'false'; } catch { return true; }
+  });
+  const [deleting, setDeleting] = useState<ProjectMeta | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const deleteDialog = useRef<HTMLDialogElement>(null);
+  const refresh = useRef<() => void>(() => {});
+  const revision = useRef(0);
 
   useEffect(() => {
     document.title = 'Projects — Galley';
-    api
-      .listProjects()
-      .then(setProjects)
-      .catch((e) => setError(e instanceof ApiError ? e.message : 'Could not load projects.'));
+    let stopped = false;
+    let inFlight = false;
+    const load = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      const ticket = ++revision.current;
+      try {
+        const list = await api.listProjects();
+        if (!stopped && ticket === revision.current) { setProjects(list); setError(null); }
+      } catch (e) {
+        if (!stopped && ticket === revision.current) setError(e instanceof ApiError ? e.message : 'Could not load projects.');
+      } finally { inFlight = false; }
+    };
+    refresh.current = () => void load();
+    const onVisible = () => { if (document.visibilityState === 'visible') void load(); };
+    void load();
+    // Membership can change while the recipient is on the dashboard, before they have any project
+    // socket. Refresh in the background and on return so invitations don't need a manual reload.
+    const timer = window.setInterval(onVisible, 10_000);
+    window.addEventListener('focus', onVisible);
+    document.addEventListener('visibilitychange', onVisible);
     api.listTemplates().then(setTemplates).catch(() => setTemplates([]));
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+      window.removeEventListener('focus', onVisible);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
   }, []);
+
+  useEffect(() => {
+    if (deleting) deleteDialog.current?.showModal();
+    else deleteDialog.current?.close();
+  }, [deleting]);
+
+  const deleteSelected = async () => {
+    if (!deleting || deleteBusy) return;
+    const selected = deleting;
+    setDeleteBusy(true);
+    setDeleteError(null);
+    try {
+      await api.deleteProject(selected.id);
+      revision.current++;
+      setProjects((prev) => (prev ?? []).filter((p) => p.id !== selected.id));
+      setDeleting(null);
+      showToast(`Deleted ${selected.name}.`);
+    } catch (e) {
+      setDeleteError(e instanceof ApiError ? e.message : 'Could not delete the project.');
+    } finally { setDeleteBusy(false); }
+  };
 
   useEffect(() => {
     if (creating) input.current?.focus();
@@ -220,6 +272,14 @@ export function ProjectsPage() {
           </div>
         )}
 
+        {(projects !== null || error) && <div class="project-view-controls">
+          <label><input type="checkbox" checked={previews} onChange={(e) => {
+            const next = e.currentTarget.checked;
+            setPreviews(next);
+            try { localStorage.setItem('galley.project-previews', String(next)); } catch { /* Storage is optional. */ }
+          }} /> Show previews</label>
+          <button class="tb" onClick={() => refresh.current()}>Refresh projects</button>
+        </div>}
         {projects === null && !error && <div class="empty">Loading…</div>}
 
         {empty && (
@@ -262,34 +322,10 @@ export function ProjectsPage() {
         {shown.length > 0 && (
           <div class="grid">
             {shown.map((p) => (
-              <div
-                key={p.id}
-                class="pcard"
-                role="link"
-                tabIndex={0}
-                onClick={() => navigate(`/p/${p.id}`)}
-                onKeyDown={(e) => e.key === 'Enter' && e.target === e.currentTarget && navigate(`/p/${p.id}`)}
-              >
-                <div class="t">
-                  <EditableName
-                    value={p.name}
-                    canEdit={p.role === 'admin' || p.role === 'editor'}
-                    onSave={async (name) => {
-                      try {
-                        const meta = await api.updateSettings(p.id, { name });
-                        setProjects((prev) => (prev ?? []).map((x) => (x.id === p.id ? { ...x, name: meta.name } : x)));
-                        return true;
-                      } catch (e) {
-                        setError(e instanceof ApiError ? e.message : 'Could not rename the project.');
-                        return false;
-                      }
-                    }}
-                  />
-                </div>
-                <div class="d">
-                  <span class="dot" /> edited {ago(p.updated_at)}
-                </div>
-              </div>
+              <ProjectCard key={p.id} project={p} previews={previews} onRename={(meta) => {
+                revision.current++;
+                setProjects((prev) => (prev ?? []).map((x) => x.id === p.id ? { ...x, ...meta } : x));
+              }} onDelete={() => { setDeleteError(null); setDeleting(p); }} />
             ))}
           </div>
         )}
@@ -297,6 +333,16 @@ export function ProjectsPage() {
           <div class="empty">No project matches “{query}”.</div>
         )}
       </div>
+      <dialog ref={deleteDialog} class="project-delete-dialog" aria-label="Delete project"
+        onCancel={(e) => { if (deleteBusy) e.preventDefault(); else setDeleting(null); }}>
+        <h2>Delete {deleting?.name}?</h2>
+        <p>This permanently deletes the project, its files, and its history for everyone. Download the source first if you want to keep a copy.</p>
+        {deleteError && <p class="err" role="alert">{deleteError}</p>}
+        <div class="project-dialog-actions">
+          <button class="tb" disabled={deleteBusy} autoFocus onClick={() => setDeleting(null)}>Cancel</button>
+          <button class="tb danger" disabled={deleteBusy} onClick={() => void deleteSelected()}>{deleteBusy ? 'Deleting…' : 'Delete project'}</button>
+        </div>
+      </dialog>
     </div>
   );
 }

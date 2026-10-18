@@ -180,6 +180,17 @@ pub async fn get_project(
     Ok(Json(ProjectView { meta: app.registry.meta(&id)?, role }))
 }
 
+/// DELETE /api/projects/{id}. Only project admins may permanently delete a project.
+pub async fn delete_project(
+    State(app): State<AppState>, Path(id): Path<String>, CurrentUser(user): CurrentUser,
+) -> Result<StatusCode, AppError> {
+    app.require(&user, &id, Role::is_admin, "deleting this project").await?;
+    let name = app.registry.meta(&id)?.name;
+    app.delete_project(&id).await?;
+    app.store.audit(Some(&id), Some(&user), "project.delete", Some(&name));
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub async fn engines(
     State(app): State<AppState>,
     Path(id): Path<String>,

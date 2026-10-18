@@ -22,6 +22,14 @@ fi
 E2E_ARGS=(--data-dir "$DATA")
 if [[ -n "${GALLEY_E2E_CONFIG:-}" ]]; then
   E2E_ARGS+=(--config "$GALLEY_E2E_CONFIG")
+else
+  # Separate real users exercise invitations and presence. This config exists only in the
+  # disposable fixture directory and never changes the deployment's signup policy.
+  cat > "$DATA/e2e.toml" <<'CONFIG'
+[server]
+public_signup = true
+CONFIG
+  E2E_ARGS+=(--config "$DATA/e2e.toml")
 fi
 
 (cd web && npm run build)

@@ -153,3 +153,68 @@ async fn a_deleted_file_comes_back_from_history_with_its_text() {
     p.flush_now().await.unwrap();
     assert_eq!(std::fs::read_to_string(dir.path().join("intro.tex")).unwrap(), "Once upon a time");
 }
+
+#[tokio::test]
+async fn delete_nested_and_empty_folders_persists_and_stale_documents_cannot_recreate_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = ProjectSync::open("t", dir.path(), fast()).unwrap();
+    p.create_folder("drafts/nested/empty").unwrap();
+    p.put_file("drafts/nested/a.tex", b"original", false, "Ana").await.unwrap();
+    p.put_file("drafts/image.png", b"binary", false, "Ana").await.unwrap();
+    p.put_file("keep.tex", b"keep", false, "Ana").await.unwrap();
+    let doc = p.doc("drafts/nested/a.tex").await.unwrap();
+    let before = p.history(1).await.unwrap()[0].sha.clone();
+    let deleted = p.delete_folder("drafts/./nested", "Ana").await.unwrap();
+    assert_eq!(deleted, vec!["drafts/nested/a.tex"]);
+    assert_eq!(doc.text().await, "");
+    doc.reseed("a late offline edit").await;
+    p.flush_now().await.unwrap();
+    assert!(!dir.path().join("drafts/nested").exists());
+    assert_eq!(p.read_bytes("keep.tex").await.unwrap().1, b"keep");
+    assert_eq!(p.list_folders().unwrap(), vec!["drafts"]);
+    // History retains the deleted text even though the live log was emptied.
+    p.restore(&before, galley_history::Author::galley(), "restore deleted folder").await.unwrap();
+    assert_eq!(p.read_bytes("drafts/nested/a.tex").await.unwrap().1, b"original");
+    p.delete_folder("drafts", "Ana").await.unwrap();
+    p.create_folder("empty/child").unwrap();
+    assert!(p.delete_folder("empty", "Ana").await.unwrap().is_empty());
+    p.shutdown().await.unwrap();
+    let reopened = ProjectSync::open("t", dir.path(), fast()).unwrap();
+    assert!(reopened.list_folders().unwrap().is_empty());
+    assert_eq!(reopened.list_files().unwrap().into_iter().map(|f| f.path).collect::<Vec<_>>(), vec!["keep.tex"]);
+}
+
+#[tokio::test]
+async fn shutdown_invalidates_all_stale_project_mutations() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = ProjectSync::open("t", dir.path(), fast()).unwrap();
+    p.put_file("old.tex", b"old", false, "Ana").await.unwrap();
+    let doc = p.doc("old.tex").await.unwrap();
+    p.shutdown().await.unwrap();
+    std::fs::remove_dir_all(dir.path()).unwrap();
+    doc.reseed("stale edit").await;
+    assert!(p.flush_now().await.is_err());
+    assert!(p.create_file("new.tex").await.is_err());
+    assert!(p.put_file("new.tex", b"x", false, "Ana").await.is_err());
+    assert!(p.create_folder("new").is_err());
+    assert!(!dir.path().exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn recursive_folder_delete_never_follows_symlinks_or_traversal() {
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("precious.tex"), "keep").unwrap();
+    let p = ProjectSync::open("t", dir.path(), fast()).unwrap();
+    p.create_folder("safe").unwrap();
+    symlink(outside.path(), dir.path().join("linked")).unwrap();
+    symlink(outside.path(), dir.path().join("safe/linked")).unwrap();
+    for path in ["", ".", "..", "../escape", "/tmp", ".git", ".galley", "safe/.git", "linked", "linked/child"] {
+        assert!(p.delete_folder(path, "Ana").await.is_err(), "accepted {path}");
+    }
+    assert!(p.delete_folder("safe", "Ana").await.unwrap().is_empty());
+    assert_eq!(std::fs::read_to_string(outside.path().join("precious.tex")).unwrap(), "keep");
+    assert!(!dir.path().join("safe").exists());
+}

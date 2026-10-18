@@ -78,3 +78,53 @@ test('folders organize existing files, persist, sync and receive new files and u
   await expect(other.getByRole('button', { name: 'Upload', exact: true })).toHaveCount(0);
   await other.close();
 });
+
+test('folder deletion confirms contents, closes open peer tabs and handles empty folders and main-file guard', async ({ page, context }) => {
+  await authenticate(page);
+  const csrf = (await context.cookies()).find((c) => c.name === 'galley_csrf')!.value;
+  const headers = { 'x-csrf-token': csrf };
+  const created = await page.request.post('/api/projects', { headers, data: { name: `Delete folders ${Date.now()}` } });
+  expect(created.status()).toBe(201);
+  const { id } = await created.json();
+  for (const path of ['drafts/nested/note.tex', 'source/main.tex']) {
+    expect((await page.request.post(`/api/projects/${id}/files`, { headers, data: { path } })).status()).toBe(201);
+  }
+  expect((await page.request.post(`/api/projects/${id}/folders`, { headers, data: { path: 'empty/child' } })).status()).toBe(201);
+  expect((await page.request.patch(`/api/projects/${id}/settings`, { headers, data: { main_file: 'source/main.tex' } })).status()).toBe(200);
+  await page.goto(`/p/${id}`);
+  await dismissTour(page);
+  await page.locator('.fname', { hasText: 'note.tex' }).click();
+  const other = await context.newPage();
+  await other.goto(`/p/${id}`);
+  await expect(other.locator('.cm-content')).toBeVisible();
+  await other.locator('.fname', { hasText: 'note.tex' }).click();
+  await page.getByRole('button', { name: 'Actions for folder source', exact: true }).click();
+  await expect(page.getByRole('menuitem', { name: 'Delete folder and contents…', exact: true })).toBeDisabled();
+  await page.keyboard.press('Escape');
+
+  await page.getByRole('button', { name: 'Actions for folder drafts', exact: true }).click();
+  page.once('dialog', async (dialog) => {
+    expect(dialog.message()).toContain('all 1 file');
+    await dialog.dismiss();
+  });
+  await page.getByRole('menuitem', { name: 'Delete folder and contents…', exact: true }).click();
+  await expect(page.locator('.fname', { hasText: 'note.tex' })).toBeVisible();
+  await page.getByRole('button', { name: 'Actions for folder drafts', exact: true }).click();
+  page.once('dialog', (dialog) => dialog.accept());
+  await page.getByRole('menuitem', { name: 'Delete folder and contents…', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Folder drafts', exact: true })).toHaveCount(0);
+  await expect(other.getByRole('button', { name: 'Folder drafts', exact: true })).toHaveCount(0);
+  await expect(page.locator('.tab', { hasText: 'note.tex' })).toHaveCount(0);
+  await expect(other.locator('.tab', { hasText: 'note.tex' })).toHaveCount(0);
+  await expect(other.locator('.cm-content')).toBeVisible();
+
+  await page.getByRole('button', { name: 'Actions for folder empty', exact: true }).click();
+  page.once('dialog', (dialog) => dialog.accept());
+  await page.getByRole('menuitem', { name: 'Delete folder and contents…', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Folder empty', exact: true })).toHaveCount(0);
+  await page.reload();
+  await expect(page.getByRole('button', { name: 'Folder empty', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Folder drafts', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Folder source', exact: true })).toBeVisible();
+  await other.close();
+});

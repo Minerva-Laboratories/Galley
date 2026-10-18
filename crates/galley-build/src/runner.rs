@@ -1970,6 +1970,8 @@ pub struct ProjectBuilds {
     running: Mutex<bool>,
     /// The worker caches figures between builds. Clients do not see this as a build.
     warming: std::sync::atomic::AtomicBool,
+    closed: std::sync::atomic::AtomicBool,
+    stopped: tokio::sync::Notify,
     next_id: AtomicU64,
     events: broadcast::Sender<BuildEvent>,
     last: RwLock<Option<BuildResult>>,
@@ -2035,6 +2037,8 @@ impl ProjectBuilds {
             publication_gate: Mutex::new(()),
             running: Mutex::new(false),
             warming: std::sync::atomic::AtomicBool::new(false),
+            closed: std::sync::atomic::AtomicBool::new(false),
+            stopped: tokio::sync::Notify::new(),
             next_id: AtomicU64::new(next_id),
             events,
             last: RwLock::new(last),
@@ -2068,10 +2072,33 @@ impl ProjectBuilds {
         SyncTex::load(&self.out_dir().join(LAST_GOOD_SYNCTEX), &self.project_dir)
     }
 
+    /// Invalidate queued requests and wait until an active compiler has stopped writing.
+    pub async fn shutdown(&self) {
+        {
+            let _gate = self.publication_gate.lock().await;
+            self.closed.store(true, Ordering::Release);
+            self.next_id.fetch_add(1, Ordering::Relaxed);
+            if let Some((id, _)) = self.pending.lock().await.take() {
+                let _ = self.events.send(BuildEvent::BuildSuperseded { id });
+            }
+        }
+        loop {
+            let stopped = self.stopped.notified();
+            tokio::pin!(stopped);
+            stopped.as_mut().enable();
+            if !*self.running.lock().await { break; }
+            stopped.await;
+        }
+    }
+
     /// Queue a build. This request replaces a request that has not started.
     pub async fn request(self: &Arc<Self>, req: BuildRequest) -> u64 {
         let _gate = self.publication_gate.lock().await;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        if self.closed.load(Ordering::Acquire) {
+            let _ = self.events.send(BuildEvent::BuildSuperseded { id });
+            return id;
+        }
         let mut pending = self.pending.lock().await;
         if pending.as_ref().is_some_and(|(old_id, _)| *old_id > id) {
             let _ = self.events.send(BuildEvent::BuildSuperseded { id });
@@ -2098,6 +2125,7 @@ impl ProjectBuilds {
             let mut pending = self.pending.lock().await;
             let Some((id, req)) = pending.take() else {
                 *self.running.lock().await = false;
+                self.stopped.notify_waiters();
                 return;
             };
             drop(pending);
@@ -2109,6 +2137,7 @@ impl ProjectBuilds {
             if let Some(before) = &self.before {
                 before().await;
             }
+            if self.closed.load(Ordering::Acquire) { continue; }
             let events = self.events.clone();
             let progress = move |message: String| {
                 let _ = events.send(BuildEvent::BuildProgress { id, message });
@@ -2122,7 +2151,7 @@ impl ProjectBuilds {
                 .filter(|f| is_safe_target(&self.project_dir, f))
                 .map(str::to_string)
                 .unwrap_or(default_main);
-            let latest = || self.next_id.load(Ordering::Relaxed) == id + 1;
+            let latest = || !self.closed.load(Ordering::Acquire) && self.next_id.load(Ordering::Relaxed) == id + 1;
             let mut result = self
                 .builder
                 .run_checked(
@@ -2139,6 +2168,7 @@ impl ProjectBuilds {
                 .await;
             result.stale |= self.pending.lock().await.is_some();
             let warm = std::mem::take(&mut result.pending_figures);
+            if self.closed.load(Ordering::Acquire) { continue; }
             persist_result(&self.out_dir(), &result);
             tracing::info!(project = %self.project_dir.display(), id, status = ?result.status, ms = result.profile.total_ms, "build finished");
             *self.last.write().await = Some(result.clone());
@@ -2150,7 +2180,7 @@ impl ProjectBuilds {
                 let made = self
                     .builder
                     .warm_figures(&self.project_dir, req.engine, warm, || async {
-                        self.pending.lock().await.is_some()
+                        self.closed.load(Ordering::Acquire) || self.pending.lock().await.is_some()
                     })
                     .await;
                 self.warming.store(false, Ordering::Relaxed);
@@ -2183,6 +2213,36 @@ fn own_failures(n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn shutdown_drains_active_work_and_rejects_stale_queue_handles() {
+        let dir = tempfile::tempdir().unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let before: BeforeBuild = {
+            let entered = entered.clone();
+            let release = release.clone();
+            Arc::new(move || {
+                let entered = entered.clone();
+                let release = release.clone();
+                Box::pin(async move { entered.notify_one(); release.notified().await; })
+            })
+        };
+        let queue = ProjectBuilds::new(Arc::new(one_slot_builder()), dir.path(), "main.tex", Some(before));
+        queue.request(BuildRequest::default()).await;
+        entered.notified().await;
+        queue.request(BuildRequest::default()).await;
+        let closing = { let queue = queue.clone(); tokio::spawn(async move { queue.shutdown().await }) };
+        while !queue.closed.load(Ordering::Acquire) { tokio::task::yield_now().await; }
+        assert!(!closing.is_finished(), "deletion must wait for an active writer");
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), closing).await.unwrap().unwrap();
+        queue.request(BuildRequest::default()).await;
+        assert!(!queue.is_running().await);
+        assert!(queue.pending.lock().await.is_none());
+        assert!(queue.last().await.is_none());
+        assert!(!queue.out_dir().exists(), "a closed queue must not create output");
+    }
 
     #[cfg(unix)]
     #[tokio::test]

@@ -849,9 +849,11 @@ a {
   background: var(--bg-panel);
   border: 1px solid var(--line);
   border-radius: 10px;
-  padding: 14px 16px;
+  padding: 0;
   min-height: 96px;
   width: 100%;
+  min-width: 0;
+  overflow: hidden;
 }
 .pcard:hover {
   border-color: var(--line-strong);
@@ -871,6 +873,27 @@ a {
   align-items: center;
   gap: 8px;
 }
+.pcard-link { display: block; color: inherit; text-decoration: none; }
+.pcard-link:focus-visible { outline: 2px solid var(--accent-ink); outline-offset: -3px; border-radius: 9px; }
+.pcard-summary { padding: 14px 16px; }
+.pcard-actions { display: flex; gap: 6px; padding: 0 12px 12px; }
+.pcard-actions .tb { font-size: 12px; color: var(--text-2); }
+.pcard-edit { padding: 0 12px 12px; display: flex; flex-wrap: wrap; gap: 6px; }
+.pcard-edit input { width: 100%; min-width: 0; }
+.project-view-controls { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 14px; }
+.project-view-controls label { display: flex; align-items: center; gap: 8px; color: var(--text-2); font-size: 13px; }
+.project-view-controls input { accent-color: var(--accent-ink); }
+.project-thumbnail { height: 175px; overflow: hidden; background: var(--bg); border-bottom: 1px solid var(--line); display: flex; justify-content: center; }
+.project-thumbnail.ready { background: #e4e4e4; padding: 12px 16px 0; }
+.project-thumbnail canvas { width: 100%; height: auto; align-self: flex-start; box-shadow: 0 1px 6px #0002; }
+.project-thumbnail-placeholder { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; font-size: 12px; color: var(--text-3); }
+.project-thumbnail-placeholder svg { fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.project-delete-dialog { width: min(460px, calc(100vw - 32px)); border: 1px solid var(--line); border-radius: 12px; background: var(--bg-panel); color: var(--text); padding: 24px; }
+.project-delete-dialog::backdrop { background: #0008; }
+.project-delete-dialog h2 { font-size: 18px; margin: 0 0 12px; overflow-wrap: anywhere; }
+.project-delete-dialog p { color: var(--text-2); line-height: 1.5; }
+.project-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+.project-dialog-actions .danger { background: var(--red); color: white; }
 .choices {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
@@ -2284,9 +2307,6 @@ ol.steps .link {
   padding: 2px;
   height: auto;
 }
-.pcard {
-  cursor: pointer;
-}
 
 /* The sidebar handle stays in its grid column, including when the drawer floats on mobile. */
 .drawer-resize {
@@ -2309,7 +2329,7 @@ ol.steps .link {
 .folder-row { padding-right: 12px; }
 .folder-row svg { flex-shrink: 0; }
 .folder-row .folder-chevron { display: flex; transform: rotate(-90deg); }
-.folder-row[aria-expanded='true'] .folder-chevron { transform: none; }
+.folder-row .fname[aria-expanded='true'] .folder-chevron { transform: none; }
 .folder-target { display: flex; align-items: center; gap: 6px; padding: 4px 8px 8px; color: var(--text-2); font-size: 11px; }
 .folder-target span { overflow-wrap: anywhere; }
 

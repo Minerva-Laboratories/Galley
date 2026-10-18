@@ -184,6 +184,25 @@ pub async fn create_folder(
     Ok((StatusCode::CREATED, Json(json!({ "path": path }))))
 }
 
+/// DELETE /api/projects/{id}/folders?path=... recursively removes a visible directory.
+pub async fn delete_folder(
+    State(app): State<AppState>, Path(id): Path<String>, Query(q): Query<PathQuery>,
+    CurrentUser(user): CurrentUser,
+) -> Result<Json<Value>, AppError> {
+    app.require(&user, &id, Role::can_edit, "deleting folders").await?;
+    let path = galley_sync::paths::clean_rel_path(&q.path)
+        .ok_or_else(|| AppError::BadRequest("Choose a relative project folder without .. or reserved names.".into()))?;
+    let meta = app.registry.meta(&id)?;
+    if meta.main_file.starts_with(&format!("{path}/")) {
+        return Err(AppError::BadRequest(format!("{path} contains the main file {}. Set a main file outside this folder before deleting it.", meta.main_file)));
+    }
+    let project = app.registry.open(&id).await?;
+    let deleted_files = project.delete_folder(&path, &user.name).await?;
+    app.registry.touch(&id);
+    app.store.audit(Some(&id), Some(&user), "folder.delete", Some(&path));
+    Ok(Json(json!({ "ok": true, "path": path, "deleted_files": deleted_files })))
+}
+
 /// POST /api/projects/{id}/files/rename. A move of the main file moves the setting with it.
 pub async fn rename(
     State(app): State<AppState>,

@@ -11,7 +11,7 @@ export type DrawerName = 'files' | 'outline' | 'comments' | 'history' | 'tasks' 
 export type Connection = 'connecting' | 'online' | 'offline';
 
 export interface Peer {
-  clientId: number;
+  clientId: number | string;
   name: string;
   color: string;
 }

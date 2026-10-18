@@ -39,6 +39,8 @@ export function ShareModal() {
   const [requests, setRequests] = useState<RoleRequest[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [email, setEmail] = useState('');
+  const [inviting, setInviting] = useState(false);
+  const [inviteNotice, setInviteNotice] = useState<{ message: string; requestId?: string } | null>(null);
   const [inviteRole, setInviteRole] = useState<Role2>('editor');
   const [linkRole, setLinkRole] = useState<Role2>('commenter');
   const [linkExpiry, setLinkExpiry] = useState(30);
@@ -53,6 +55,7 @@ export function ShareModal() {
       setLinks(l);
       setMode(g.mode);
       setRequests(g.requests);
+      setInviteNotice((notice) => notice?.requestId && !g.requests.some((r) => r.id === notice.requestId) ? null : notice);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'Could not load sharing.');
     }
@@ -73,15 +76,22 @@ export function ShareModal() {
 
   const invite = async (e: Event) => {
     e.preventDefault();
-    if (!id) return;
+    if (!id || inviting) return;
+    setInviting(true);
+    setInviteNotice(null);
     try {
       const r = await api.invite(id, email.trim(), inviteRole);
       outcomeToast(r, 'Added.');
+      setInviteNotice(r.status === 'pending'
+        ? { message: 'Invitation pending: the other admins must approve it before this person can open the project.', requestId: r.request_id }
+        : r.status === 'applied' ? { message: 'Access granted. This project is now in their project list.' } : null);
       setEmail('');
       setError(null);
       void refresh();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not invite.');
+    } finally {
+      setInviting(false);
     }
   };
 
@@ -193,23 +203,24 @@ export function ShareModal() {
           ))}
 
           <form class="field" style={{ marginTop: 14 }} onSubmit={invite}>
-            <input placeholder="name@university.edu" type="email" value={email} onInput={(e) => setEmail((e.target as HTMLInputElement).value)} />
-            <select value={inviteRole} onChange={(e) => setInviteRole((e.target as HTMLSelectElement).value as Role2)}>
+            <input placeholder="name@university.edu" aria-label="Invite email" type="email" value={email} disabled={inviting} onInput={(e) => setEmail((e.target as HTMLInputElement).value)} />
+            <select aria-label="Invite role" value={inviteRole} disabled={inviting} onChange={(e) => setInviteRole((e.target as HTMLSelectElement).value as Role2)}>
               {ROLES.map((r) => (
                 <option key={r} value={r}>
                   {r}
                 </option>
               ))}
             </select>
-            <button class="tb" type="submit" disabled={!email.trim()}>
-              Invite
+            <button class="tb" type="submit" disabled={inviting || !email.trim()}>
+              {inviting ? 'Inviting…' : 'Invite'}
             </button>
           </form>
-          <div class="hint" style={{ padding: '0 0 4px' }}>People must sign in once before you can add them by email.</div>
+          {inviteNotice && <div class="hint" role="status" style={{ paddingLeft: 0 }}>{inviteNotice.message}</div>}
+          <div class="hint" style={{ padding: '0 0 4px' }}>People must sign in once before you can add them by email. Access appears in their project list; no email is sent.</div>
 
           <div style={{ marginTop: 16, fontWeight: 500 }}>Who can change roles</div>
           <div class="field">
-            <select value={mode} onChange={(e) => void changeMode((e.target as HTMLSelectElement).value as GovernanceMode)} style={{ flex: 1 }}>
+            <select aria-label="Role change approval" value={mode} onChange={(e) => void changeMode((e.target as HTMLSelectElement).value as GovernanceMode)} style={{ flex: 1 }}>
               <option value="solo">Any admin (solo)</option>
               <option value="majority">Majority of admins</option>
               <option value="unanimous">All admins (unanimous)</option>

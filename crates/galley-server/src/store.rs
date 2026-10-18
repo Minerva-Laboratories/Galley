@@ -209,6 +209,18 @@ impl Store {
         Store { db }
     }
 
+    /// Purge project state while keeping accounts, sessions and the audit trail.
+    pub fn delete_project(&self, project_id: &str) -> Result<(), DbError> {
+        let mut conn = self.db.conn()?;
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM role_request_votes WHERE request_id IN (SELECT id FROM role_requests WHERE project_id = ?1)", [project_id])?;
+        for table in ["members", "share_links", "comments", "suggestions", "project_config", "role_requests", "checkpoints", "agent_runs"] {
+            tx.execute(&format!("DELETE FROM {table} WHERE project_id = ?1"), [project_id])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     // --- users & sessions ------------------------------------------------------------------
 
     pub fn user_count(&self) -> Result<i64, DbError> {
@@ -473,7 +485,20 @@ impl Store {
         let user = self
             .user_by_email(email)?
             .ok_or_else(|| StoreError::NotFound(format!("No account for {email}. They need to sign in once before you can add them.")))?;
-        self.set_member(project_id, &user.id, role)?;
+        // Inviting the same account twice is safe, even if two requests race or a governed
+        // invitation is approved after another one. Role changes use set_member explicitly.
+        let conn = self.db.conn()?;
+        conn.execute(
+            "INSERT INTO members (project_id, user_id, role, created_at) VALUES (?1,?2,?3,?4)
+             ON CONFLICT(project_id, user_id) DO NOTHING",
+            params![project_id, user.id, role.as_str(), Utc::now()],
+        )?;
+        let role = conn.query_row(
+            "SELECT role FROM members WHERE project_id = ?1 AND user_id = ?2",
+            params![project_id, user.id],
+            |r| r.get::<_, String>(0),
+        )?;
+        let role = Role::parse(&role).ok_or_else(|| StoreError::Invalid("Unknown member role.".into()))?;
         Ok(Member {
             user_id: user.id,
             name: user.name,
@@ -1178,6 +1203,17 @@ mod tests {
         assert_eq!(s.owned_projects(&admin.id).unwrap(), vec!["p1"]);
         s.set_member("p1", &admin.id, Role::Editor).unwrap(); // upsert
         assert_eq!(s.role_of("p1", &admin.id).unwrap(), Some(Role::Editor));
+    }
+
+    #[test]
+    fn repeated_invites_preserve_existing_membership() {
+        let s = store();
+        let user = s.create_user("admin@example.com", "Admin", "supersecret", false).unwrap();
+        s.set_member("p", &user.id, Role::Admin).unwrap();
+        let member = s.invite_by_email("p", "  ADMIN@EXAMPLE.COM ", Role::Viewer).unwrap();
+        assert_eq!(member.role, Role::Admin);
+        assert_eq!(s.role_of("p", &user.id).unwrap(), Some(Role::Admin));
+        assert_eq!(s.members("p").unwrap().len(), 1);
     }
 
     #[test]

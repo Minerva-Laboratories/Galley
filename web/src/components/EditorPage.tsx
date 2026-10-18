@@ -5,7 +5,8 @@ import { build as runBuild, handleWindowKey } from '../editor/commands';
 import { loadCollab, upsertComment, upsertSuggestion, markSuggestion } from '../store/collab';
 import { watchTasks } from '../store/tasks';
 import { closeAll, closeDoc, openDoc } from '../sync/docs';
-import { subscribeEvents } from '../sync/events';
+import { connectionStatus, subscribeEvents, type EventConnection } from '../sync/events';
+import { colorFor } from '../sync/colors';
 import {
   applyServerAutoBuild,
   autoBuild,
@@ -18,6 +19,7 @@ import {
   graphOpen,
   historyView,
   latexdiffAvailable,
+  currentUser,
   currentFile,
   currentSession,
   engineAvailability,
@@ -64,6 +66,7 @@ import { TopBar } from './TopBar';
 
 export function EditorPage({ id }: { id: string }) {
   const [error, setError] = useState<string | null>(null);
+  const projectConnection = useRef<EventConnection>('connecting');
 
   // Load the project, its files, history, and last build, then subscribe to events.
   // Tasks follow the project and its file list through signals. One watcher per mounted page.
@@ -123,6 +126,15 @@ export function EditorPage({ id }: { id: string }) {
     const unsubscribe = subscribeEvents(id, (ev) => {
       if (['file_created', 'file_deleted', 'file_renamed', 'files_changed'].includes(ev.type)) refreshFolders();
       switch (ev.type) {
+        case 'presence':
+          peers.value = ev.users.filter((user) => user.id !== currentUser.value?.id).map((user) => ({
+            clientId: user.id, name: user.name, color: colorFor(user.name).color,
+          }));
+          break;
+        case 'project_deleted':
+          showToast('This project was deleted.');
+          navigate('/');
+          break;
         case 'commit': {
           const commit = { sha: ev.sha, short_sha: ev.short_sha, message: ev.message, author: ev.author, time: ev.time };
           commits.value = [commit, ...commits.value.filter((c) => c.sha !== commit.sha)];
@@ -202,6 +214,11 @@ export function EditorPage({ id }: { id: string }) {
           void api.checkpoints(id).then((cps) => (checkpoints.value = cps)).catch(() => {});
           break;
       }
+    }, (status) => {
+      projectConnection.current = status;
+      const provider = currentSession.value?.provider;
+      connection.value = connectionStatus(status, provider ? provider.wsconnected ? 'online' : provider.wsconnecting ? 'connecting' : 'offline' : null);
+      if (status !== 'online') peers.value = [];
     });
     return () => {
       cancelled = true;
@@ -212,39 +229,24 @@ export function EditorPage({ id }: { id: string }) {
     };
   }, [id]);
 
-  // Attach the live document for the active tab and mirror its presence/connection state.
+  // Document awareness remains local to each file for collaborator selections. The project
+  // roster follows the event socket; the edit connection indicator follows the active document.
   const path = currentFile.value;
   useEffect(() => {
     if (!path) {
       currentSession.value = null;
+      connection.value = connectionStatus(projectConnection.current, null);
       return;
     }
     const session = openDoc(id, path, displayName.value || 'Anonymous');
     currentSession.value = session;
-    const { provider } = session;
     const onStatus = ({ status }: { status: string }) => {
-      connection.value = status === 'connected' ? 'online' : status === 'connecting' ? 'connecting' : 'offline';
+      const document = status === 'connected' ? 'online' : status === 'connecting' ? 'connecting' : 'offline';
+      connection.value = connectionStatus(projectConnection.current, document);
     };
-    const onAwareness = () => {
-      const own = provider.awareness.clientID;
-      const seen = new Map<string, { clientId: number; name: string; color: string }>();
-      for (const [clientId, state] of provider.awareness.getStates()) {
-        if (clientId === own) continue;
-        const user = (state as { user?: { name?: string; color?: string } }).user;
-        if (!user?.name) continue;
-        // One person with several tabs still counts once.
-        if (!seen.has(user.name)) seen.set(user.name, { clientId, name: user.name, color: user.color ?? '#5b6470' });
-      }
-      peers.value = [...seen.values()];
-    };
-    provider.on('status', onStatus);
-    provider.awareness.on('change', onAwareness);
-    onStatus({ status: provider.wsconnected ? 'connected' : 'connecting' });
-    onAwareness();
-    return () => {
-      provider.off('status', onStatus);
-      provider.awareness.off('change', onAwareness);
-    };
+    session.provider.on('status', onStatus);
+    onStatus({ status: session.provider.wsconnected ? 'connected' : 'connecting' });
+    return () => session.provider.off('status', onStatus);
   }, [id, path]);
 
   // Auto-build: a pause after the last local edit, if nothing is running (SPEC.md §6.1).

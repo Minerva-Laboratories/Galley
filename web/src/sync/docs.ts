@@ -6,6 +6,7 @@ import { WebsocketProvider } from 'y-websocket';
 import { IndexeddbPersistence } from 'y-indexeddb';
 import { wsBase } from '../api';
 import { colorFor } from './colors';
+import { refreshPresence } from './events';
 
 export const TEXT_NAME = 'content';
 
@@ -76,6 +77,7 @@ export function openDoc(projectId: string, path: string, userName: string): DocS
 }
 
 export function setUserName(name: string) {
+  refreshPresence();
   for (const s of sessions.values()) {
     const prev = (s.provider.awareness.getLocalState()?.user ?? {}) as Record<string, unknown>;
     s.provider.awareness.setLocalStateField('user', {

@@ -281,6 +281,8 @@ export interface SourceLocation {
 }
 
 export type ProjectEvent =
+  | { type: 'presence'; users: { id: string; name: string }[] }
+  | { type: 'project_deleted' }
   | { type: 'commit'; sha: string; short_sha: string; message: string; author: string; time: string }
   | { type: 'file_created'; path: string }
   | { type: 'file_deleted'; path: string }
@@ -424,6 +426,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     }
     throw new ApiError(res.status, message);
   }
+  if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
 }
 
@@ -511,6 +514,7 @@ export const api = {
   createProject: (name: string, template?: string) =>
     request<ProjectMeta>('/api/projects', { method: 'POST', body: JSON.stringify({ name, template }) }),
   getProject: (id: string) => request<ProjectMeta & { role: Role2 }>(`/api/projects/${encodeURIComponent(id)}`),
+  deleteProject: (id: string) => request<void>(`/api/projects/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   listEngines: (id: string) => request<EnginesResponse>(`/api/projects/${encodeURIComponent(id)}/engines`),
   updateSettings: (id: string, patch: SettingsPatch) =>
     request<ProjectMeta & { role: Role2 }>(`/api/projects/${encodeURIComponent(id)}/settings`, {
@@ -520,6 +524,8 @@ export const api = {
   listFolders: (id: string) => request<string[]>(`/api/projects/${encodeURIComponent(id)}/folders`),
   createFolder: (id: string, path: string) =>
     request<{ path: string }>(`/api/projects/${encodeURIComponent(id)}/folders`, { method: 'POST', body: JSON.stringify({ path }) }),
+  deleteFolder: (id: string, path: string) =>
+    request<{ ok: boolean; path: string; deleted_files: string[] }>(`/api/projects/${encodeURIComponent(id)}/folders?path=${encodeURIComponent(path)}`, { method: 'DELETE' }),
   listFiles: (id: string) => request<FileEntry[]>(`/api/projects/${encodeURIComponent(id)}/files`),
   createFile: (id: string, path: string) =>
     request<FileEntry>(`/api/projects/${encodeURIComponent(id)}/files`, {
