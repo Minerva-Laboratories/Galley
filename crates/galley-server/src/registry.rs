@@ -61,6 +61,9 @@ pub enum RegistryError {
     Meta(#[from] toml::de::Error),
 }
 
+/// Under the data dir, one empty file per project id ever used, so no id is handed out twice.
+pub const RESERVED_IDS_DIR: &str = ".project-ids";
+
 pub struct Registry {
     root: PathBuf,
     deleted_root: PathBuf,
@@ -99,7 +102,7 @@ impl Registry {
             };
             if let Err(e) = result { tracing::warn!(path = %entry.path().display(), error = %e, "will retry deleted project cleanup on next startup"); }
         }
-        let ids_root = data_dir.join(".project-ids");
+        let ids_root = data_dir.join(RESERVED_IDS_DIR);
         match std::fs::create_dir(&ids_root) {
             Ok(()) => {},
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {},
