@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks';
 import { api, ApiError, type ProjectMeta } from '../api';
 import { navigate } from '../store/store';
 import { ago } from '../util/time';
@@ -14,8 +14,19 @@ export function ProjectCard({ project, previews, onRename, onDelete }: {
   const [name, setName] = useState(project.name);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [keepPreview, setKeepPreview] = useState(previews);
   const input = useRef<HTMLInputElement>(null);
   useEffect(() => { if (editing) { input.current?.focus(); input.current?.select(); } }, [editing]);
+  useLayoutEffect(() => {
+    if (previews) { setKeepPreview(true); return; }
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      setKeepPreview(false);
+      return;
+    }
+    // Keep the rendered page through the exit transition; reversing the toggle cancels cleanup.
+    const timer = window.setTimeout(() => setKeepPreview(false), 300);
+    return () => window.clearTimeout(timer);
+  }, [previews]);
   const save = async () => {
     if (!name.trim() || saving) return;
     setSaving(true);
@@ -36,7 +47,9 @@ export function ProjectCard({ project, previews, onRename, onDelete }: {
           e.preventDefault();
           navigate(e.currentTarget.getAttribute('href')!);
         }}>
-        {previews && <ProjectThumbnail id={project.id} version={project.updated_at} />}
+        <div class={`project-preview ${previews ? 'is-visible' : ''}`} aria-hidden={!previews}>
+          {(previews || keepPreview) && <ProjectThumbnail id={project.id} version={project.updated_at} />}
+        </div>
         <div class="pcard-summary"><div class="t">{project.name}</div><div class="d">Edited {ago(project.updated_at)}</div></div>
       </a>
       {editing ? <form class="pcard-edit" onSubmit={(e) => { e.preventDefault(); void save(); }}>
