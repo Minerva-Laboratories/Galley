@@ -2326,7 +2326,6 @@ ol.steps .link {
 }
 .files-header { flex-wrap: wrap; gap: 8px; padding-right: 16px; }
 .files-actions { display: flex; flex-wrap: wrap; gap: 6px; }
-.folder-row { padding-right: 12px; }
 .folder-row svg { flex-shrink: 0; }
 .folder-row .folder-chevron { display: flex; transform: rotate(-90deg); }
 .folder-row .fname[aria-expanded='true'] .folder-chevron { transform: none; }
