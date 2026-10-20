@@ -292,6 +292,18 @@ impl Backup {
         let db = self.get("galley.db.gz").await?;
         let mut out = std::fs::File::create(&db_path)?;
         std::io::copy(&mut flate2::read::GzDecoder::new(db.as_slice()), &mut out)?;
+        drop(out);
+        // The bucket keeps the archive of a project someone deleted. The audit log records the
+        // deletion, and a restore must not bring the paper back.
+        let deleted = rusqlite::Connection::open(&db_path)
+            .and_then(|conn| deleted_projects(&conn))
+            .map_err(|e| BackupError::Db(e.to_string()))?;
+        // Reserve the deleted ids again, so a new project never takes over an old link.
+        let reserved = self.data_dir.join(crate::registry::RESERVED_IDS_DIR);
+        std::fs::create_dir_all(&reserved)?;
+        for id in deleted.iter().filter(|id| is_safe_id(id)) {
+            std::fs::write(reserved.join(id), "")?;
+        }
 
         let mut report = RestoreReport::default();
         for key in self.list("projects/").await? {
@@ -300,6 +312,10 @@ impl Backup {
             };
             if !is_safe_id(id) {
                 report.skipped.push(key);
+                continue;
+            }
+            if deleted.iter().any(|d| d == id) {
+                report.deleted += 1;
                 continue;
             }
             let bytes = self.get(&key).await?;
@@ -337,6 +353,8 @@ impl Backup {
 pub struct RestoreReport {
     pub projects: usize,
     pub skipped: Vec<String>,
+    /// Projects someone deleted whose archive was still in the bucket.
+    pub deleted: usize,
 }
 
 async fn check(response: reqwest::Response, key: &str) -> Result<reqwest::Response, BackupError> {
@@ -359,6 +377,14 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 fn join_error(e: tokio::task::JoinError) -> BackupError {
     BackupError::Io(std::io::Error::other(e))
+}
+
+fn deleted_projects(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT project_id FROM audit_log WHERE action = 'project.delete' AND project_id IS NOT NULL",
+    )?;
+    let ids = stmt.query_map([], |r| r.get(0))?.collect();
+    ids
 }
 
 fn is_safe_id(id: &str) -> bool {

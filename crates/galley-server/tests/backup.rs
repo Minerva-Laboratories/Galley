@@ -149,3 +149,35 @@ async fn a_failed_upload_is_reported_and_retried() {
     assert_eq!(backup.run_once(&db).await.unwrap().projects_uploaded, 1, "the failed project is retried");
     assert!(objects.lock().unwrap().contains_key("galley/projects/alicia.tar.gz"));
 }
+
+#[tokio::test]
+async fn a_restore_leaves_out_a_deleted_project_and_keeps_its_id_reserved() {
+    let (endpoint, _objects) = fake_s3().await;
+    let live = tempfile::tempdir().unwrap();
+    let db = Db::open(&live.path().join("galley.db")).unwrap();
+    write_project(live.path(), "alicia", "Lorem ipsum.");
+    write_project(live.path(), "bob", "Consectetur.");
+    let backup = Backup::from_config(&config(&endpoint), live.path()).unwrap().unwrap();
+    backup.run_once(&db).await.unwrap();
+
+    // The server deletes the directory and writes this audit entry. The bucket still has the archive.
+    std::fs::remove_dir_all(live.path().join("data/alicia")).unwrap();
+    db.conn()
+        .unwrap()
+        .execute(
+            "INSERT INTO audit_log (project_id, action, detail, created_at) VALUES ('alicia', 'project.delete', 'alicia', '2026-10-18T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+    backup.run_once(&db).await.unwrap();
+
+    let fresh = tempfile::tempdir().unwrap();
+    let report = Backup::from_config(&config(&endpoint), fresh.path()).unwrap().unwrap().restore().await.unwrap();
+    assert_eq!((report.projects, report.deleted), (1, 1));
+    assert!(fresh.path().join("data/bob/main.tex").exists());
+    assert!(!fresh.path().join("data/alicia").exists(), "a deleted paper must not come back");
+
+    let registry = galley_server::registry::Registry::new(fresh.path(), Default::default()).unwrap();
+    let meta = registry.create("alicia").await.unwrap();
+    assert_eq!(meta.id, "alicia-2", "a new project never takes over a deleted project's link");
+}

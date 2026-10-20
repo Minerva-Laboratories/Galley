@@ -192,7 +192,8 @@ galley --data-dir /var/lib/galley-restored backup restore
 galley --data-dir /var/lib/galley-restored serve
 ```
 
-A restore refuses a data directory that already holds a database or projects.
+A restore refuses a data directory that already holds a database or projects. It leaves out projects
+that someone deleted. Their archives stay in the bucket under `projects/<id>.tar.gz`.
 `galley backup run` makes one pass by hand.
 
 ### A local copy
