@@ -183,6 +183,8 @@ export const openTabs = signal<string[]>([]);
 export const currentFile = signal<string | null>(null);
 export const drawer = signal<DrawerName | null>('files');
 export const connection = signal<Connection>('connecting');
+/** The tab has been hidden or untouched long enough to let go of its connections (sync/away.ts). */
+export const away = signal(false);
 export const peers = signal<Peer[]>([]);
 export const commits = signal<CommitInfo[]>([]);
 export const checkpoints = signal<Checkpoint[]>([]);

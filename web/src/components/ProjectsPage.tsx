@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { api, ApiError, type ImportReport, type ProjectMeta, type Template } from '../api';
 import { logout } from '../store/auth';
-import { currentUser, navigate, showToast, theme, toggleTheme } from '../store/store';
+import { away, currentUser, navigate, showToast, theme, toggleTheme } from '../store/store';
 import { ProjectCard } from './ProjectCard';
 import { AppearanceButton } from './Appearance';
 import { Icon } from './Icon';
@@ -28,6 +28,8 @@ export function ProjectsPage() {
   const refresh = useRef<() => void>(() => {});
   const revision = useRef(0);
 
+  useEffect(() => { if (!away.value) refresh.current(); }, [away.value]);
+
   useEffect(() => {
     document.title = 'Projects — Galley';
     let stopped = false;
@@ -44,7 +46,8 @@ export function ProjectsPage() {
       } finally { inFlight = false; }
     };
     refresh.current = () => void load();
-    const onVisible = () => { if (document.visibilityState === 'visible') void load(); };
+    // An away tab stops refreshing, so a dashboard left open does not keep the server awake.
+    const onVisible = () => { if (document.visibilityState === 'visible' && !away.value) void load(); };
     void load();
     // Membership can change while the recipient is on the dashboard, before they have any project
     // socket. Refresh in the background and on return so invitations don't need a manual reload.

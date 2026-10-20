@@ -4,6 +4,7 @@ import { daysLeft, saveSettings, setDeadline } from '../store/settings';
 import { colorFor, initials } from '../sync/colors';
 import { setUserName } from '../sync/docs';
 import {
+  away,
   canEdit,
   connectOpen,
   connection,
@@ -62,7 +63,9 @@ export function TopBar() {
       </button>
       <DeadlinePill />
       <div class="presence">
-        {connection.value === 'offline' && <span class="pill off">Offline · edits stored locally</span>}
+        {connection.value === 'offline' && (away.value
+          ? <span class="pill wait">Paused while you were away</span>
+          : <span class="pill off">Offline · edits stored locally</span>)}
         {connection.value === 'connecting' && <span class="pill wait">Connecting…</span>}
         <div class="avs" title={[...others.map((p) => p.name), `${me} (you)`].join(', ')}>
           {others.slice(0, 4).map((p) => (

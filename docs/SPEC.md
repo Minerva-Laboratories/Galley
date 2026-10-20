@@ -147,6 +147,7 @@ sessions(...) settings(...)
 - Transport: WebSocket, `y-protocols` sync and awareness. The server is the authoritative store, and clients merge with peer-to-peer semantics. A reconnect is a state-vector exchange, never a "reload to see changes".
 - Persistence: the server applies updates to `yrs` in memory and appends to `doc-state.ybin` with fsync every 250 ms of activity (debounced) and on every client disconnect. It compacts on checkpoint. A project that no tab, request or build has used for 10 minutes is flushed and unloaded from memory, and the next open reads it from disk.
 - Offline: IndexedDB persistence (`y-indexeddb`) in the PWA. Edits made offline merge on reconnect. The UI shows a small "offline, changes stored locally" pill. Nothing is modal.
+- Away tabs: a tab hidden for 10 minutes, or visible with no input for 30, closes its document and event sockets and stops refreshing the project list, so a host that stops idle servers can stop this one. Others see the person leave. The pill reads "Paused while you were away". The first key press, click or return to the tab reconnects at once, and anything typed meanwhile is in IndexedDB.
 
 ### 5.2 Git flush
 - A **flusher** task writes CRDT text to the working tree and commits when: 4 s of quiet after an edit, or 60 s continuous editing, or before any build. The commit author is the last editor. The message is generated (`edit: main.tex, sections/2.tex`).
