@@ -145,7 +145,7 @@ sessions(...) settings(...)
 ### 5.1 Sync
 - One Yjs document per text file (`Y.Text`) plus a project-level `Y.Map` for the file tree and metadata. Binary assets are not CRDT'd. They are content-addressed uploads committed to git directly.
 - Transport: WebSocket, `y-protocols` sync and awareness. The server is the authoritative store, and clients merge with peer-to-peer semantics. A reconnect is a state-vector exchange, never a "reload to see changes".
-- Persistence: the server applies updates to `yrs` in memory and appends to `doc-state.ybin` with fsync every 250 ms of activity (debounced) and on every client disconnect. It compacts on checkpoint.
+- Persistence: the server applies updates to `yrs` in memory and appends to `doc-state.ybin` with fsync every 250 ms of activity (debounced) and on every client disconnect. It compacts on checkpoint. A project that no tab, request or build has used for 10 minutes is flushed and unloaded from memory, and the next open reads it from disk.
 - Offline: IndexedDB persistence (`y-indexeddb`) in the PWA. Edits made offline merge on reconnect. The UI shows a small "offline, changes stored locally" pill. Nothing is modal.
 
 ### 5.2 Git flush
@@ -227,8 +227,13 @@ workers), the publication gate and the last-good PDF. A remote build looks the s
 - The server publishes the PDF through the same path as a local build. A worker that cannot be
   reached, refuses the token or times out produces an error card that says so and that the last
   PDF is unchanged. Nothing falls back to a local compile.
-- Engine availability, `latexdiff` comparisons and submission verification still run on the
-  server, so the server and its workers must use the same image.
+- A `latexdiff` comparison is a worker job too (`compare: true` in the job). The two versions
+  travel in the archive under `.galley-compare/`, which the worker removes before it compiles. The
+  worker answers with the PDF, or with 422 and the reason, which the UI shows as it is.
+- The server writes the sources archive to a scratch directory inside `.galley/build`, streams it
+  to the worker, and saves the reply there, so neither the archive nor the PDF is held in memory.
+- Engine availability and submission verification still run on the server, so the server and its
+  workers must use the same image.
 
 ### 6.2 Sandbox
 `bwrap --ro-bind /usr /usr --ro-bind $TECTONIC_CACHE /cache --bind $PROJECT /work --unshare-all --die-with-parent --new-session --chdir /work tectonic -X compile main.tex`
@@ -502,7 +507,9 @@ Self-hosters get the complete feature set by design. That is a stated principle,
    document. The name comes from `\title{}`, then the zip's file name. The project starts with one
    commit. A clean import opens at once; a zip with several documents, or with minted, pythontex,
    `\write18` or LuaTeX code, shows a summary first so the choice is seen. Limits: 60 MB compressed,
-   300 MB expanded, 5,000 files, 25 MB per file.
+   300 MB expanded, 5,000 files, 25 MB per file. The upload, figures, data and text files over
+   2 MB are staged on the data disk, not in memory; text files staged that way keep their
+   encoding. Two imports or downloads run at once, and the rest wait their turn.
 3. **Editor**: see above.
 4. **History** (drawer and full-screen mode): a vertical timeline of checkpoints with auto-commits collapsed, a scrubber, a file diff, *Compare PDFs*, *Restore*, *Create checkpoint* and *Push to remote*.
 5. **Share** (modal): a members list with roles, a link generator (role, expiry, label), a copy button and an "Anyone with link" toggle.

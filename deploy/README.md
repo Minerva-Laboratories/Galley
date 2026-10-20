@@ -145,7 +145,8 @@ max_concurrent = 8        # now the number of compiles across all workers
 ```
 
 Use the same image or packages on the server and on the workers: the server still checks which
-compilers exist, compares PDFs and verifies submission packages itself. Each worker needs
+compilers exist and verifies submission packages itself. Compare PDFs runs on a worker, so each
+worker also needs `latexdiff`. Each worker needs
 bubblewrap or Docker, like the server. Keep workers on a private network; they accept work from
 anything that holds the token.
 
