@@ -12,14 +12,13 @@ futures-util.workspace = true
 galley-index.workspace = true
 svg2pdf = "0.13"
 regex.workspace = true
-reqwest.workspace = true
+reqwest = { workspace = true, features = ["stream"] }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml_ng.workspace = true
 tar.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
-[dev-dependencies]
-tempfile.workspace = true

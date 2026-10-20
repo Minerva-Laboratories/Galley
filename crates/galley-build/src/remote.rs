@@ -6,9 +6,13 @@
 //!
 //! A worker keeps a copy of each project it has built, including the build directory, so the next
 //! build of that project there reuses its auxiliary files and figure cache.
+//!
+//! The server sends the sources and receives the PDF through files on disk, never whole in memory,
+//! so a project with large figures costs the server disk rather than memory. A comparison (Compare
+//! PDFs) runs on a worker too: latexdiff and the compile of its output are the heaviest work left.
 
-use std::io::Read;
-use std::path::Path;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -25,14 +29,23 @@ pub struct WorkerJob {
     pub project: String,
     pub main_file: String,
     pub request: BuildRequest,
+    /// A comparison instead of a build. The two versions travel in `COMPARE_DIR`, and the reply is
+    /// the marked-up PDF alone.
+    #[serde(default)]
+    pub compare: bool,
 }
 
-/// What a worker sends back. The PDF and SyncTeX come only with a build that published a new PDF.
+/// Where a comparison's two versions travel in the sources archive. The worker removes the folder
+/// before it compiles.
+pub const COMPARE_DIR: &str = ".galley-compare";
+
+/// What a worker sends back. The PDF and SyncTeX come only with a build that published a new PDF,
+/// and they arrive as files at the paths the caller chose.
 #[derive(Debug, Default)]
 pub struct Outcome {
     pub result: Option<BuildResult>,
-    pub pdf: Option<Vec<u8>>,
-    pub synctex: Option<Vec<u8>>,
+    pub pdf: Option<PathBuf>,
+    pub synctex: Option<PathBuf>,
     pub log: Option<Vec<u8>>,
 }
 
@@ -60,16 +73,47 @@ impl RemoteWorker {
     }
 
     /// Send one build. `limit` covers the whole exchange: a worker that started from a stop, the
-    /// compile, and the reply.
-    pub async fn compile(&self, job: &WorkerJob, sources: Vec<u8>, limit: Duration) -> Result<Outcome, String> {
+    /// compile, and the reply. The reply goes to `scratch`, and the PDF and SyncTeX are left there
+    /// as `paper.pdf` and `paper.synctex.gz`.
+    pub async fn compile(&self, job: &WorkerJob, sources: &Path, scratch: &Path, limit: Duration) -> Result<Outcome, String> {
+        let response = self.send(job, sources, limit).await?;
+        if !response.status().is_success() {
+            return Err(refusal(response, "build").await);
+        }
+        let reply = scratch.join("reply.tar");
+        save(response, &reply).await?;
+        let (pdf, synctex) = (scratch.join(PDF), scratch.join(SYNCTEX));
+        let outcome = std::fs::File::open(&reply)
+            .and_then(|f| unpack_outcome_to(std::io::BufReader::new(f), &pdf, &synctex))
+            .map_err(|e| format!("The build worker's reply was unreadable: {e}"));
+        let _ = std::fs::remove_file(&reply);
+        outcome
+    }
+
+    /// Send one comparison and write its PDF to `pdf`. A comparison that does not compile comes
+    /// back as the worker's explanation.
+    pub async fn compare(&self, job: &WorkerJob, sources: &Path, pdf: &Path, limit: Duration) -> Result<(), String> {
+        let response = self.send(job, sources, limit).await?;
+        if response.status() == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
+            return Err(response.text().await.unwrap_or_default().trim().to_string());
+        }
+        if !response.status().is_success() {
+            return Err(refusal(response, "comparison").await);
+        }
+        save(response, pdf).await
+    }
+
+    async fn send(&self, job: &WorkerJob, sources: &Path, limit: Duration) -> Result<reqwest::Response, String> {
         let header = serde_json::to_string(job).map_err(|e| e.to_string())?;
-        let response = self
-            .http
+        let file = tokio::fs::File::open(sources).await.map_err(|e| format!("The sources could not be read: {e}"))?;
+        let len = file.metadata().await.map_err(|e| e.to_string())?.len();
+        self.http
             .post(&self.url)
             .bearer_auth(&self.token)
             .header(JOB_HEADER, header)
             .header(reqwest::header::CONTENT_TYPE, "application/gzip")
-            .body(sources)
+            .header(reqwest::header::CONTENT_LENGTH, len)
+            .body(reqwest::Body::from(file))
             .timeout(limit)
             .send()
             .await
@@ -79,15 +123,25 @@ impl RemoteWorker {
                 } else {
                     "The build worker could not be reached".to_string()
                 }
-            })?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(format!("The build worker refused the build (HTTP {status}): {}", body.trim()));
-        }
-        let bytes = response.bytes().await.map_err(|_| "The build worker's reply was cut off".to_string())?;
-        unpack_outcome(&bytes).map_err(|e| format!("The build worker's reply was unreadable: {e}"))
+            })
     }
+}
+
+async fn refusal(response: reqwest::Response, what: &str) -> String {
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    format!("The build worker refused the {what} (HTTP {status}): {}", body.trim())
+}
+
+/// Write a reply to `dest` as it arrives.
+async fn save(mut response: reqwest::Response, dest: &Path) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+    let cut = |_| "The build worker's reply was cut off".to_string();
+    let mut out = tokio::fs::File::create(dest).await.map_err(|e| format!("The reply could not be saved: {e}"))?;
+    while let Some(chunk) = response.chunk().await.map_err(cut)? {
+        out.write_all(&chunk).await.map_err(|e| format!("The reply could not be saved: {e}"))?;
+    }
+    out.flush().await.map_err(|e| format!("The reply could not be saved: {e}"))
 }
 
 /// Skip what a build makes or what history holds. The worker builds from the files alone.
@@ -97,10 +151,23 @@ fn skip_source(rel: &Path) -> bool {
 }
 
 /// The project's files, without git history or Galley's own state, as a gzipped tar.
+#[cfg(test)]
 pub fn pack_sources(project_dir: &Path) -> std::io::Result<Vec<u8>> {
-    let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast()));
+    pack_sources_to(project_dir, &[], Vec::new())
+}
+
+/// Write the sources archive to `out`, followed by `extra` files at the given archive paths.
+pub fn pack_sources_to<W: Write>(project_dir: &Path, extra: &[(&str, &[u8])], out: W) -> std::io::Result<W> {
+    let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(out, flate2::Compression::fast()));
     tar.follow_symlinks(false);
     add_sources(&mut tar, project_dir, project_dir)?;
+    for (name, bytes) in extra {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(bytes.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append_data(&mut header, name, *bytes)?;
+    }
     tar.into_inner()?.finish()
 }
 
@@ -180,19 +247,29 @@ pub fn pack_outcome(result: &BuildResult, out_dir: &Path) -> std::io::Result<Vec
     tar.into_inner()
 }
 
-pub fn unpack_outcome(bytes: &[u8]) -> std::io::Result<Outcome> {
+/// Read a reply. The PDF and SyncTeX are copied to `pdf_to` and `synctex_to`, never into memory.
+pub fn unpack_outcome_to<R: Read>(reader: R, pdf_to: &Path, synctex_to: &Path) -> std::io::Result<Outcome> {
     let mut out = Outcome::default();
-    let mut archive = tar::Archive::new(bytes);
+    let mut archive = tar::Archive::new(reader);
     for entry in archive.entries()? {
         let mut entry = entry?;
         let name = entry.path()?.to_string_lossy().into_owned();
-        let mut buf = Vec::new();
-        entry.read_to_end(&mut buf)?;
+        let read = |entry: &mut tar::Entry<'_, R>| -> std::io::Result<Vec<u8>> {
+            let mut buf = Vec::new();
+            entry.read_to_end(&mut buf)?;
+            Ok(buf)
+        };
         match name.as_str() {
-            RESULT => out.result = Some(serde_json::from_slice(&buf).map_err(std::io::Error::other)?),
-            PDF => out.pdf = Some(buf),
-            SYNCTEX => out.synctex = Some(buf),
-            LOG => out.log = Some(buf),
+            RESULT => out.result = Some(serde_json::from_slice(&read(&mut entry)?).map_err(std::io::Error::other)?),
+            PDF => {
+                std::io::copy(&mut entry, &mut std::fs::File::create(pdf_to)?)?;
+                out.pdf = Some(pdf_to.to_path_buf());
+            }
+            SYNCTEX => {
+                std::io::copy(&mut entry, &mut std::fs::File::create(synctex_to)?)?;
+                out.synctex = Some(synctex_to.to_path_buf());
+            }
+            LOG => out.log = Some(read(&mut entry)?),
             _ => {}
         }
     }
@@ -249,7 +326,8 @@ mod tests {
             "engine": "pdflatex", "sandbox": "bwrap", "finished_at": "2026-10-08T00:00:00Z"
         }))
         .unwrap();
-        let out = unpack_outcome(&pack_outcome(&result, tmp.path()).unwrap()).unwrap();
+        let packed = pack_outcome(&result, tmp.path()).unwrap();
+        let out = unpack_outcome_to(packed.as_slice(), &tmp.path().join("in.pdf"), &tmp.path().join("in.synctex.gz")).unwrap();
         assert_eq!(out.result.unwrap().id, 7);
         assert!(out.pdf.is_none(), "an older PDF on the worker must never replace the server's");
         assert_eq!(out.log.unwrap(), b"! Undefined control sequence.");
