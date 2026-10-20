@@ -137,16 +137,43 @@ pub async fn import_project(
     State(app): State<AppState>,
     CurrentUser(user): CurrentUser,
     axum::extract::Query(q): axum::extract::Query<ImportQuery>,
-    body: axum::body::Bytes,
+    body: axum::body::Body,
 ) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
+    use futures_util::StreamExt;
+    use tokio::io::AsyncWriteExt;
     if user.is_guest {
         return Err(AppError::Forbidden("Guests from a share link can't create projects. Sign up for an account.".into()));
     }
-    // Unpacking is CPU work on a buffer that can reach tens of megabytes, so it stays off the runtime.
-    let imported = tokio::task::spawn_blocking(move || crate::import::read_zip(&body))
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?
-        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+    // The zip goes to disk as it arrives, and so do its figures, so a large import costs the
+    // server disk rather than memory. The staging directory goes away when this returns.
+    let staging = app.registry.staging()?;
+    let zip_path = staging.path().join("upload.zip");
+    let mut out = tokio::fs::File::create(&zip_path).await?;
+    let mut stream = body.into_data_stream();
+    let mut size = 0;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| AppError::BadRequest("The upload was cut off. Try the import again.".into()))?;
+        size += chunk.len();
+        if size > crate::import::MAX_ZIP {
+            return Err(AppError::BadRequest(format!(
+                "The zip is larger than {} MB. Remove large data files and try again.",
+                crate::import::MAX_ZIP / 1024 / 1024
+            )));
+        }
+        out.write_all(&chunk).await?;
+    }
+    out.flush().await?;
+    drop(out);
+    // Imports wait their turn, so a class importing at once cannot exhaust the server.
+    let _turn = app.imports.acquire().await.map_err(|e| AppError::Internal(e.to_string()))?;
+    let files_dir = staging.path().join("files");
+    let imported = tokio::task::spawn_blocking(move || -> Result<_, AppError> {
+        std::fs::create_dir_all(&files_dir)?;
+        let zip = std::io::BufReader::new(std::fs::File::open(&zip_path)?);
+        crate::import::read_zip_from(zip, Some(&files_dir)).map_err(|e| AppError::BadRequest(e.to_string()))
+    })
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))??;
     let from_file = q
         .filename
         .as_deref()

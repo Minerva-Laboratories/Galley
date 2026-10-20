@@ -144,6 +144,14 @@ impl Registry {
         &self.root
     }
 
+    /// A scratch directory on the same disk as the projects, so a staged file moves into a
+    /// project by rename. It is removed when the handle drops.
+    pub fn staging(&self) -> std::io::Result<tempfile::TempDir> {
+        let dir = self.root.parent().unwrap_or(&self.root).join("cache").join("staging");
+        std::fs::create_dir_all(&dir)?;
+        tempfile::tempdir_in(dir)
+    }
+
     pub fn list(&self) -> Result<Vec<ProjectMeta>, RegistryError> {
         let _guard = self.meta_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut out = Vec::new();
@@ -225,13 +233,14 @@ impl Registry {
         files: Vec<(String, Vec<u8>)>,
         main_file: &str,
     ) -> Result<ProjectMeta, RegistryError> {
+        let files = files.into_iter().map(|(p, b)| (p, crate::import::FileData::Bytes(b))).collect();
         self.create_imported_with_folders(name, files, Vec::new(), main_file).await
     }
 
     pub async fn create_imported_with_folders(
         &self,
         name: &str,
-        files: Vec<(String, Vec<u8>)>,
+        files: Vec<(String, crate::import::FileData)>,
         folders: Vec<String>,
         main_file: &str,
     ) -> Result<ProjectMeta, RegistryError> {
@@ -245,12 +254,20 @@ impl Registry {
         std::fs::create_dir_all(dir.join(".galley"))?;
         let count = files.len();
         let mut text_paths = Vec::new();
-        for (path, bytes) in &files {
+        for (path, data) in &files {
             let file = dir.join(path);
             if let Some(parent) = file.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::write(file, bytes)?;
+            match data {
+                crate::import::FileData::Bytes(bytes) => std::fs::write(file, bytes)?,
+                // Staging sits in the data dir, so this is normally a rename and copies nothing.
+                crate::import::FileData::Staged(from) => {
+                    if std::fs::rename(from, &file).is_err() {
+                        std::fs::copy(from, &file)?;
+                    }
+                }
+            }
             if galley_sync::paths::is_text_path(path) {
                 text_paths.push(path.clone());
             }

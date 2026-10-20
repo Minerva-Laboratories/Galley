@@ -49,6 +49,8 @@ pub struct AppState {
     project_lifecycle: Arc<RwLock<HashMap<String, Arc<tokio::sync::RwLock<()>>>>>,
     collab: Arc<RwLock<HashMap<String, broadcast::Sender<String>>>>,
     pub(crate) presence: Arc<std::sync::Mutex<ws::ProjectPresence>>,
+    /// Zip imports and project downloads that may run at once. Each holds up to tens of megabytes.
+    pub(crate) imports: Arc<tokio::sync::Semaphore>,
 }
 
 impl FromRef<AppState> for Store {
@@ -159,6 +161,7 @@ impl AppState {
             project_lifecycle: Arc::default(),
             collab: Arc::new(RwLock::new(HashMap::new())),
             presence: Arc::default(),
+            imports: Arc::new(tokio::sync::Semaphore::new(2)),
         })
     }
 

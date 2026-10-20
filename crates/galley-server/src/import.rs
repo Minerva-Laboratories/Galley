@@ -1,9 +1,13 @@
-//! Import a project from a zip file, such as an Overleaf download. The import reads the archive in
-//! memory, drops build output and system files, strips a single wrapping folder, converts text that
-//! is not UTF-8, and picks the main file. The caller creates the project from the result, so the
-//! person uploading sets nothing.
+//! Import a project from a zip file, such as an Overleaf download. The import drops build output and
+//! system files, strips a single wrapping folder, converts text that is not UTF-8, and picks the
+//! main file. The caller creates the project from the result, so the person uploading sets nothing.
+//!
+//! Small text files stay in memory, because the main file and the warnings come from them. Figures,
+//! data and large text files go to a staging directory on disk, so a zip that expands to hundreds
+//! of megabytes costs the server only a few megabytes of memory.
 
-use std::io::{Cursor, Read};
+use std::io::{Read, Seek};
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use galley_sync::paths::{clean_rel_path, is_text_path};
@@ -17,6 +21,11 @@ const MAX_EXPANDED: u64 = 300 * 1024 * 1024;
 const MAX_ENTRIES: usize = 5000;
 /// The same per-file cap as an ordinary upload.
 const MAX_FILE: u64 = crate::file_routes::MAX_UPLOAD as u64;
+/// A text file larger than this is staged on disk as it is, without conversion to UTF-8. Such a
+/// file is data, not something anyone edits.
+const IN_MEMORY_FILE: u64 = 2 * 1024 * 1024;
+/// Once this much text is in memory, the rest of the archive is staged on disk.
+const IN_MEMORY_TOTAL: u64 = 32 * 1024 * 1024;
 
 /// Build output and editor litter. None of it is source, and keeping it would put stale results
 /// into history.
@@ -26,8 +35,24 @@ const SKIPPED_EXTENSIONS: &[&str] = &[
     "xdv", "dvi", "idx", "ilg", "ind", "glo", "gls", "glg", "ist", "loa",
 ];
 
+/// A file's content, in memory or in the staging directory.
+pub enum FileData {
+    Bytes(Vec<u8>),
+    Staged(PathBuf),
+}
+
+impl FileData {
+    /// The content when it is in memory. Only staged files return `None`.
+    pub fn bytes(&self) -> Option<&[u8]> {
+        match self {
+            FileData::Bytes(b) => Some(b),
+            FileData::Staged(_) => None,
+        }
+    }
+}
+
 pub struct Imported {
-    pub files: Vec<(String, Vec<u8>)>,
+    pub files: Vec<(String, FileData)>,
     pub folders: Vec<String>,
     pub report: Report,
 }
@@ -66,17 +91,25 @@ static DOCUMENTCLASS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\\document
 static BEGIN_DOCUMENT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\\begin\s*\{document\}").unwrap());
 static TITLE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\\title\s*(?:\[[^\]]*\])?\s*\{([^{}]{1,120})\}").unwrap());
 
-/// Read a zip into project files and a report.
+/// Read a zip held in memory, keeping every file in memory.
+#[cfg(test)]
 pub fn read_zip(bytes: &[u8]) -> Result<Imported, ImportError> {
-    let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|_| ImportError::NotZip)?;
+    read_zip_from(std::io::Cursor::new(bytes), None)
+}
+
+/// Read a zip into project files and a report. With `staging`, files that do not belong in memory
+/// are written there, and the caller keeps the directory until the project is created.
+pub fn read_zip_from<R: Read + Seek>(reader: R, staging: Option<&Path>) -> Result<Imported, ImportError> {
+    let mut archive = zip::ZipArchive::new(reader).map_err(|_| ImportError::NotZip)?;
     if archive.len() > MAX_ENTRIES {
         return Err(ImportError::TooMany);
     }
 
-    let mut raw: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut raw: Vec<(String, FileData)> = Vec::new();
     let mut raw_folders = Vec::new();
     let mut skipped = Vec::new();
     let mut expanded: u64 = 0;
+    let mut in_memory: u64 = 0;
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(|e| ImportError::Damaged(e.to_string()))?;
         if entry.is_dir() {
@@ -95,13 +128,31 @@ pub fn read_zip(bytes: &[u8]) -> Result<Imported, ImportError> {
         if expanded > MAX_EXPANDED {
             return Err(ImportError::TooLarge);
         }
-        let mut data = Vec::with_capacity(entry.size() as usize);
-        // Read one byte past the declared size, so an entry that lies about its size is caught.
-        (&mut entry).take(MAX_FILE + 1).read_to_end(&mut data).map_err(|e| ImportError::Damaged(e.to_string()))?;
-        if data.len() as u64 > MAX_FILE {
-            skipped.push(format!("{name} (larger than {} MB)", MAX_FILE / 1024 / 1024));
-            continue;
-        }
+        let keep = is_text_path(&name) && entry.size() <= IN_MEMORY_FILE && in_memory + entry.size() <= IN_MEMORY_TOTAL;
+        let data = match staging {
+            Some(dir) if !keep => {
+                let path = dir.join(format!("{i}"));
+                let mut out = std::fs::File::create(&path).map_err(|e| ImportError::Damaged(e.to_string()))?;
+                // Read one byte past the declared size, so an entry that lies about its size is caught.
+                let n = std::io::copy(&mut (&mut entry).take(MAX_FILE + 1), &mut out).map_err(|e| ImportError::Damaged(e.to_string()))?;
+                if n > MAX_FILE {
+                    let _ = std::fs::remove_file(&path);
+                    skipped.push(format!("{name} (larger than {} MB)", MAX_FILE / 1024 / 1024));
+                    continue;
+                }
+                FileData::Staged(path)
+            }
+            _ => {
+                let mut data = Vec::with_capacity(entry.size() as usize);
+                (&mut entry).take(MAX_FILE + 1).read_to_end(&mut data).map_err(|e| ImportError::Damaged(e.to_string()))?;
+                if data.len() as u64 > MAX_FILE {
+                    skipped.push(format!("{name} (larger than {} MB)", MAX_FILE / 1024 / 1024));
+                    continue;
+                }
+                in_memory += data.len() as u64;
+                FileData::Bytes(data)
+            }
+        };
         raw.push((name, data));
     }
 
@@ -129,16 +180,15 @@ pub fn read_zip(bytes: &[u8]) -> Result<Imported, ImportError> {
             skipped.push(stripped);
             continue;
         };
-        let data = if is_text_path(&rel) {
-            match to_utf8(data) {
-                (text, false) => text,
+        let data = match data {
+            FileData::Bytes(data) if is_text_path(&rel) => match to_utf8(data) {
+                (text, false) => FileData::Bytes(text),
                 (text, true) => {
                     converted.push(rel.clone());
-                    text
+                    FileData::Bytes(text)
                 }
-            }
-        } else {
-            data
+            },
+            other => other,
         };
         files.push((rel, data));
     }
@@ -157,7 +207,7 @@ pub fn read_zip(bytes: &[u8]) -> Result<Imported, ImportError> {
     });
 
     let (main_file, main_reason, other_candidates) = pick_main(&files).ok_or(ImportError::NoMain)?;
-    let main_text = files.iter().find(|(p, _)| *p == main_file).map(|(_, d)| String::from_utf8_lossy(d).into_owned());
+    let main_text = files.iter().find(|(p, _)| *p == main_file).and_then(|(_, d)| d.bytes()).map(|d| String::from_utf8_lossy(d).into_owned());
     let title = main_text.as_deref().and_then(title_of);
     let warnings = warnings_for(&files);
     let file_count = files.len();
@@ -238,12 +288,12 @@ fn uncommented(text: &str) -> String {
 /// Choose the file to compile. A candidate declares `\documentclass` outside a comment. Among
 /// several, `main.tex` wins, then a file at the top level, then one that also begins the document,
 /// then the shortest path.
-fn pick_main(files: &[(String, Vec<u8>)]) -> Option<(String, String, Vec<String>)> {
+fn pick_main(files: &[(String, FileData)]) -> Option<(String, String, Vec<String>)> {
     let mut candidates: Vec<(&str, bool)> = files
         .iter()
         .filter(|(p, _)| p.to_ascii_lowercase().ends_with(".tex"))
         .filter_map(|(p, d)| {
-            let text = uncommented(&String::from_utf8_lossy(d));
+            let text = uncommented(&String::from_utf8_lossy(d.bytes()?));
             DOCUMENTCLASS.is_match(&text).then(|| (p.as_str(), BEGIN_DOCUMENT.is_match(&text)))
         })
         .collect();
@@ -282,11 +332,12 @@ fn title_of(main: &str) -> Option<String> {
 }
 
 /// Things the import cannot fix and the author should know before the first build.
-fn warnings_for(files: &[(String, Vec<u8>)]) -> Vec<String> {
+fn warnings_for(files: &[(String, FileData)]) -> Vec<String> {
     let all: String = files
         .iter()
         .filter(|(p, _)| p.ends_with(".tex") || p.ends_with(".sty") || p.ends_with(".cls"))
-        .map(|(_, d)| uncommented(&String::from_utf8_lossy(d)))
+        .filter_map(|(_, d)| d.bytes())
+        .map(|d| uncommented(&String::from_utf8_lossy(d)))
         .collect::<Vec<_>>()
         .join("\n");
     let mut out = Vec::new();
@@ -310,27 +361,29 @@ fn warnings_for(files: &[(String, Vec<u8>)]) -> Vec<String> {
 /// Pack a project's files into a zip, the reverse of `read_zip`. It leaves out `.git` and
 /// `.galley`, so the archive holds the project as an author sees it and imports cleanly into Galley
 /// or Overleaf.
+#[cfg(test)]
 pub fn write_zip(workdir: &std::path::Path) -> std::io::Result<Vec<u8>> {
-    use std::io::Write;
+    Ok(write_zip_to(workdir, std::io::Cursor::new(Vec::new()))?.into_inner())
+}
+
+/// Write the zip to `out` one file at a time, so a project with large figures is never held in
+/// memory whole.
+pub fn write_zip_to<W: std::io::Write + Seek>(workdir: &std::path::Path, out: W) -> std::io::Result<W> {
     let mut files = Vec::new();
     let mut folders = Vec::new();
     collect(workdir, workdir, &mut files, &mut folders)?;
     files.sort();
     folders.sort();
-    let mut buf = Cursor::new(Vec::new());
-    {
-        let mut w = zip::ZipWriter::new(&mut buf);
-        let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-        for rel in folders {
-            w.add_directory(format!("{rel}/"), opts).map_err(std::io::Error::other)?;
-        }
-        for rel in files {
-            w.start_file(rel.as_str(), opts).map_err(std::io::Error::other)?;
-            w.write_all(&std::fs::read(workdir.join(&rel))?)?;
-        }
-        w.finish().map_err(std::io::Error::other)?;
+    let mut w = zip::ZipWriter::new(out);
+    let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    for rel in folders {
+        w.add_directory(format!("{rel}/"), opts).map_err(std::io::Error::other)?;
     }
-    Ok(buf.into_inner())
+    for rel in files {
+        w.start_file(rel.as_str(), opts).map_err(std::io::Error::other)?;
+        std::io::copy(&mut std::fs::File::open(workdir.join(&rel))?, &mut w)?;
+    }
+    w.finish().map_err(std::io::Error::other)
 }
 
 fn collect(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<String>, folders: &mut Vec<String>) -> std::io::Result<()> {
@@ -356,7 +409,7 @@ fn collect(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<String>,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use std::io::{Cursor, Write};
 
     fn zip_of(entries: &[(&str, &[u8])]) -> Vec<u8> {
         let mut buf = Cursor::new(Vec::new());
@@ -457,9 +510,24 @@ mod tests {
     fn latin1_text_is_converted_and_reported() {
         let latin1 = b"\\documentclass{article}\\begin{document}Espa\xf1a\\end{document}";
         let got = read_zip(&zip_of(&[("main.tex", latin1)])).unwrap();
-        let text = String::from_utf8(got.files[0].1.clone()).unwrap();
+        let text = String::from_utf8(got.files[0].1.bytes().unwrap().to_vec()).unwrap();
         assert!(text.contains("España"));
         assert_eq!(got.report.converted, vec!["main.tex"]);
+    }
+
+    #[test]
+    fn figures_and_large_text_go_to_staging_and_small_text_stays_in_memory() {
+        let big = vec![b'a'; IN_MEMORY_FILE as usize + 1];
+        let z = zip_of(&[("main.tex", DOC), ("figures/plot.png", &[0x89, 0x50, 0x4e]), ("appendix.tex", &big)]);
+        let staging = tempfile::tempdir().unwrap();
+        let got = read_zip_from(Cursor::new(z), Some(staging.path())).unwrap();
+        let find = |name: &str| &got.files.iter().find(|(p, _)| p == name).unwrap().1;
+        assert!(find("main.tex").bytes().is_some_and(|b| b == DOC));
+        for (name, len) in [("figures/plot.png", 3), ("appendix.tex", big.len())] {
+            let FileData::Staged(path) = find(name) else { panic!("{name} stayed in memory") };
+            assert_eq!(std::fs::metadata(path).unwrap().len() as usize, len);
+        }
+        assert_eq!(got.report.main_file, "main.tex");
     }
 
     #[test]
