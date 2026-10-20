@@ -8,6 +8,8 @@ Wants=network-online.target
 Type=simple
 User=galley
 Group=galley
+# Fewer glibc memory pools keep the server's memory close to what it uses. See the Dockerfile.
+Environment=MALLOC_ARENA_MAX=2
 # The binary embeds the web app. `cargo build --release` builds it.
 ExecStart=/usr/local/bin/galley --config /etc/galley/galley.toml --data-dir /var/lib/galley serve
 Restart=on-failure
