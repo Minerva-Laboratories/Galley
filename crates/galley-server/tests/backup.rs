@@ -34,6 +34,11 @@ async fn fetch(State(objects): State<Objects>, uri: Uri) -> axum::response::Resp
     }
 }
 
+async fn remove(State(objects): State<Objects>, uri: Uri) -> StatusCode {
+    objects.lock().unwrap().remove(&key_of(&uri));
+    StatusCode::NO_CONTENT
+}
+
 async fn list(State(objects): State<Objects>, Query(q): Query<BTreeMap<String, String>>) -> String {
     let prefix = q.get("prefix").cloned().unwrap_or_default();
     let mut xml = String::from(r#"<?xml version="1.0" encoding="UTF-8"?><ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>backups</Name><IsTruncated>false</IsTruncated>"#);
@@ -52,7 +57,7 @@ async fn fake_s3() -> (String, Objects) {
     let app = Router::new()
         .route(&format!("/{BUCKET}"), get(list))
         .route(&format!("/{BUCKET}/"), get(list))
-        .route(&format!("/{BUCKET}/{{*key}}"), get(fetch).put(put))
+        .route(&format!("/{BUCKET}/{{*key}}"), get(fetch).put(put).delete(remove))
         .with_state(objects.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -152,7 +157,7 @@ async fn a_failed_upload_is_reported_and_retried() {
 
 #[tokio::test]
 async fn a_restore_leaves_out_a_deleted_project_and_keeps_its_id_reserved() {
-    let (endpoint, _objects) = fake_s3().await;
+    let (endpoint, objects) = fake_s3().await;
     let live = tempfile::tempdir().unwrap();
     let db = Db::open(&live.path().join("galley.db")).unwrap();
     write_project(live.path(), "alicia", "Lorem ipsum.");
@@ -160,7 +165,8 @@ async fn a_restore_leaves_out_a_deleted_project_and_keeps_its_id_reserved() {
     let backup = Backup::from_config(&config(&endpoint), live.path()).unwrap().unwrap();
     backup.run_once(&db).await.unwrap();
 
-    // The server deletes the directory and writes this audit entry. The bucket still has the archive.
+    // A deletion whose archive is still in the bucket, as when the server stopped mid-pass.
+    let archive = objects.lock().unwrap().get("galley/projects/alicia.tar.gz").cloned().unwrap();
     std::fs::remove_dir_all(live.path().join("data/alicia")).unwrap();
     db.conn()
         .unwrap()
@@ -170,6 +176,7 @@ async fn a_restore_leaves_out_a_deleted_project_and_keeps_its_id_reserved() {
         )
         .unwrap();
     backup.run_once(&db).await.unwrap();
+    objects.lock().unwrap().insert("galley/projects/alicia.tar.gz".into(), archive);
 
     let fresh = tempfile::tempdir().unwrap();
     let report = Backup::from_config(&config(&endpoint), fresh.path()).unwrap().unwrap().restore().await.unwrap();
@@ -180,4 +187,35 @@ async fn a_restore_leaves_out_a_deleted_project_and_keeps_its_id_reserved() {
     let registry = galley_server::registry::Registry::new(fresh.path(), Default::default()).unwrap();
     let meta = registry.create("alicia").await.unwrap();
     assert_eq!(meta.id, "alicia-2", "a new project never takes over a deleted project's link");
+}
+
+#[tokio::test]
+async fn a_deleted_project_leaves_the_bucket_but_a_missing_one_does_not() {
+    let (endpoint, objects) = fake_s3().await;
+    let live = tempfile::tempdir().unwrap();
+    let db = Db::open(&live.path().join("galley.db")).unwrap();
+    write_project(live.path(), "alicia", "Lorem ipsum.");
+    write_project(live.path(), "bob", "Consectetur.");
+    let backup = Backup::from_config(&config(&endpoint), live.path()).unwrap().unwrap();
+    backup.run_once(&db).await.unwrap();
+
+    // Bob's directory vanishes with no deletion recorded, as when a volume fails to mount.
+    std::fs::remove_dir_all(live.path().join("data/bob")).unwrap();
+    std::fs::remove_dir_all(live.path().join("data/alicia")).unwrap();
+    db.conn()
+        .unwrap()
+        .execute(
+            "INSERT INTO audit_log (project_id, action, detail, created_at) VALUES ('alicia', 'project.delete', 'alicia', '2026-10-18T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+    let status = backup.run_once(&db).await.unwrap();
+    assert_eq!(status.projects_forgotten, 1);
+    let keys: Vec<String> = objects.lock().unwrap().keys().cloned().collect();
+    assert!(!keys.contains(&"galley/projects/alicia.tar.gz".to_string()), "{keys:?}");
+    assert!(keys.contains(&"galley/projects/bob.tar.gz".to_string()), "only a recorded deletion removes an archive");
+
+    assert_eq!(backup.run_once(&db).await.unwrap().projects_forgotten, 0, "a deletion is sent once");
+    let restarted = Backup::from_config(&config(&endpoint), live.path()).unwrap().unwrap();
+    assert_eq!(restarted.run_once(&db).await.unwrap().projects_forgotten, 0, "and remembered across restarts");
 }
