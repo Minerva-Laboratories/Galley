@@ -72,6 +72,8 @@ pub struct Registry {
     default_engine: EngineKind,
     meta_lock: Mutex<()>,
     open: RwLock<HashMap<String, Arc<ProjectSync>>>,
+    /// When each open project was last asked for, so idle ones can be unloaded.
+    last_used: Mutex<HashMap<String, std::time::Instant>>,
 }
 
 impl Registry {
@@ -119,6 +121,7 @@ impl Registry {
             default_engine,
             meta_lock: Mutex::new(()),
             open: RwLock::new(HashMap::new()),
+            last_used: Mutex::new(HashMap::new()),
         })
     }
 
@@ -302,6 +305,7 @@ impl Registry {
     }
 
     pub async fn open(&self, id: &str) -> Result<Arc<ProjectSync>, RegistryError> {
+        self.last_used.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(id.to_string(), std::time::Instant::now());
         if let Some(p) = self.open.read().await.get(id) {
             return Ok(Arc::clone(p));
         }
@@ -313,6 +317,38 @@ impl Registry {
         let project = ProjectSync::open(id, &dir, self.sync_config.clone())?;
         open.insert(id.to_string(), Arc::clone(&project));
         Ok(project)
+    }
+
+    /// Open projects that nobody has asked for in `idle`.
+    pub fn idle(&self, idle: std::time::Duration) -> Vec<String> {
+        let used = self.last_used.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        used.iter().filter(|(_, at)| at.elapsed() >= idle).map(|(id, _)| id.clone()).collect()
+    }
+
+    /// Write an open project to disk and drop it from memory, if nothing else holds it. A tab, a
+    /// request or a build that holds the project keeps it loaded. The next open reads it from disk.
+    pub async fn unload(&self, id: &str) -> Result<bool, RegistryError> {
+        let Some(project) = self.open.read().await.get(id).cloned() else {
+            self.last_used.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(id);
+            return Ok(false);
+        };
+        // The map's handle and this one. Any other holder is someone using the project.
+        let unused = |p: &Arc<ProjectSync>| Arc::strong_count(p) <= 2;
+        if !unused(&project) {
+            return Ok(false);
+        }
+        // Flush once outside the lock, so the slow part does not hold up other projects.
+        project.flush_now().await?;
+        let mut open = self.open.write().await;
+        if !open.get(id).is_some_and(|p| Arc::ptr_eq(p, &project)) || !unused(&project) {
+            return Ok(false);
+        }
+        // Anything written since lands now. Nobody can reach the project while the lock is held,
+        // so no second copy of it can open before this one is gone.
+        project.flush_now().await?;
+        open.remove(id);
+        self.last_used.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(id);
+        Ok(true)
     }
 
     /// Remove a project only after its live writer has stopped. Never traverse a project symlink.

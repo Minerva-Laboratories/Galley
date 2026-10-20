@@ -644,6 +644,22 @@ async fn two_editors_sync_commit_and_a_viewer_is_read_only() {
     let on_disk = std::fs::read_to_string(server.state.registry.root().join("thesis/main.tex")).unwrap();
     assert!(on_disk.contains("% Hello from Ana"));
     assert!(!on_disk.contains("SNEAKY"), "a read-only client's edit is dropped server-side");
+
+    // An open tab keeps its project loaded. Once every tab has gone, the project leaves memory,
+    // and the next tab gets the same text from disk.
+    assert_eq!(server.state.unload_idle(Duration::ZERO).await, 0, "a connected project is never unloaded");
+    drop(owner);
+    drop(viewer);
+    drop(events);
+    let unloaded = tokio::time::timeout(Duration::from_secs(5), async {
+        while server.state.unload_idle(Duration::ZERO).await == 0 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    assert!(unloaded.is_ok(), "the project unloads once its tabs close");
+    let again = Client::connect(&server.addr, &ana, "thesis", "main.tex").await.unwrap();
+    assert!(again.text().starts_with("% Hello from Ana\n"));
 }
 
 #[tokio::test]
