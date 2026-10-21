@@ -3,7 +3,8 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # Feature and fix branches get the same checks on push, before anyone opens a pull request.
+    branches: [main, 'feat/**', 'fix/**']
   pull_request:
 
 env:
