@@ -13,8 +13,9 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
-use galley_build::remote::{pack_outcome, unpack_sources, WorkerJob, JOB_HEADER};
-use galley_build::Builder;
+use galley_build::remote::{pack_outcome, unpack_sources, WorkerJob, COMPARE_DIR, JOB_HEADER};
+use galley_build::runner::LAST_DIFF_PDF;
+use galley_build::{Builder, EngineKind};
 use tokio::sync::Mutex;
 
 use crate::config::Config;
@@ -108,6 +109,9 @@ async fn compile(State(w): State<Worker>, headers: HeaderMap, body: Bytes) -> Re
     if !matches!(unpacked, Ok(Ok(()))) {
         return (StatusCode::BAD_REQUEST, "the sources could not be unpacked").into_response();
     }
+    if job.compare {
+        return compare(&w.builder, &dir, &job.project, job.request.engine).await;
+    }
 
     let result = w.builder.run(job.id, &dir, &job.main_file, &job.request, &|_| {}).await;
     tracing::info!(project = %job.project, id = job.id, engine = %result.engine, status = ?result.status, ms = result.profile.total_ms, "build finished");
@@ -132,6 +136,28 @@ async fn compile(State(w): State<Worker>, headers: HeaderMap, body: Bytes) -> Re
     let root = w.root.clone();
     tokio::task::spawn_blocking(move || prune(&root, KEEP_COPIES));
     response
+}
+
+/// Run latexdiff on the two versions that came with the sources and compile the result. A
+/// comparison that fails is answered with 422 and the reason, which the server shows as it is.
+async fn compare(builder: &Builder, dir: &Path, project: &str, engine: EngineKind) -> Response {
+    let versions = dir.join(COMPARE_DIR);
+    let read = |name: &str| std::fs::read_to_string(versions.join(name));
+    let (Ok(old), Ok(new)) = (read("old.tex"), read("new.tex")) else {
+        return (StatusCode::BAD_REQUEST, "the comparison is missing a version").into_response();
+    };
+    // The versions must not stay among the sources, or the project's own build would see them.
+    let _ = std::fs::remove_dir_all(&versions);
+    let started = std::time::Instant::now();
+    let outcome = builder.latexdiff(dir, &old, &new, engine, &|_| {}).await;
+    tracing::info!(project, ok = outcome.is_ok(), ms = started.elapsed().as_millis() as u64, "comparison finished");
+    match outcome {
+        Ok(()) => match tokio::fs::read(dir.join(".galley/build").join(LAST_DIFF_PDF)).await {
+            Ok(pdf) => ([(axum::http::header::CONTENT_TYPE, "application/pdf")], pdf).into_response(),
+            Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "the comparison PDF could not be read").into_response(),
+        },
+        Err(e) => (StatusCode::UNPROCESSABLE_ENTITY, e.to_string()).into_response(),
+    }
 }
 
 /// Remove the least recently built copies beyond `keep`.

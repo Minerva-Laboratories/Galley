@@ -49,6 +49,8 @@ pub struct AppState {
     project_lifecycle: Arc<RwLock<HashMap<String, Arc<tokio::sync::RwLock<()>>>>>,
     collab: Arc<RwLock<HashMap<String, broadcast::Sender<String>>>>,
     pub(crate) presence: Arc<std::sync::Mutex<ws::ProjectPresence>>,
+    /// Zip imports and project downloads that may run at once. Each holds up to tens of megabytes.
+    pub(crate) imports: Arc<tokio::sync::Semaphore>,
 }
 
 impl FromRef<AppState> for Store {
@@ -159,6 +161,7 @@ impl AppState {
             project_lifecycle: Arc::default(),
             collab: Arc::new(RwLock::new(HashMap::new())),
             presence: Arc::default(),
+            imports: Arc::new(tokio::sync::Semaphore::new(2)),
         })
     }
 
@@ -237,6 +240,46 @@ impl AppState {
             .await.map_err(|e| AppError::Internal(e.to_string()))?
             .map_err(|e| AppError::Internal(e.to_string()))?;
         Ok(())
+    }
+
+    /// Unload projects that nobody has used for `idle`, so memory follows the projects in use
+    /// rather than every project opened since the server started.
+    pub fn spawn_idle_unloader(&self, idle: Duration) {
+        let app = self.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                let n = app.unload_idle(idle).await;
+                if n > 0 {
+                    tracing::debug!(projects = n, "unloaded idle projects");
+                }
+            }
+        });
+    }
+
+    pub async fn unload_idle(&self, idle: Duration) -> usize {
+        let mut unloaded = 0;
+        for id in self.registry.idle(idle) {
+            let gate = self.project_gate(&id).await;
+            let _project = gate.write().await;
+            // The build queue's flush hook holds the project. A queue that is building, or that a
+            // watcher holds, keeps both loaded.
+            {
+                let mut builds = self.builds.write().await;
+                if let Some(queue) = builds.get(&id) {
+                    if Arc::strong_count(queue) > 1 || queue.is_running().await {
+                        continue;
+                    }
+                    builds.remove(&id);
+                }
+            }
+            match self.registry.unload(&id).await {
+                Ok(true) => unloaded += 1,
+                Ok(false) => {}
+                Err(e) => tracing::warn!(project = %id, error = %e, "could not unload an idle project; it stays loaded"),
+            }
+        }
+        unloaded
     }
 
     /// The build queue for a project, created on first use with a flush-before-build hook.
@@ -438,6 +481,9 @@ pub struct ServeOptions {
     pub dev: bool,
 }
 
+/// How long a project nobody uses stays in memory. Reopening one reads it from disk in a moment.
+const IDLE_UNLOAD: Duration = Duration::from_secs(10 * 60);
+
 pub async fn serve(state: AppState, opts: ServeOptions) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(opts.bind).await?;
     let addr = listener.local_addr()?;
@@ -445,6 +491,7 @@ pub async fn serve(state: AppState, opts: ServeOptions) -> std::io::Result<()> {
         Some(backup) => backup.clone().spawn(state.store.db().clone()),
         None => tracing::info!("backup is off; set [backup] bucket to copy projects to object storage"),
     }
+    state.spawn_idle_unloader(IDLE_UNLOAD);
     tracing::info!(%addr, "galley listening");
     println!("Galley is running at http://{addr}");
     if opts.dev {
@@ -456,6 +503,35 @@ pub async fn serve(state: AppState, opts: ServeOptions) -> std::io::Result<()> {
             tracing::info!("shutting down");
         })
         .await
+}
+
+#[cfg(test)]
+mod unload_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn an_idle_project_is_written_unloaded_and_reopened_with_its_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.build.sandbox = "none".into();
+        let app = AppState::new(dir.path(), &config).await.unwrap();
+        let meta = app.registry.create("Idle paper").await.unwrap();
+        let project = app.registry.open(&meta.id).await.unwrap();
+        project.doc("main.tex").await.unwrap().reseed("Edited while open").await;
+        app.builds(&meta.id).await.unwrap();
+
+        assert_eq!(app.unload_idle(Duration::ZERO).await, 0, "a project someone holds stays loaded");
+        assert_eq!(app.unload_idle(Duration::from_secs(3600)).await, 0, "a recently used project stays loaded");
+        drop(project);
+        assert_eq!(app.unload_idle(Duration::ZERO).await, 1);
+        assert_eq!(app.unload_idle(Duration::ZERO).await, 0);
+        let on_disk = std::fs::read_to_string(app.registry.root().join(&meta.id).join("main.tex")).unwrap();
+        assert_eq!(on_disk, "Edited while open", "the edit is on disk before the project leaves memory");
+
+        let reopened = app.registry.open(&meta.id).await.unwrap();
+        assert_eq!(reopened.doc("main.tex").await.unwrap().text().await, "Edited while open");
+        app.builds(&meta.id).await.unwrap();
+    }
 }
 
 #[cfg(test)]

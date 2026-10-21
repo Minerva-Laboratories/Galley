@@ -25,6 +25,17 @@ export interface DocSession {
 
 const sessions = new Map<string, DocSession>();
 let currentProject: string | null = null;
+// An away tab (see away.ts) disconnects every document and reconnects them on return. Edits keep
+// landing in IndexedDB either way.
+let docsPaused = false;
+
+export function pauseDocs(paused: boolean) {
+  docsPaused = paused;
+  for (const s of sessions.values()) {
+    if (paused) s.provider.disconnect();
+    else s.provider.connect();
+  }
+}
 
 export function openDoc(projectId: string, path: string, userName: string): DocSession {
   if (currentProject !== projectId) {
@@ -40,6 +51,7 @@ export function openDoc(projectId: string, path: string, userName: string): DocS
   const provider = new WebsocketProvider(`${wsBase()}/ws/${encodeURIComponent(projectId)}/doc`, room, ydoc, {
     params: { name: userName },
     maxBackoffTime: 5000,
+    connect: !docsPaused,
   });
   provider.awareness.setLocalStateField('user', {
     name: userName,

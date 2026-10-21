@@ -52,18 +52,34 @@ pub async fn export(State(app): State<AppState>, Path(id): Path<String>, Current
     let project = app.registry.open(&id).await?;
     let _ = project.flush_now().await;
     let dir = project.workdir().to_path_buf();
-    let bytes = tokio::task::spawn_blocking(move || crate::import::write_zip(&dir))
+    // The zip is written to disk and streamed from there, so a large project costs no memory.
+    let staging = app.registry.staging()?;
+    let path = staging.path().join("export.zip");
+    let zip = {
+        let _turn = app.imports.acquire().await.map_err(|e| AppError::Internal(e.to_string()))?;
+        let path = path.clone();
+        tokio::task::spawn_blocking(move || {
+            let out = std::io::BufWriter::new(std::fs::File::create(&path)?);
+            crate::import::write_zip_to(&dir, out)?.into_inner().map_err(|e| e.into_error())
+        })
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+        .map_err(|e| AppError::Internal(e.to_string()))?
+    };
+    drop(zip);
+    let file = tokio::fs::File::open(&path).await?;
+    let len = file.metadata().await?.len();
+    // The open file outlives its name, so the staging directory can go once the stream starts.
+    drop(staging);
     let filename = project_filename(&app.registry.meta(&id)?.name, "zip");
     app.store.audit(Some(&id), Some(&user), "project.export", None);
     Ok((
         [
             (header::CONTENT_TYPE, "application/zip".to_string()),
             (header::CONTENT_DISPOSITION, content_disposition("attachment", &filename)),
+            (header::CONTENT_LENGTH, len.to_string()),
         ],
-        bytes,
+        axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(file)),
     )
         .into_response())
 }

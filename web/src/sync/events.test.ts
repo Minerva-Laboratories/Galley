@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { connectionStatus, refreshPresence, subscribeEvents } from './events';
+import { connectionStatus, pauseEvents, refreshPresence, subscribeEvents } from './events';
 
 vi.mock('../api', () => ({ wsBase: () => 'ws://galley.test' }));
 
@@ -87,5 +87,36 @@ describe('workspace connection status', () => {
     expect(connectionStatus('online', null)).toBe('online');
     expect(connectionStatus('connecting', null)).toBe('connecting');
     expect(connectionStatus('offline', null)).toBe('offline');
+  });
+});
+
+describe('away tabs and the event socket', () => {
+  let stop: (() => void) | undefined;
+  beforeEach(() => {
+    vi.useFakeTimers();
+    Socket.all = [];
+    vi.stubGlobal('WebSocket', Socket);
+    vi.stubGlobal('window', new EventTarget());
+  });
+  afterEach(() => {
+    stop?.();
+    pauseEvents(false);
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it('an away tab closes its socket without retrying and reconnects when it comes back', () => {
+    const statuses: string[] = [];
+    stop = subscribeEvents('p', () => {}, (s) => statuses.push(s));
+    Socket.all[0]!.open();
+    pauseEvents(true);
+    expect(Socket.all[0]!.readyState).toBe(3);
+    vi.advanceTimersByTime(60_000);
+    expect(Socket.all).toHaveLength(1);
+    expect(statuses.at(-1)).toBe('offline');
+    pauseEvents(false);
+    expect(Socket.all).toHaveLength(2);
+    Socket.all[1]!.open();
+    expect(statuses.at(-1)).toBe('online');
   });
 });

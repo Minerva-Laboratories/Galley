@@ -1515,28 +1515,21 @@ impl Builder {
             result.message = Some(format!("{message}. Your last PDF is unchanged. Try the build again in a moment."));
             result
         };
-        let sources = {
-            let dir = project_dir.to_path_buf();
-            tokio::task::spawn_blocking(move || crate::remote::pack_sources(&dir)).await
-        };
-        let sources = match sources {
-            Ok(Ok(bytes)) => bytes,
-            _ => return self.finish(fail(local, "The project could not be packed for the build worker".into()), started, &out_dir),
+        let scratch = match remote_scratch(&out_dir, project_dir, &[]).await {
+            Ok(s) => s,
+            Err(_) => return self.finish(fail(local, "The project could not be packed for the build worker".into()), started, &out_dir),
         };
         let job = crate::remote::WorkerJob {
             id: local.id,
-            // The worker names its copy after this, so only plain characters travel.
-            project: project_dir
-                .file_name()
-                .map(|n| n.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect())
-                .unwrap_or_else(|| "project".into()),
+            project: worker_project_name(project_dir),
             main_file: local.main_file.clone(),
             request: req.clone(),
+            compare: false,
         };
         progress("Compiling on a build worker…".into());
         // A stopped worker takes a moment to start, and the reply carries the PDF.
         let limit = self.timeout + Duration::from_secs(60);
-        let outcome = match remote.compile(&job, sources, limit).await {
+        let outcome = match remote.compile(&job, &scratch.path().join(SOURCES), scratch.path(), limit).await {
             Ok(o) => o,
             Err(message) => {
                 tracing::warn!(error = %message, "remote build failed");
@@ -1569,17 +1562,7 @@ impl Builder {
                 result.message = Some("A newer build was requested".into());
                 return self.finish(result, started, &out_dir);
             }
-            let incoming = out_dir.join(".remote-paper.pdf");
-            let incoming_st = out_dir.join(".remote-paper.synctex.gz");
-            let written = std::fs::write(&incoming, &pdf).and_then(|()| match &outcome.synctex {
-                Some(st) => std::fs::write(&incoming_st, st),
-                None => Ok(()),
-            });
-            let published = written.and_then(|()| {
-                publish_pdf(&out_dir, &incoming, outcome.synctex.is_some().then_some(incoming_st.as_path()), &result)
-            });
-            let _ = std::fs::remove_file(&incoming);
-            let _ = std::fs::remove_file(&incoming_st);
+            let published = publish_pdf(&out_dir, &pdf, outcome.synctex.as_deref(), &result);
             match published {
                 Ok(()) => {
                     result.pdf_fresh = true;
@@ -1718,9 +1701,10 @@ impl Builder {
         })
     }
 
-    /// Tells whether `latexdiff` is available. The UI hides PDF compare when it is not.
+    /// Tells whether `latexdiff` is available. The UI hides PDF compare when it is not. With build
+    /// workers, comparisons run there, and the worker reports a missing latexdiff itself.
     pub fn latexdiff_available(&self) -> bool {
-        latexdiff_bin().is_some()
+        self.remote.is_some() || latexdiff_bin().is_some()
     }
 
     /// Make a marked-up PDF that shows the changes between two versions of a `.tex` file. First run
@@ -1736,10 +1720,13 @@ impl Builder {
         engine_kind: EngineKind,
         progress: &(dyn Fn(String) + Send + Sync),
     ) -> Result<()> {
-        let bin = latexdiff_bin().ok_or(crate::Error::LatexdiffUnavailable)?;
-        let engine = self.resolve_engine(engine_kind, progress).await?;
         let out_dir = project_dir.join(".galley").join("build");
         std::fs::create_dir_all(&out_dir)?;
+        if let Some(remote) = &self.remote {
+            return self.latexdiff_remote(remote, project_dir, &out_dir, old_text, new_text, engine_kind, progress).await;
+        }
+        let bin = latexdiff_bin().ok_or(crate::Error::LatexdiffUnavailable)?;
+        let engine = self.resolve_engine(engine_kind, progress).await?;
         let old_path = out_dir.join("galley-diff-old.tex");
         let new_path = out_dir.join("galley-diff-new.tex");
         std::fs::write(&old_path, old_text)?;
@@ -1799,6 +1786,68 @@ impl Builder {
             ))
         }
     }
+}
+
+impl Builder {
+    /// Run a comparison on a build worker: latexdiff and the compile of its output both happen
+    /// there, which keeps the heaviest job off the machine that holds the documents.
+    #[allow(clippy::too_many_arguments)]
+    async fn latexdiff_remote(
+        &self,
+        remote: &crate::remote::RemoteWorker,
+        project_dir: &Path,
+        out_dir: &Path,
+        old_text: &str,
+        new_text: &str,
+        engine_kind: EngineKind,
+        progress: &(dyn Fn(String) + Send + Sync),
+    ) -> Result<()> {
+        let old = format!("{}/old.tex", crate::remote::COMPARE_DIR);
+        let new = format!("{}/new.tex", crate::remote::COMPARE_DIR);
+        let extra = [(old.as_str(), old_text.as_bytes()), (new.as_str(), new_text.as_bytes())];
+        let scratch = remote_scratch(out_dir, project_dir, &extra).await?;
+        let job = crate::remote::WorkerJob {
+            id: 0,
+            project: worker_project_name(project_dir),
+            main_file: String::new(),
+            request: BuildRequest { engine: engine_kind, ..BuildRequest::default() },
+            compare: true,
+        };
+        progress("Comparing on a build worker…".into());
+        let incoming = scratch.path().join("diff.pdf");
+        let limit = self.timeout + Duration::from_secs(60);
+        remote.compare(&job, &scratch.path().join(SOURCES), &incoming, limit).await.map_err(crate::Error::Engine)?;
+        std::fs::rename(&incoming, out_dir.join(LAST_DIFF_PDF))?;
+        Ok(())
+    }
+}
+
+/// The sources archive inside a scratch directory, which holds the reply too and goes away when
+/// the handle drops. It sits in the build directory, so the PDF moves into place by rename.
+const SOURCES: &str = "sources.tar.gz";
+
+async fn remote_scratch(out_dir: &Path, project_dir: &Path, extra: &[(&str, &[u8])]) -> Result<tempfile::TempDir> {
+    std::fs::create_dir_all(out_dir)?;
+    let scratch = tempfile::Builder::new().prefix(".remote-").tempdir_in(out_dir)?;
+    let (dir, dest) = (project_dir.to_path_buf(), scratch.path().join(SOURCES));
+    let extra: Vec<(String, Vec<u8>)> = extra.iter().map(|(n, b)| (n.to_string(), b.to_vec())).collect();
+    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let extra: Vec<(&str, &[u8])> = extra.iter().map(|(n, b)| (n.as_str(), b.as_slice())).collect();
+        let out = std::io::BufWriter::new(std::fs::File::create(&dest)?);
+        crate::remote::pack_sources_to(&dir, &extra, out)?.into_inner().map_err(|e| e.into_error())?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| crate::Error::Engine(format!("packing task failed: {e}")))??;
+    Ok(scratch)
+}
+
+/// The worker names its copy after this, so only plain characters travel.
+fn worker_project_name(project_dir: &Path) -> String {
+    project_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect())
+        .unwrap_or_else(|| "project".into())
 }
 
 /// Find `latexdiff`. Look at the explicit override first, then at `$PATH`.

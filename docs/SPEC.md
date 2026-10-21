@@ -145,8 +145,9 @@ sessions(...) settings(...)
 ### 5.1 Sync
 - One Yjs document per text file (`Y.Text`) plus a project-level `Y.Map` for the file tree and metadata. Binary assets are not CRDT'd. They are content-addressed uploads committed to git directly.
 - Transport: WebSocket, `y-protocols` sync and awareness. The server is the authoritative store, and clients merge with peer-to-peer semantics. A reconnect is a state-vector exchange, never a "reload to see changes".
-- Persistence: the server applies updates to `yrs` in memory and appends to `doc-state.ybin` with fsync every 250 ms of activity (debounced) and on every client disconnect. It compacts on checkpoint.
+- Persistence: the server applies updates to `yrs` in memory and appends to `doc-state.ybin` with fsync every 250 ms of activity (debounced) and on every client disconnect. It compacts on checkpoint. A project that no tab, request or build has used for 10 minutes is flushed and unloaded from memory, and the next open reads it from disk.
 - Offline: IndexedDB persistence (`y-indexeddb`) in the PWA. Edits made offline merge on reconnect. The UI shows a small "offline, changes stored locally" pill. Nothing is modal.
+- Away tabs: a tab hidden for 10 minutes, or visible with no input for 30, closes its document and event sockets and stops refreshing the project list, so a host that stops idle servers can stop this one. Others see the person leave. The pill reads "Paused while you were away". The first key press, click or return to the tab reconnects at once, and anything typed meanwhile is in IndexedDB.
 
 ### 5.2 Git flush
 - A **flusher** task writes CRDT text to the working tree and commits when: 4 s of quiet after an edit, or 60 s continuous editing, or before any build. The commit author is the last editor. The message is generated (`edit: main.tex, sections/2.tex`).
@@ -227,8 +228,13 @@ workers), the publication gate and the last-good PDF. A remote build looks the s
 - The server publishes the PDF through the same path as a local build. A worker that cannot be
   reached, refuses the token or times out produces an error card that says so and that the last
   PDF is unchanged. Nothing falls back to a local compile.
-- Engine availability, `latexdiff` comparisons and submission verification still run on the
-  server, so the server and its workers must use the same image.
+- A `latexdiff` comparison is a worker job too (`compare: true` in the job). The two versions
+  travel in the archive under `.galley-compare/`, which the worker removes before it compiles. The
+  worker answers with the PDF, or with 422 and the reason, which the UI shows as it is.
+- The server writes the sources archive to a scratch directory inside `.galley/build`, streams it
+  to the worker, and saves the reply there, so neither the archive nor the PDF is held in memory.
+- Engine availability and submission verification still run on the server, so the server and its
+  workers must use the same image.
 
 ### 6.2 Sandbox
 `bwrap --ro-bind /usr /usr --ro-bind $TECTONIC_CACHE /cache --bind $PROJECT /work --unshare-all --die-with-parent --new-session --chdir /work tectonic -X compile main.tex`
@@ -502,7 +508,9 @@ Self-hosters get the complete feature set by design. That is a stated principle,
    document. The name comes from `\title{}`, then the zip's file name. The project starts with one
    commit. A clean import opens at once; a zip with several documents, or with minted, pythontex,
    `\write18` or LuaTeX code, shows a summary first so the choice is seen. Limits: 60 MB compressed,
-   300 MB expanded, 5,000 files, 25 MB per file.
+   300 MB expanded, 5,000 files, 25 MB per file. The upload, figures, data and text files over
+   2 MB are staged on the data disk, not in memory; text files staged that way keep their
+   encoding. Two imports or downloads run at once, and the rest wait their turn.
 3. **Editor**: see above.
 4. **History** (drawer and full-screen mode): a vertical timeline of checkpoints with auto-commits collapsed, a scrubber, a file diff, *Compare PDFs*, *Restore*, *Create checkpoint* and *Push to remote*.
 5. **Share** (modal): a members list with roles, a link generator (role, expiry, label), a copy button and an "Anyone with link" toggle.
@@ -687,7 +695,7 @@ volumes: { galley-data: {} }
 ```
 
 ### 9.7 Backups
-Continuous backup goes to an S3-compatible bucket (`[backup]`, off until a bucket is set; keys come from `GALLEY_BACKUP_*` or the standard `AWS_*` variables). A background pass every `interval_s` (120 s by default) uploads each project whose git refs, live editing state or settings changed, as `projects/<id>.tar.gz` without build output, and a consistent copy of the database (`VACUUM INTO`) as `galley.db.gz`, plus the first copy of each day under `daily/<date>/`. A pass never blocks a save; a failure is logged, shown in `/api/health` and retried. `galley backup run` makes one pass. `galley backup restore` rebuilds an empty data directory from the bucket and refuses one that holds work. A restore leaves out every project the audit log records as deleted and reserves its id, so a deleted paper does not come back and its link is never reused. The deleted project's archive stays in the bucket until someone removes it. Every project is a git repo, so `origin` mirrors are a further backup at no extra cost.
+Continuous backup goes to an S3-compatible bucket (`[backup]`, off until a bucket is set; keys come from `GALLEY_BACKUP_*` or the standard `AWS_*` variables). A background pass every `interval_s` (120 s by default) uploads each project whose git refs, live editing state or settings changed, as `projects/<id>.tar.gz` without build output, and a consistent copy of the database (`VACUUM INTO`) as `galley.db.gz`, plus the first copy of each day under `daily/<date>/`. A pass never blocks a save; a failure is logged, shown in `/api/health` and retried. `galley backup run` makes one pass. `galley backup restore` rebuilds an empty data directory from the bucket and refuses one that holds work. A restore leaves out every project the audit log records as deleted and reserves its id, so a deleted paper does not come back and its link is never reused. The next pass also removes a deleted project's archive from the bucket. Only the audit log's record counts as a deletion, so a project missing from disk, say because a volume did not mount, keeps its archive. Every project is a git repo, so `origin` mirrors are a further backup at no extra cost.
 
 ### 9.8 Updates
 `galley self-update` checks the signed release, swaps the binary and restarts the service. SQLite migrations run on start. Git repos never need migration.

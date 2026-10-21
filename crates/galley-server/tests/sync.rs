@@ -156,6 +156,44 @@ async fn project_downloads_use_the_current_display_name() {
     }
 }
 
+#[tokio::test]
+async fn an_exported_project_with_a_figure_imports_back_through_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = Config::default();
+    config.build.sandbox = "none".into();
+    let state = AppState::new(dir.path(), &config).await.unwrap();
+    let auth = signup(&state, "roundtrip@example.com", "Author").await;
+    let (_, meta, auth) = rest(&state, &auth, "POST", "/api/projects", Some(json!({"name":"Round trip"}))).await;
+    let id = meta["id"].as_str().unwrap();
+    let figure: Vec<u8> = (0..300_000u32).map(|i| (i * 7919 % 251) as u8).collect();
+    std::fs::create_dir_all(state.registry.root().join(id).join("figures")).unwrap();
+    std::fs::write(state.registry.root().join(id).join("figures/plot.png"), &figure).unwrap();
+
+    let get = |path: String| Request::builder().uri(path).header("cookie", auth.cookie_header().unwrap()).body(Body::empty()).unwrap();
+    let response = router(state.clone()).oneshot(get(format!("/api/projects/{id}/export"))).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let length: usize = response.headers()["content-length"].to_str().unwrap().parse().unwrap();
+    let zip = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(zip.len(), length);
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/projects/import?name=Imported%20copy")
+        .header("cookie", auth.cookie_header().unwrap())
+        .header("x-csrf-token", auth.csrf.clone().unwrap())
+        .header("content-type", "application/zip")
+        .body(Body::from(zip))
+        .unwrap();
+    let response = router(state.clone()).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body: Value = serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let copy = body["project"]["id"].as_str().unwrap();
+    assert_eq!(body["report"]["main_file"], "main.tex");
+    assert_eq!(std::fs::read(state.registry.root().join(copy).join("figures/plot.png")).unwrap(), figure);
+    let staging = dir.path().join("cache/staging");
+    assert_eq!(std::fs::read_dir(&staging).unwrap().count(), 0, "staging is cleaned up");
+}
+
 /// Create an account and return its authenticated cookies.
 async fn signup(state: &AppState, email: &str, name: &str) -> Auth {
     let (status, _, auth) = rest(
@@ -606,6 +644,22 @@ async fn two_editors_sync_commit_and_a_viewer_is_read_only() {
     let on_disk = std::fs::read_to_string(server.state.registry.root().join("thesis/main.tex")).unwrap();
     assert!(on_disk.contains("% Hello from Ana"));
     assert!(!on_disk.contains("SNEAKY"), "a read-only client's edit is dropped server-side");
+
+    // An open tab keeps its project loaded. Once every tab has gone, the project leaves memory,
+    // and the next tab gets the same text from disk.
+    assert_eq!(server.state.unload_idle(Duration::ZERO).await, 0, "a connected project is never unloaded");
+    drop(owner);
+    drop(viewer);
+    drop(events);
+    let unloaded = tokio::time::timeout(Duration::from_secs(5), async {
+        while server.state.unload_idle(Duration::ZERO).await == 0 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    assert!(unloaded.is_ok(), "the project unloads once its tabs close");
+    let again = Client::connect(&server.addr, &ana, "thesis", "main.tex").await.unwrap();
+    assert!(again.text().starts_with("% Hello from Ana\n"));
 }
 
 #[tokio::test]

@@ -13,6 +13,14 @@ export function connectionStatus(project: EventConnection, document: EventConnec
 let refreshCurrentPresence: (() => void) | undefined;
 export function refreshPresence() { refreshCurrentPresence?.(); }
 
+// An away tab (see away.ts) closes its event socket and opens it again on return.
+let eventsPaused = false;
+let pauseCurrent: ((paused: boolean) => void) | undefined;
+export function pauseEvents(paused: boolean) {
+  eventsPaused = paused;
+  pauseCurrent?.(paused);
+}
+
 export function subscribeEvents(
   projectId: string,
   onEvent: (e: ProjectEvent) => void,
@@ -24,7 +32,7 @@ export function subscribeEvents(
   let timer: ReturnType<typeof setTimeout> | undefined;
 
   const connect = () => {
-    if (closed) return;
+    if (closed || eventsPaused) return;
     clearTimeout(timer);
     onStatus('connecting');
     const current = new WebSocket(`${wsBase()}/ws/${encodeURIComponent(projectId)}/events`);
@@ -53,7 +61,7 @@ export function subscribeEvents(
     current.onerror = () => { if (socket === current) current.close(); };
   };
   const reconnect = () => {
-    if (closed) return;
+    if (closed || eventsPaused) return;
     const previous = socket;
     socket = null; // Ignore the old close callback and its reconnect timer.
     previous?.close();
@@ -62,8 +70,19 @@ export function subscribeEvents(
   const refresh = () => {
     if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'presence_refresh' }));
   };
+  const pause = (paused: boolean) => {
+    if (closed) return;
+    if (!paused) return reconnect();
+    clearTimeout(timer);
+    const previous = socket;
+    socket = null;
+    previous?.close();
+    onStatus('offline');
+  };
   refreshCurrentPresence = refresh;
+  pauseCurrent = pause;
   window.addEventListener('online', reconnect);
+  if (eventsPaused) onStatus('offline');
   connect();
 
   return () => {
@@ -71,6 +90,7 @@ export function subscribeEvents(
     clearTimeout(timer);
     window.removeEventListener('online', reconnect);
     if (refreshCurrentPresence === refresh) refreshCurrentPresence = undefined;
+    if (pauseCurrent === pause) pauseCurrent = undefined;
     socket?.close();
   };
 }

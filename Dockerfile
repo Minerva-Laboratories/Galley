@@ -69,5 +69,8 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 ENV GALLEY_SANDBOX=auto \
     GALLEY_MEMORY_MB=900 \
     GALLEY_PUBLIC_SIGNUP=false
+# glibc gives each busy thread its own memory pool and rarely hands freed memory back. With two
+# pools, six imports at once peaked at 105 MB instead of 245 MB on a 512 MB machine.
+ENV MALLOC_ARENA_MAX=2
 EXPOSE 7000
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
