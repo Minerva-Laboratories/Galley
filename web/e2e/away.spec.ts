@@ -25,7 +25,8 @@ test('an idle tab disconnects, then reconnects and keeps every edit', async ({ p
 
   await page.clock.fastForward('31:00');
   await expect(page.locator('.pill', { hasText: 'Paused while you were away' })).toBeVisible();
-  await expect.poll(() => open.size, { message: 'every socket is closed while away' }).toBe(0);
+  // Through a proxy the closing handshake can take several seconds.
+  await expect.poll(() => open.size, { message: 'every socket is closed while away', timeout: 30_000 }).toBe(0);
 
   await page.locator('.cm-content').click();
   await page.keyboard.press('Control+End');
