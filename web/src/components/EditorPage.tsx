@@ -25,8 +25,9 @@ import {
   engineAvailability,
   engineAvailabilityError,
   displayName,
+  applyFolders,
   files,
-  folders,
+  folderTicket,
   forgetFile,
   movedFile,
   navigate,
@@ -81,6 +82,7 @@ export function EditorPage({ id }: { id: string }) {
     let eventEngine: EngineKind | null = null;
     (async () => {
       try {
+        const ticket = folderTicket();
         const [meta, list, log, cps, status, dirs] = await Promise.all([
           api.getProject(id),
           api.listFiles(id),
@@ -99,7 +101,7 @@ export function EditorPage({ id }: { id: string }) {
         }).catch(() => { if (!cancelled) engineAvailabilityError.value = true; });
         projectRole.value = meta.role;
         files.value = list;
-        folders.value = dirs;
+        applyFolders(ticket, dirs);
         commits.value = log;
         checkpoints.value = cps;
         void loadCollab(id);
@@ -120,9 +122,12 @@ export function EditorPage({ id }: { id: string }) {
         if (!cancelled) setError(e instanceof ApiError ? e.message : 'Could not load the project.');
       }
     })();
-    const refreshFolders = () => void api.listFolders(id)
-      .then((list) => { if (!cancelled) folders.value = list; })
-      .catch(() => undefined);
+    const refreshFolders = () => {
+      const ticket = folderTicket();
+      void api.listFolders(id)
+        .then((list) => { if (!cancelled) applyFolders(ticket, list); })
+        .catch(() => undefined);
+    };
     const unsubscribe = subscribeEvents(id, (ev) => {
       if (['file_created', 'file_deleted', 'file_renamed', 'files_changed'].includes(ev.type)) refreshFolders();
       switch (ev.type) {

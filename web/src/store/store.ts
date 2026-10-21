@@ -179,6 +179,14 @@ export const isAdmin = computed(() => projectRole.value === 'admin');
 export const sharingNonce = signal<number>(0);
 export const files = signal<FileEntry[]>([]);
 export const folders = signal<string[]>([]);
+// Several places fetch the folder list, and over a slow link their replies can arrive out of
+// order. Take a ticket before fetching; only the newest ticket may write, so an old reply never
+// removes a folder created since. A local change takes a ticket too, which retires older fetches.
+let folderRequest = 0;
+export function folderTicket(): number { return ++folderRequest; }
+export function applyFolders(ticket: number, list: string[]) {
+  if (ticket === folderRequest) folders.value = list;
+}
 export const openTabs = signal<string[]>([]);
 export const currentFile = signal<string | null>(null);
 export const drawer = signal<DrawerName | null>('files');
@@ -304,7 +312,7 @@ export function resetProject() {
   comments.value = [];
   suggestions.value = [];
   files.value = [];
-  folders.value = [];
+  applyFolders(folderTicket(), []);
   openTabs.value = [];
   currentFile.value = null;
   peers.value = [];

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { api, ApiError, type FileEntry } from '../api';
 import { saveSettings } from '../store/settings';
-import { canEdit, currentFile, files, folders, forgetFile, movedFile, openFile, openTabs, project, showToast } from '../store/store';
+import { applyFolders, canEdit, currentFile, files, folders, folderTicket, forgetFile, movedFile, openFile, openTabs, project, showToast } from '../store/store';
 import { closeDoc } from '../sync/docs';
 import { fileTree } from '../util/fileTree';
 import { FileIcon } from './FileIcon';
@@ -20,10 +20,11 @@ function message(e: unknown, fallback: string): string {
 
 async function refreshFiles(id: string) {
   try {
+    const ticket = folderTicket();
     const [list, dirs] = await Promise.all([api.listFiles(id), api.listFolders(id)]);
     if (project.value?.id !== id) return;
     files.value = list;
-    folders.value = dirs;
+    applyFolders(ticket, dirs);
   } catch {
     // The next event or a reload brings the list back in line.
   }
@@ -235,7 +236,7 @@ export function FilesDrawer() {
         forgetFile(file);
         closeDoc(file);
       }
-      folders.value = folders.value.filter((folder) => folder !== path && !folder.startsWith(`${path}/`));
+      applyFolders(folderTicket(), folders.value.filter((folder) => folder !== path && !folder.startsWith(`${path}/`)));
       setSelectedFolder((folder) => folder === path || folder.startsWith(`${path}/`) ? '' : folder);
       setCollapsed((old) => new Set([...old].filter((folder) => folder !== path && !folder.startsWith(`${path}/`))));
       showToast(`Deleted ${path} and its contents.`);
