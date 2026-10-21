@@ -254,6 +254,30 @@ impl Registry {
         }
         let id = self.reserve_id(&base)?;
         let dir = self.root.join(&id);
+        match self.populate_imported(&id, &dir, name, files, folders, main_file).await {
+            Ok(meta) => Ok(meta),
+            Err(e) => {
+                // A half-written import, say on a full disk, would stay as a project nobody owns.
+                // Before its settings are written it is not a project yet, and nothing has it open.
+                if dir.exists() && self.delete(&id).await.is_err() {
+                    if let Err(cleanup) = std::fs::remove_dir_all(&dir) {
+                        tracing::warn!(project = %id, error = %cleanup, "could not remove a failed import");
+                    }
+                }
+                Err(e)
+            }
+        }
+    }
+
+    async fn populate_imported(
+        &self,
+        id: &str,
+        dir: &Path,
+        name: &str,
+        files: Vec<(String, crate::import::FileData)>,
+        folders: Vec<String>,
+        main_file: &str,
+    ) -> Result<ProjectMeta, RegistryError> {
         std::fs::create_dir_all(dir.join(".galley"))?;
         let count = files.len();
         let mut text_paths = Vec::new();
@@ -284,16 +308,16 @@ impl Registry {
             submitted_checkpoint: None,
             literature: false,
             figure_cache: true,
-            id: id.clone(),
+            id: id.to_string(),
             name: name.to_string(),
             main_file: main_file.to_string(),
             engine: self.default_engine,
             created_at: now,
             updated_at: now,
         };
-        write_meta(&dir, &meta)?;
+        write_meta(dir, &meta)?;
 
-        let project = self.open(&id).await?;
+        let project = self.open(id).await?;
         for folder in &folders {
             project.create_folder(folder)?;
         }
@@ -510,6 +534,19 @@ mod tests {
             .collect();
         assert_eq!(files, vec!["main.tex", "refs.bib"]);
         assert!(reg.open("nope").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_failed_import_leaves_no_project_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = Registry::new(dir.path(), SyncConfig::default()).unwrap();
+        // `notes` is a file, so `notes/today.tex` cannot be written: the import fails halfway.
+        let files = vec![("main.tex".to_string(), b"\\documentclass{article}".to_vec()), ("notes".to_string(), b"x".to_vec()), ("notes/today.tex".to_string(), b"y".to_vec())];
+        assert!(reg.create_imported("Broken import", files, "main.tex").await.is_err());
+        assert!(reg.list().unwrap().is_empty());
+        assert!(!reg.root().join("broken-import").exists());
+        let next = reg.create("Broken import").await.unwrap();
+        assert_eq!(next.id, "broken-import-2", "the failed import's id stays retired");
     }
 
     #[tokio::test]
