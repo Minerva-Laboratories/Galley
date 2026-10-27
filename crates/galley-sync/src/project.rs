@@ -4,6 +4,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use galley_history::{Author, Checkpoint, CommitInfo, FileDiff, Repo, Side};
@@ -61,6 +62,8 @@ pub enum Housekeeping {
     Edited(String),
     /// A client disconnected. Do an fsync now and a flush soon.
     Disconnected,
+    /// Stop writing permanently before a project is removed.
+    Shutdown(oneshot::Sender<()>),
     /// Flush immediately and report the commit. Builds and tests use this. A message replaces the
     /// default `edit: …`, so History shows a deliberate operation as one.
     FlushNow(Option<String>, oneshot::Sender<Result<Option<CommitInfo>>>),
@@ -76,6 +79,7 @@ pub enum ProjectEvent {
     FileRenamed { from: String, to: String },
     /// Uploads and other bulk changes. Listeners fetch the file list again.
     FilesChanged,
+    ProjectDeleted,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -100,6 +104,9 @@ pub struct ProjectSync {
     housekeeping: mpsc::UnboundedSender<Housekeeping>,
     events: broadcast::Sender<ProjectEvent>,
     last_editor: Mutex<Option<String>>,
+    deleted: AtomicBool,
+    folders_gate: Mutex<()>,
+    mutations: tokio::sync::Mutex<()>,
 }
 
 impl std::fmt::Debug for ProjectSync {
@@ -123,9 +130,38 @@ impl ProjectSync {
             housekeeping: hk_tx,
             events,
             last_editor: Mutex::new(None),
+            deleted: AtomicBool::new(false),
+            folders_gate: Mutex::new(()),
+            mutations: tokio::sync::Mutex::new(()),
         });
         tokio::spawn(housekeeper(Arc::downgrade(&project), hk_rx, config));
         Ok(project)
+    }
+
+    pub fn is_deleted(&self) -> bool {
+        self.deleted.load(Ordering::Acquire)
+    }
+
+    fn ensure_active(&self) -> Result<()> {
+        if self.is_deleted() { return Err(Error::NotFound(self.id.clone())); }
+        Ok(())
+    }
+
+    /// Drain the housekeeper and permanently invalidate any handles held by sockets.
+    pub async fn shutdown(&self) -> Result<()> {
+        let _mutation = self.mutations.lock().await;
+        let docs = self.docs.write().await;
+        {
+            let _folders = self.folders_gate.lock().expect("folders gate poisoned");
+            if self.deleted.swap(true, Ordering::AcqRel) { return Ok(()); }
+        }
+        drop(docs);
+        let (tx, rx) = oneshot::channel();
+        self.housekeeping.send(Housekeeping::Shutdown(tx))
+            .map_err(|_| Error::Io(std::io::Error::other("housekeeper stopped")))?;
+        let _ = rx.await;
+        let _ = self.events.send(ProjectEvent::ProjectDeleted);
+        Ok(())
     }
 
     pub fn id(&self) -> &str {
@@ -154,6 +190,7 @@ impl ProjectSync {
 
     /// The live document for a text file, loading it on first use.
     pub async fn doc(&self, rel_path: &str) -> Result<Arc<DocHandle>> {
+        self.ensure_active()?;
         let rel = clean_rel_path(rel_path).ok_or_else(|| Error::InvalidPath(rel_path.into()))?;
         if !is_text_path(&rel) {
             return Err(Error::NotText(rel));
@@ -162,6 +199,7 @@ impl ProjectSync {
             return Ok(Arc::clone(doc));
         }
         let mut docs = self.docs.write().await;
+        self.ensure_active()?;
         if let Some(doc) = docs.get(&rel) {
             return Ok(Arc::clone(doc));
         }
@@ -177,6 +215,8 @@ impl ProjectSync {
 
     /// Create an empty text file (and its document). Fails if it already exists.
     pub async fn create_file(&self, rel_path: &str) -> Result<FileEntry> {
+        let _mutation = self.mutations.lock().await;
+        self.ensure_active()?;
         let rel = clean_rel_path(rel_path).ok_or_else(|| Error::InvalidPath(rel_path.into()))?;
         if !is_text_path(&rel) {
             return Err(Error::NotText(rel));
@@ -223,6 +263,8 @@ impl ProjectSync {
     /// Add or replace a file with uploaded bytes and commit. Text files go through their document,
     /// so open editors show the new content as an ordinary edit.
     pub async fn put_file(&self, rel_path: &str, bytes: &[u8], replace: bool, author: &str) -> Result<FileEntry> {
+        let _mutation = self.mutations.lock().await;
+        self.ensure_active()?;
         let rel = clean_rel_path(rel_path).ok_or_else(|| Error::InvalidPath(rel_path.into()))?;
         let full = self.workdir.join(&rel);
         if full.is_dir() {
@@ -251,6 +293,8 @@ impl ProjectSync {
     /// it. A browser that holds the history offline then merges into an empty file. It does not
     /// bring the file back.
     pub async fn delete_file(&self, rel_path: &str, author: &str) -> Result<()> {
+        let _mutation = self.mutations.lock().await;
+        self.ensure_active()?;
         let rel = clean_rel_path(rel_path).ok_or_else(|| Error::InvalidPath(rel_path.into()))?;
         let full = self.workdir.join(&rel);
         if !full.is_file() {
@@ -271,6 +315,8 @@ impl ProjectSync {
     /// Rename or move a file and commit. Text moves through the documents. The new document takes
     /// the content. The old document is emptied, as on a delete.
     pub async fn rename_file(&self, from: &str, to: &str, author: &str) -> Result<String> {
+        let _mutation = self.mutations.lock().await;
+        self.ensure_active()?;
         let from = clean_rel_path(from).ok_or_else(|| Error::InvalidPath(from.into()))?;
         let to = clean_rel_path(to).ok_or_else(|| Error::InvalidPath(to.into()))?;
         let (src, dst) = (self.workdir.join(&from), self.workdir.join(&to));
@@ -321,6 +367,8 @@ impl ProjectSync {
 
     /// Create a project directory. Existing directories are accepted so clients can retry safely.
     pub fn create_folder(&self, path: &str) -> Result<String> {
+        let _folders = self.folders_gate.lock().expect("folders gate poisoned");
+        self.ensure_active()?;
         let rel = clean_folder_path(path)?;
         let mut current = self.workdir.clone();
         for part in rel.split('/') {
@@ -336,6 +384,38 @@ impl ProjectSync {
         Ok(rel)
     }
 
+    /// Delete an entire visible directory as one history operation. Links are never followed.
+    pub async fn delete_folder(&self, path: &str, author: &str) -> Result<Vec<String>> {
+        let _mutation = self.mutations.lock().await;
+        self.ensure_active()?;
+        let rel = clean_folder_path(path)?;
+        let mut full = self.workdir.clone();
+        for part in rel.split('/') {
+            full.push(part);
+            let meta = std::fs::symlink_metadata(&full).map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound { Error::NotFound(rel.clone()) } else { e.into() }
+            })?;
+            if !meta.file_type().is_dir() { return Err(Error::InvalidPath(rel)); }
+        }
+        self.flush_now().await?;
+        let prefix = format!("{rel}/");
+        let paths: Vec<String> = self.list_files()?.into_iter()
+            .filter(|f| f.path.starts_with(&prefix)).map(|f| f.path).collect();
+        // Reseed before removal so old CRDT logs cannot restore deleted text on the next open.
+        for path in &paths {
+            if is_text_path(path) { self.doc(path).await?.reseed("").await; }
+        }
+        {
+            let _folders = self.folders_gate.lock().expect("folders gate poisoned");
+            std::fs::remove_dir_all(&full)?;
+        }
+        self.set_last_editor(author);
+        self.flush_with(Some(format!("delete folder: {rel}"))).await?;
+        for path in &paths { let _ = self.events.send(ProjectEvent::FileDeleted { path: path.clone() }); }
+        let _ = self.events.send(ProjectEvent::FilesChanged);
+        Ok(paths)
+    }
+
     /// Write every open document to the working tree and commit. Returns the commit, or `None`
     /// when the tree already matched HEAD.
     pub async fn flush_now(&self) -> Result<Option<CommitInfo>> {
@@ -344,6 +424,7 @@ impl ProjectSync {
 
     /// `flush_now` with a commit message of the caller's choosing.
     pub async fn flush_with(&self, message: Option<String>) -> Result<Option<CommitInfo>> {
+        self.ensure_active()?;
         let (tx, rx) = oneshot::channel();
         self.housekeeping
             .send(Housekeeping::FlushNow(message, tx))
@@ -419,6 +500,8 @@ impl ProjectSync {
     /// every live document that changed. Collaborators converge on the restored text, and the next
     /// auto-commit does not overwrite it. Returns the new commit.
     pub async fn restore(&self, rev: &str, author: Author, label: &str) -> Result<Option<CommitInfo>> {
+        let _mutation = self.mutations.lock().await;
+        self.ensure_active()?;
         // Land whatever is in flight so nothing is lost, then restore on top of it.
         self.flush_now().await?;
         let repo = Arc::clone(&self.repo);
@@ -576,6 +659,10 @@ async fn housekeeper(
                     };
                     let _ = reply.send(result);
                 }
+                Some(Housekeeping::Shutdown(reply)) => {
+                    let _ = reply.send(());
+                    break;
+                }
                 None => break,
             },
             _ = sleep => {
@@ -649,7 +736,7 @@ fn walk(root: &Path, dir: &Path, out: &mut BTreeSet<FileEntry>) -> std::io::Resu
         if name == ".git" || name == ".galley" || name.ends_with(".galley-tmp") {
             continue;
         }
-        let meta = entry.metadata()?;
+        let meta = std::fs::symlink_metadata(&path)?;
         if meta.is_dir() {
             walk(root, &path, out)?;
         } else if meta.is_file() {

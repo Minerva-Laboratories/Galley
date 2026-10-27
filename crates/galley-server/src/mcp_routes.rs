@@ -517,6 +517,8 @@ async fn wait_for_build(
 }
 
 async fn propose_patch(app: &AppState, project: &str, user: &User, args: &Value) -> Result<String, ToolError> {
+    let gate = app.project_gate(project).await;
+    let _operation = gate.read().await;
     app.require(user, project, Role::can_suggest, "proposing edits").await?;
     let rel = text_path(args)?;
     let summary = arg_str(args, "summary").ok_or_else(|| ToolError::Failed("`summary` is required.".into()))?;
@@ -784,6 +786,25 @@ mod engine_wait_tests {
             finished_at: chrono::Utc::now(),
             message: None,
         }
+    }
+
+    #[tokio::test]
+    async fn proposal_log_writer_waits_for_deletion_and_cannot_recreate_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = crate::config::Config::default();
+        config.build.sandbox = "none".into();
+        let app = AppState::new(dir.path(), &config).await.unwrap();
+        let user = app.store.create_user("proposal@example.com", "Writer", "supersecret", false).unwrap();
+        let meta = app.registry.create("Proposal deletion").await.unwrap();
+        app.store.set_member(&meta.id, &user.id, Role::Admin).unwrap();
+        let gate = app.project_gate(&meta.id).await;
+        let deleting = gate.write().await;
+        let args = json!({ "path": "main.tex", "summary": "edit", "edits": [{ "find": "missing", "replace": "new" }] });
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(30), propose_patch(&app, &meta.id, &user, &args)).await.is_err());
+        drop(deleting);
+        app.delete_project(&meta.id).await.unwrap();
+        assert!(propose_patch(&app, &meta.id, &user, &args).await.is_err());
+        assert!(!app.registry.root().join(&meta.id).exists());
     }
 
     #[tokio::test]

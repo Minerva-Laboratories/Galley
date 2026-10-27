@@ -181,6 +181,8 @@ pub async fn latexdiff(
     CurrentUser(user): CurrentUser,
     Json(body): Json<CompareBody>,
 ) -> Result<Json<Value>, AppError> {
+    let gate = app.project_gate(&id).await;
+    let _operation = gate.read().await;
     app.require(&user, &id, Role::can_compile, "comparing versions")
         .await?;
     if !app.builder.latexdiff_available() {

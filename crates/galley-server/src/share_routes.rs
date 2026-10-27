@@ -77,6 +77,29 @@ pub async fn invite(
     })
     .await?
     .ok_or_else(|| AppError::NotFound(format!("No account for {}. They need to sign in once before you can add them.", body.email.trim())))?;
+    // An invite is a membership addition, never a hidden role change. In particular, retrying
+    // an invite must not downgrade an existing admin (including the project's only admin).
+    let store = app.store.clone();
+    let (pid, uid) = (id.clone(), invitee.id.clone());
+    let (existing_role, pending) = blocking(move || -> Result<_, AppError> {
+        Ok((
+            store.role_of(&pid, &uid).map_err(|e| AppError::Internal(e.to_string()))?,
+            store.open_requests(&pid).map_err(|e| AppError::Internal(e.to_string()))?
+                .into_iter().find(|r| r.kind == "invite" && r.target_id.as_deref() == Some(uid.as_str())),
+        ))
+    }).await?;
+    if let Some(existing_role) = existing_role {
+        if existing_role != role {
+            return Err(AppError::Conflict(format!("{} is already a member as {}. Change their role in the member list.", invitee.name, existing_role.as_str())));
+        }
+        return Ok((StatusCode::OK, Json(json!({ "status": "applied" }))));
+    }
+    if let Some(pending) = pending {
+        if pending.payload.get("role").and_then(Value::as_str) != Some(role.as_str()) {
+            return Err(AppError::Conflict("An invitation for this person is already waiting for admin approval. Review the pending change first.".into()));
+        }
+        return Ok((StatusCode::OK, Json(json!({ "status": "pending", "request_id": pending.id }))));
+    }
     let summary = format!("Add {} as {}", invitee.name, role.as_str());
     let payload = json!({ "email": invitee.email, "role": role.as_str() });
     let out = govern(&app, &user, &id, "invite", Some(invitee.id.clone()), payload, summary).await?;

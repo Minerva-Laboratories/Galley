@@ -61,12 +61,19 @@ pub enum RegistryError {
     Meta(#[from] toml::de::Error),
 }
 
+/// Under the data dir, one empty file per project id ever used, so no id is handed out twice.
+pub const RESERVED_IDS_DIR: &str = ".project-ids";
+
 pub struct Registry {
     root: PathBuf,
+    deleted_root: PathBuf,
+    ids_root: PathBuf,
     sync_config: SyncConfig,
     default_engine: EngineKind,
     meta_lock: Mutex<()>,
     open: RwLock<HashMap<String, Arc<ProjectSync>>>,
+    /// When each open project was last asked for, so idle ones can be unloaded.
+    last_used: Mutex<HashMap<String, std::time::Instant>>,
 }
 
 impl Registry {
@@ -77,17 +84,75 @@ impl Registry {
     pub fn new_with_engine(data_dir: &Path, sync_config: SyncConfig, default_engine: EngineKind) -> std::io::Result<Registry> {
         let root = data_dir.join("data");
         std::fs::create_dir_all(&root)?;
+        // Keep interrupted cleanup outside the live project tree. Renaming into this directory
+        // makes removal atomic for readers even when wiping a protected file fails halfway.
+        let deleted_root = data_dir.join(".deleted-projects");
+        match std::fs::create_dir(&deleted_root) {
+            Ok(()) => {},
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {},
+            Err(e) => return Err(e),
+        }
+        if !std::fs::symlink_metadata(&deleted_root)?.file_type().is_dir() {
+            return Err(std::io::Error::other("deleted-projects storage must be a directory, not a symlink"));
+        }
+        for entry in std::fs::read_dir(&deleted_root)? {
+            let entry = entry?;
+            let result = if entry.file_type()?.is_dir() {
+                std::fs::remove_dir_all(entry.path())
+            } else {
+                std::fs::remove_file(entry.path())
+            };
+            if let Err(e) = result { tracing::warn!(path = %entry.path().display(), error = %e, "will retry deleted project cleanup on next startup"); }
+        }
+        let ids_root = data_dir.join(RESERVED_IDS_DIR);
+        match std::fs::create_dir(&ids_root) {
+            Ok(()) => {},
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {},
+            Err(e) => return Err(e),
+        }
+        if !std::fs::symlink_metadata(&ids_root)?.file_type().is_dir() {
+            return Err(std::io::Error::other("project-id storage must be a directory, not a symlink"));
+        }
         Ok(Registry {
             root,
+            deleted_root,
+            ids_root,
             sync_config,
             default_engine,
             meta_lock: Mutex::new(()),
             open: RwLock::new(HashMap::new()),
+            last_used: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Project links are identities: never reuse a retired slug, even during database cleanup
+    /// or after a restart. create_new also makes concurrent imports choose distinct ids.
+    fn reserve_id(&self, base: &str) -> Result<String, RegistryError> {
+        let mut id = base.to_string();
+        let mut n = 2;
+        loop {
+            if !self.root.join(&id).exists() {
+                match std::fs::OpenOptions::new().write(true).create_new(true).open(self.ids_root.join(&id)) {
+                    Ok(_) => return Ok(id),
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {},
+                    Err(e) => return Err(e.into()),
+                }
+            }
+            id = format!("{base}-{n}");
+            n += 1;
+        }
     }
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// A scratch directory on the same disk as the projects, so a staged file moves into a
+    /// project by rename. It is removed when the handle drops.
+    pub fn staging(&self) -> std::io::Result<tempfile::TempDir> {
+        let dir = self.root.parent().unwrap_or(&self.root).join("cache").join("staging");
+        std::fs::create_dir_all(&dir)?;
+        tempfile::tempdir_in(dir)
     }
 
     pub fn list(&self) -> Result<Vec<ProjectMeta>, RegistryError> {
@@ -125,12 +190,7 @@ impl Registry {
         if base.is_empty() {
             return Err(RegistryError::BadName);
         }
-        let mut id = base.clone();
-        let mut n = 2;
-        while self.root.join(&id).exists() {
-            id = format!("{base}-{n}");
-            n += 1;
-        }
+        let id = self.reserve_id(&base)?;
         let dir = self.root.join(&id);
         std::fs::create_dir_all(dir.join(".galley"))?;
         for (path, text) in template.files {
@@ -176,13 +236,14 @@ impl Registry {
         files: Vec<(String, Vec<u8>)>,
         main_file: &str,
     ) -> Result<ProjectMeta, RegistryError> {
+        let files = files.into_iter().map(|(p, b)| (p, crate::import::FileData::Bytes(b))).collect();
         self.create_imported_with_folders(name, files, Vec::new(), main_file).await
     }
 
     pub async fn create_imported_with_folders(
         &self,
         name: &str,
-        files: Vec<(String, Vec<u8>)>,
+        files: Vec<(String, crate::import::FileData)>,
         folders: Vec<String>,
         main_file: &str,
     ) -> Result<ProjectMeta, RegistryError> {
@@ -191,22 +252,49 @@ impl Registry {
         if base.is_empty() {
             return Err(RegistryError::BadName);
         }
-        let mut id = base.clone();
-        let mut n = 2;
-        while self.root.join(&id).exists() {
-            id = format!("{base}-{n}");
-            n += 1;
-        }
+        let id = self.reserve_id(&base)?;
         let dir = self.root.join(&id);
+        match self.populate_imported(&id, &dir, name, files, folders, main_file).await {
+            Ok(meta) => Ok(meta),
+            Err(e) => {
+                // A half-written import, say on a full disk, would stay as a project nobody owns.
+                // Before its settings are written it is not a project yet, and nothing has it open.
+                if dir.exists() && self.delete(&id).await.is_err() {
+                    if let Err(cleanup) = std::fs::remove_dir_all(&dir) {
+                        tracing::warn!(project = %id, error = %cleanup, "could not remove a failed import");
+                    }
+                }
+                Err(e)
+            }
+        }
+    }
+
+    async fn populate_imported(
+        &self,
+        id: &str,
+        dir: &Path,
+        name: &str,
+        files: Vec<(String, crate::import::FileData)>,
+        folders: Vec<String>,
+        main_file: &str,
+    ) -> Result<ProjectMeta, RegistryError> {
         std::fs::create_dir_all(dir.join(".galley"))?;
         let count = files.len();
         let mut text_paths = Vec::new();
-        for (path, bytes) in &files {
+        for (path, data) in &files {
             let file = dir.join(path);
             if let Some(parent) = file.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            std::fs::write(file, bytes)?;
+            match data {
+                crate::import::FileData::Bytes(bytes) => std::fs::write(file, bytes)?,
+                // Staging sits in the data dir, so this is normally a rename and copies nothing.
+                crate::import::FileData::Staged(from) => {
+                    if std::fs::rename(from, &file).is_err() {
+                        std::fs::copy(from, &file)?;
+                    }
+                }
+            }
             if galley_sync::paths::is_text_path(path) {
                 text_paths.push(path.clone());
             }
@@ -220,16 +308,16 @@ impl Registry {
             submitted_checkpoint: None,
             literature: false,
             figure_cache: true,
-            id: id.clone(),
+            id: id.to_string(),
             name: name.to_string(),
             main_file: main_file.to_string(),
             engine: self.default_engine,
             created_at: now,
             updated_at: now,
         };
-        write_meta(&dir, &meta)?;
+        write_meta(dir, &meta)?;
 
-        let project = self.open(&id).await?;
+        let project = self.open(id).await?;
         for folder in &folders {
             project.create_folder(folder)?;
         }
@@ -241,17 +329,78 @@ impl Registry {
     }
 
     pub async fn open(&self, id: &str) -> Result<Arc<ProjectSync>, RegistryError> {
+        self.last_used.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(id.to_string(), std::time::Instant::now());
         if let Some(p) = self.open.read().await.get(id) {
             return Ok(Arc::clone(p));
         }
-        let dir = self.dir_for(id)?;
         let mut open = self.open.write().await;
         if let Some(p) = open.get(id) {
             return Ok(Arc::clone(p));
         }
+        let dir = self.dir_for(id)?;
         let project = ProjectSync::open(id, &dir, self.sync_config.clone())?;
         open.insert(id.to_string(), Arc::clone(&project));
         Ok(project)
+    }
+
+    /// Open projects that nobody has asked for in `idle`.
+    pub fn idle(&self, idle: std::time::Duration) -> Vec<String> {
+        let used = self.last_used.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        used.iter().filter(|(_, at)| at.elapsed() >= idle).map(|(id, _)| id.clone()).collect()
+    }
+
+    /// Write an open project to disk and drop it from memory, if nothing else holds it. A tab, a
+    /// request or a build that holds the project keeps it loaded. The next open reads it from disk.
+    pub async fn unload(&self, id: &str) -> Result<bool, RegistryError> {
+        let Some(project) = self.open.read().await.get(id).cloned() else {
+            self.last_used.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(id);
+            return Ok(false);
+        };
+        // The map's handle and this one. Any other holder is someone using the project.
+        let unused = |p: &Arc<ProjectSync>| Arc::strong_count(p) <= 2;
+        if !unused(&project) {
+            return Ok(false);
+        }
+        // Flush once outside the lock, so the slow part does not hold up other projects.
+        project.flush_now().await?;
+        let mut open = self.open.write().await;
+        if !open.get(id).is_some_and(|p| Arc::ptr_eq(p, &project)) || !unused(&project) {
+            return Ok(false);
+        }
+        // Anything written since lands now. Nobody can reach the project while the lock is held,
+        // so no second copy of it can open before this one is gone.
+        project.flush_now().await?;
+        open.remove(id);
+        self.last_used.lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(id);
+        Ok(true)
+    }
+
+    /// Remove a project only after its live writer has stopped. Never traverse a project symlink.
+    pub async fn delete(&self, id: &str) -> Result<(), RegistryError> {
+        let mut open = self.open.write().await;
+        let dir = self.dir_for(id)?;
+        if !std::fs::symlink_metadata(&dir)?.file_type().is_dir() {
+            return Err(RegistryError::NotFound(id.to_string()));
+        }
+        // Older projects predate reservations. Retain their identity before the live path moves.
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(self.ids_root.join(id)) {
+            Ok(_) => {},
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {},
+            Err(e) => return Err(e.into()),
+        }
+        if let Some(project) = open.remove(id) { project.shutdown().await?; }
+        let retired = self.deleted_root.join(format!("{id}-{}", crate::auth::new_id()));
+        {
+            let _guard = self.meta_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::fs::rename(dir, &retired)?;
+        }
+        drop(open);
+        // The project is gone from the live namespace. A failed disk cleanup must not leave a
+        // half-deleted project visible; startup retries retired directories.
+        if let Err(e) = std::fs::remove_dir_all(&retired) {
+            tracing::warn!(path = %retired.display(), error = %e, "will retry deleted project cleanup on next startup");
+        }
+        Ok(())
     }
 
     /// Read-modify-write the project's metadata file.
@@ -385,6 +534,72 @@ mod tests {
             .collect();
         assert_eq!(files, vec!["main.tex", "refs.bib"]);
         assert!(reg.open("nope").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_failed_import_leaves_no_project_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = Registry::new(dir.path(), SyncConfig::default()).unwrap();
+        // `notes` is a file, so `notes/today.tex` cannot be written: the import fails halfway.
+        let files = vec![("main.tex".to_string(), b"\\documentclass{article}".to_vec()), ("notes".to_string(), b"x".to_vec()), ("notes/today.tex".to_string(), b"y".to_vec())];
+        assert!(reg.create_imported("Broken import", files, "main.tex").await.is_err());
+        assert!(reg.list().unwrap().is_empty());
+        assert!(!reg.root().join("broken-import").exists());
+        let next = reg.create("Broken import").await.unwrap();
+        assert_eq!(next.id, "broken-import-2", "the failed import's id stays retired");
+    }
+
+    #[tokio::test]
+    async fn failed_retirement_leaves_project_reopenable_and_startup_retries_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = Registry::new(dir.path(), SyncConfig::default()).unwrap();
+        let meta = reg.create("Protected project").await.unwrap();
+        let original = reg.open(&meta.id).await.unwrap();
+        // A failure to rename must leave the original project intact and able to reopen.
+        std::fs::remove_dir(&reg.deleted_root).unwrap();
+        std::fs::write(&reg.deleted_root, "blocked").unwrap();
+        assert!(reg.delete(&meta.id).await.is_err());
+        assert!(original.is_deleted());
+        let reopened = reg.open(&meta.id).await.unwrap();
+        assert!(!reopened.is_deleted());
+        assert!(reopened.exists("main.tex"));
+        assert!(!reopened.doc("main.tex").await.unwrap().text().await.is_empty());
+        std::fs::remove_file(&reg.deleted_root).unwrap();
+        std::fs::create_dir(&reg.deleted_root).unwrap();
+        reg.delete(&meta.id).await.unwrap();
+        assert!(reg.list().unwrap().is_empty());
+        assert_eq!(std::fs::read_dir(&reg.deleted_root).unwrap().count(), 0);
+        // Reproduce an interrupted cleanup, including a symlink to unrelated data.
+        let retired = reg.deleted_root.join("leftover");
+        std::fs::create_dir(&retired).unwrap();
+        std::fs::write(retired.join("partial.tex"), "leftover").unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("keep.tex"), "keep").unwrap();
+        #[cfg(unix)] {
+            std::os::unix::fs::symlink(outside.path(), retired.join("linked")).unwrap();
+        }
+        let restarted = Registry::new(dir.path(), SyncConfig::default()).unwrap();
+        let replacement = restarted.create("Protected project").await.unwrap();
+        assert_ne!(replacement.id, meta.id, "retired project ids must never be reused");
+        assert_eq!(std::fs::read_dir(&restarted.deleted_root).unwrap().count(), 0);
+        assert!(outside.path().join("keep.tex").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn deletion_rejects_traversal_and_project_symlinks() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let reg = Registry::new(dir.path(), SyncConfig::default()).unwrap();
+        let external = Registry::new(outside.path(), SyncConfig::default()).unwrap();
+        let meta = external.create("External paper").await.unwrap();
+        let target = external.root().join(&meta.id);
+        symlink(&target, reg.root().join("linked")).unwrap();
+        assert!(reg.delete("linked").await.is_err());
+        assert!(reg.delete("../external-paper").await.is_err());
+        assert!(target.join("main.tex").exists());
+        assert_eq!(external.list().unwrap().len(), 1);
     }
 
     #[tokio::test]

@@ -156,6 +156,44 @@ async fn project_downloads_use_the_current_display_name() {
     }
 }
 
+#[tokio::test]
+async fn an_exported_project_with_a_figure_imports_back_through_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = Config::default();
+    config.build.sandbox = "none".into();
+    let state = AppState::new(dir.path(), &config).await.unwrap();
+    let auth = signup(&state, "roundtrip@example.com", "Author").await;
+    let (_, meta, auth) = rest(&state, &auth, "POST", "/api/projects", Some(json!({"name":"Round trip"}))).await;
+    let id = meta["id"].as_str().unwrap();
+    let figure: Vec<u8> = (0..300_000u32).map(|i| (i * 7919 % 251) as u8).collect();
+    std::fs::create_dir_all(state.registry.root().join(id).join("figures")).unwrap();
+    std::fs::write(state.registry.root().join(id).join("figures/plot.png"), &figure).unwrap();
+
+    let get = |path: String| Request::builder().uri(path).header("cookie", auth.cookie_header().unwrap()).body(Body::empty()).unwrap();
+    let response = router(state.clone()).oneshot(get(format!("/api/projects/{id}/export"))).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let length: usize = response.headers()["content-length"].to_str().unwrap().parse().unwrap();
+    let zip = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(zip.len(), length);
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/projects/import?name=Imported%20copy")
+        .header("cookie", auth.cookie_header().unwrap())
+        .header("x-csrf-token", auth.csrf.clone().unwrap())
+        .header("content-type", "application/zip")
+        .body(Body::from(zip))
+        .unwrap();
+    let response = router(state.clone()).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body: Value = serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let copy = body["project"]["id"].as_str().unwrap();
+    assert_eq!(body["report"]["main_file"], "main.tex");
+    assert_eq!(std::fs::read(state.registry.root().join(copy).join("figures/plot.png")).unwrap(), figure);
+    let staging = dir.path().join("cache/staging");
+    assert_eq!(std::fs::read_dir(&staging).unwrap().count(), 0, "staging is cleaned up");
+}
+
 /// Create an account and return its authenticated cookies.
 async fn signup(state: &AppState, email: &str, name: &str) -> Auth {
     let (status, _, auth) = rest(
@@ -609,6 +647,22 @@ async fn two_editors_sync_commit_and_a_viewer_is_read_only() {
     let on_disk = std::fs::read_to_string(server.state.registry.root().join("thesis/main.tex")).unwrap();
     assert!(on_disk.contains("% Hello from Ana"));
     assert!(!on_disk.contains("SNEAKY"), "a read-only client's edit is dropped server-side");
+
+    // An open tab keeps its project loaded. Once every tab has gone, the project leaves memory,
+    // and the next tab gets the same text from disk.
+    assert_eq!(server.state.unload_idle(Duration::ZERO).await, 0, "a connected project is never unloaded");
+    drop(owner);
+    drop(viewer);
+    drop(events);
+    let unloaded = tokio::time::timeout(Duration::from_secs(5), async {
+        while server.state.unload_idle(Duration::ZERO).await == 0 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    assert!(unloaded.is_ok(), "the project unloads once its tabs close");
+    let again = Client::connect(&server.addr, &ana, "thesis", "main.tex").await.unwrap();
+    assert!(again.text().starts_with("% Hello from Ana\n"));
 }
 
 #[tokio::test]
@@ -774,4 +828,162 @@ async fn a_project_starts_from_the_template_it_asked_for() {
 
     let (status, err, _) = rest(&server.state, &ana, "POST", "/api/projects", Some(json!({ "name": "Nope", "template": "not-real" }))).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+}
+
+// The project roster must work before any document is opened, across files, and across tabs.
+// Comparing authenticated ids also proves two people with the same display name stay distinct.
+type EventSocket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+async fn event_socket(server: &Server, auth: &Auth, project: &str) -> EventSocket {
+    let mut request = format!("ws://{}/ws/{project}/events", server.addr).into_client_request().unwrap();
+    request.headers_mut().insert("Cookie", auth.cookie_header().unwrap().parse().unwrap());
+    tokio_tungstenite::connect_async(request).await.unwrap().0
+}
+
+async fn roster(socket: &mut EventSocket, expected: &[&str]) -> Value {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match socket.next().await.expect("event socket closed").unwrap() {
+                Message::Text(text) => {
+                    let event: Value = serde_json::from_str(&text).unwrap();
+                    if event["type"] != "presence" { continue; }
+                    let mut ids: Vec<_> = event["users"].as_array().unwrap().iter().map(|u| u["id"].as_str().unwrap()).collect();
+                    ids.sort_unstable();
+                    let mut expected = expected.to_vec();
+                    expected.sort_unstable();
+                    if ids == expected { return event; }
+                }
+                Message::Ping(_) => socket.flush().await.unwrap(),
+                _ => {}
+            }
+        }
+    }).await.expect("presence roster did not converge")
+}
+
+#[tokio::test]
+async fn project_presence_tracks_people_across_files_tabs_and_reconnections() {
+    let server = start().await;
+    let ana = signup(&server.state, "presence-a@uni.edu", "Same Name").await;
+    let bob = signup(&server.state, "presence-b@uni.edu", "Same Name").await;
+    let (_, meta, _) = rest(&server.state, &ana, "POST", "/api/projects", Some(json!({"name":"Presence"}))).await;
+    let id = meta["id"].as_str().unwrap();
+    let (status, _, _) = rest(&server.state, &ana, "POST", &format!("/api/projects/{id}/members"), Some(json!({"email":"presence-b@uni.edu","role":"viewer"}))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (_, a, _) = rest(&server.state, &ana, "GET", "/api/auth/me", None).await;
+    let (_, b, _) = rest(&server.state, &bob, "GET", "/api/auth/me", None).await;
+    let a = a["user"]["id"].as_str().unwrap();
+    let b = b["user"]["id"].as_str().unwrap();
+
+    let mut first = event_socket(&server, &ana, id).await;
+    roster(&mut first, &[a]).await;
+    let mut second = event_socket(&server, &bob, id).await;
+    let snapshot = roster(&mut second, &[a, b]).await;
+    assert!(snapshot["users"].as_array().unwrap().iter().all(|u| u["name"] == "Same Name"));
+    roster(&mut first, &[a, b]).await;
+    let mut extra_tab = event_socket(&server, &ana, id).await;
+    roster(&mut extra_tab, &[a, b]).await;
+
+    let _main = Client::connect(&server.addr, &ana, id, "main.tex").await.unwrap();
+    let _refs = Client::connect(&server.addr, &bob, id, "refs.bib").await.unwrap();
+    // A replacement socket connects before the old one closes (a normal reconnect race).
+    let mut replacement = event_socket(&server, &bob, id).await;
+    roster(&mut replacement, &[a, b]).await;
+    second.close(None).await.unwrap();
+    drop(second);
+    // A rename produces a later snapshot, after the old socket's close has been processed.
+    let (status, _, _) = rest(&server.state, &bob, "POST", "/api/auth/name", Some(json!({"name":"Bob Renamed"}))).await;
+    assert_eq!(status, StatusCode::OK);
+    replacement.send(Message::Text(json!({"type":"presence_refresh","id":a,"name":"Spoofed"}).to_string().into())).await.unwrap();
+    let renamed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let snapshot = roster(&mut replacement, &[a, b]).await;
+            if snapshot["users"].as_array().unwrap().iter().any(|u| u["id"] == b && u["name"] == "Bob Renamed") { break snapshot; }
+        }
+    }).await.unwrap();
+    assert!(renamed["users"].as_array().unwrap().iter().any(|u| u["id"] == a && u["name"] == "Same Name"));
+    first.close(None).await.unwrap();
+    drop(first);
+    extra_tab.send(Message::Text(json!({"type":"presence_refresh"}).to_string().into())).await.unwrap();
+    roster(&mut extra_tab, &[a, b]).await;
+    extra_tab.close(None).await.unwrap();
+    drop(extra_tab);
+    roster(&mut replacement, &[b]).await;
+
+    // A second project has an independent roster, even for the same account.
+    let (_, other, _) = rest(&server.state, &bob, "POST", "/api/projects", Some(json!({"name":"Other presence"}))).await;
+    let mut other = event_socket(&server, &bob, other["id"].as_str().unwrap()).await;
+    roster(&mut other, &[b]).await;
+}
+
+#[tokio::test]
+async fn deleting_folders_and_projects_enforces_roles_and_cleans_persistent_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = Config::default();
+    config.build.sandbox = "none".into();
+    config.server.public_signup = true;
+    let state = AppState::new(dir.path(), &config).await.unwrap();
+    let admin = signup(&state, "delete-admin@example.com", "Admin").await;
+    let editor = signup(&state, "delete-editor@example.com", "Editor").await;
+    let viewer = signup(&state, "delete-viewer@example.com", "Viewer").await;
+    let outsider = signup(&state, "delete-outsider@example.com", "Outsider").await;
+    let (_, meta, _) = rest(&state, &admin, "POST", "/api/projects", Some(json!({"name":"Delete paper"}))).await;
+    let id = meta["id"].as_str().unwrap();
+    let url = format!("/api/projects/{id}");
+    for (email, role) in [("delete-editor@example.com", "editor"), ("delete-viewer@example.com", "viewer")] {
+        assert_eq!(rest(&state, &admin, "POST", &format!("{url}/members"), Some(json!({"email": email, "role": role}))).await.0, StatusCode::CREATED);
+    }
+    let project = state.registry.open(id).await.unwrap();
+    project.create_folder("drafts/empty").unwrap();
+    project.put_file("drafts/nested/text.tex", b"draft", false, "Admin").await.unwrap();
+    for (auth, expected) in [(&viewer, StatusCode::FORBIDDEN), (&outsider, StatusCode::NOT_FOUND)] {
+        assert_eq!(rest(&state, auth, "DELETE", &format!("{url}/folders?path=drafts"), None).await.0, expected);
+    }
+    assert!(project.exists("drafts/nested/text.tex"));
+    let (status, deleted, _) = rest(&state, &editor, "DELETE", &format!("{url}/folders?path=drafts"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(deleted["deleted_files"], json!(["drafts/nested/text.tex"]));
+    assert!(project.list_folders().unwrap().is_empty());
+    project.put_file("sections/main.tex", b"main", false, "Admin").await.unwrap();
+    assert_eq!(rest(&state, &admin, "PATCH", &format!("{url}/settings"), Some(json!({"main_file":"sections/main.tex"}))).await.0, StatusCode::OK);
+    assert_eq!(rest(&state, &admin, "DELETE", &format!("{url}/folders?path=sections"), None).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(rest(&state, &admin, "DELETE", &format!("{url}/folders?path=../escape"), None).await.0, StatusCode::BAD_REQUEST);
+    for (auth, expected) in [(&editor, StatusCode::FORBIDDEN), (&viewer, StatusCode::FORBIDDEN), (&outsider, StatusCode::NOT_FOUND)] {
+        assert_eq!(rest(&state, auth, "DELETE", &url, None).await.0, expected);
+    }
+    // Populate every project-scoped table, including votes whose project is indirect.
+    let conn = state.store.db().conn().unwrap();
+    conn.execute_batch(&format!(r#"
+        INSERT INTO share_links VALUES ('delete-share','{id}','viewer','delete-hash',NULL,NULL,'u','now',0);
+        INSERT INTO comments VALUES ('delete-comment','{id}','main.tex','anchor',NULL,'u','User','body',0,'now');
+        INSERT INTO suggestions VALUES ('delete-suggestion','{id}','main.tex','a','b','old','new','u','User','open','now');
+        INSERT INTO project_config VALUES ('{id}','solo');
+        INSERT INTO role_requests VALUES ('delete-request','{id}','invite',NULL,'{{}}','invite','u','User','open','now',NULL);
+        INSERT INTO role_request_votes VALUES ('delete-request','u','approve','now');
+        INSERT INTO checkpoints VALUES ('delete-checkpoint','{id}','sha','label',NULL,'now');
+        INSERT INTO agent_runs VALUES ('delete-run','{id}','u','test',NULL,'summary',1,'now');
+    "#)).unwrap();
+    drop(conn);
+    let builds = state.builds(id).await.unwrap();
+    let doc = project.doc("sections/main.tex").await.unwrap();
+    assert_eq!(rest(&state, &admin, "DELETE", &url, None).await.0, StatusCode::NO_CONTENT);
+    assert!(project.is_deleted());
+    assert!(!dir.path().join("data").join(id).exists());
+    assert!(state.registry.open(id).await.is_err());
+    assert!(state.builds(id).await.is_err());
+    assert!(project.create_file("resurrect.tex").await.is_err());
+    doc.reseed("stale edit").await;
+    builds.request(galley_build::BuildRequest::default()).await;
+    assert!(!builds.is_running().await);
+    assert_eq!(rest(&state, &admin, "GET", &url, None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(rest(&state, &admin, "GET", "/api/projects", None).await.1, json!([]));
+    for table in ["members", "share_links", "comments", "suggestions", "project_config", "role_requests", "checkpoints", "agent_runs"] {
+        let count: i64 = state.store.db().conn().unwrap().query_row(&format!("SELECT COUNT(*) FROM {table} WHERE project_id = ?1"), [id], |r| r.get(0)).unwrap();
+        assert_eq!(count, 0, "left records in {table}");
+    }
+    let votes: i64 = state.store.db().conn().unwrap().query_row("SELECT COUNT(*) FROM role_request_votes WHERE request_id = 'delete-request'", [], |r| r.get(0)).unwrap();
+    assert_eq!(votes, 0);
+    let reopened = AppState::new(dir.path(), &config).await.unwrap();
+    assert!(reopened.registry.open(id).await.is_err());
+    assert_eq!(rest(&reopened, &admin, "GET", "/api/projects", None).await.1, json!([]));
+    assert!(!dir.path().join("data").join(id).exists(), "stale writers must not recreate the project");
 }

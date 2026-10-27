@@ -241,6 +241,9 @@ async fn main() -> Result<()> {
             .context("backup is not configured. Set [backup] bucket and its keys, or the GALLEY_BACKUP_* variables.")?;
         let report = backup.restore().await?;
         println!("Restored the database and {} projects into {}", report.projects, data_dir.display());
+        if report.deleted > 0 {
+            println!("Left out {} deleted projects", report.deleted);
+        }
         for key in report.skipped {
             println!("Skipped {key}: not a valid project id");
         }

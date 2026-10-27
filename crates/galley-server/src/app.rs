@@ -46,7 +46,11 @@ pub struct AppState {
     /// Single sign-on, when the operator configured a provider.
     pub oidc: Option<Arc<crate::oidc::Oidc>>,
     builds: Arc<RwLock<HashMap<String, Arc<ProjectBuilds>>>>,
+    project_lifecycle: Arc<RwLock<HashMap<String, Arc<tokio::sync::RwLock<()>>>>>,
     collab: Arc<RwLock<HashMap<String, broadcast::Sender<String>>>>,
+    pub(crate) presence: Arc<std::sync::Mutex<ws::ProjectPresence>>,
+    /// Zip imports and project downloads that may run at once. Each holds up to tens of megabytes.
+    pub(crate) imports: Arc<tokio::sync::Semaphore>,
 }
 
 impl FromRef<AppState> for Store {
@@ -154,7 +158,10 @@ impl AppState {
             backup,
             oidc,
             builds: Arc::new(RwLock::new(HashMap::new())),
+            project_lifecycle: Arc::default(),
             collab: Arc::new(RwLock::new(HashMap::new())),
+            presence: Arc::default(),
+            imports: Arc::new(tokio::sync::Semaphore::new(2)),
         })
     }
 
@@ -215,11 +222,71 @@ impl AppState {
         )))
     }
 
+    pub(crate) async fn project_gate(&self, id: &str) -> Arc<tokio::sync::RwLock<()>> {
+        self.project_lifecycle.write().await.entry(id.to_string()).or_default().clone()
+    }
+
+    pub async fn delete_project(&self, id: &str) -> Result<(), AppError> {
+        let gate = self.project_gate(id).await;
+        let _project = gate.write().await;
+        let queue = self.builds.write().await.remove(id);
+        if let Some(queue) = queue { queue.shutdown().await; }
+        self.registry.delete(id).await?;
+        self.presence.lock().expect("presence poisoned").forget_project(id);
+        self.collab.write().await.remove(id);
+        let store = self.store.clone();
+        let id = id.to_string();
+        tokio::task::spawn_blocking(move || store.delete_project(&id))
+            .await.map_err(|e| AppError::Internal(e.to_string()))?
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Unload projects that nobody has used for `idle`, so memory follows the projects in use
+    /// rather than every project opened since the server started.
+    pub fn spawn_idle_unloader(&self, idle: Duration) {
+        let app = self.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                let n = app.unload_idle(idle).await;
+                if n > 0 {
+                    tracing::debug!(projects = n, "unloaded idle projects");
+                }
+            }
+        });
+    }
+
+    pub async fn unload_idle(&self, idle: Duration) -> usize {
+        let mut unloaded = 0;
+        for id in self.registry.idle(idle) {
+            let gate = self.project_gate(&id).await;
+            let _project = gate.write().await;
+            // The build queue's flush hook holds the project. A queue that is building, or that a
+            // watcher holds, keeps both loaded.
+            {
+                let mut builds = self.builds.write().await;
+                if let Some(queue) = builds.get(&id) {
+                    if Arc::strong_count(queue) > 1 || queue.is_running().await {
+                        continue;
+                    }
+                    builds.remove(&id);
+                }
+            }
+            match self.registry.unload(&id).await {
+                Ok(true) => unloaded += 1,
+                Ok(false) => {}
+                Err(e) => tracing::warn!(project = %id, error = %e, "could not unload an idle project; it stays loaded"),
+            }
+        }
+        unloaded
+    }
+
     /// The build queue for a project, created on first use with a flush-before-build hook.
     pub async fn builds(&self, id: &str) -> Result<Arc<ProjectBuilds>, AppError> {
-        if let Some(b) = self.builds.read().await.get(id) {
-            return Ok(Arc::clone(b));
-        }
+        let gate = self.project_gate(id).await;
+        let _project = gate.read().await;
+        if let Some(queue) = self.builds.read().await.get(id) { return Ok(queue.clone()); }
         let project = self.registry.open(id).await?;
         let meta = self.registry.meta(id)?;
         let mut map = self.builds.write().await;
@@ -334,7 +401,7 @@ pub fn router(state: AppState) -> Router {
             "/api/projects/import",
             post(routes::import_project).layer(axum::extract::DefaultBodyLimit::max(crate::import::MAX_ZIP)),
         )
-        .route("/api/projects/{id}", get(routes::get_project))
+        .route("/api/projects/{id}", get(routes::get_project).delete(routes::delete_project))
         .route("/api/projects/{id}/settings", axum::routing::patch(routes::update_settings))
         .route("/api/projects/{id}/engines", get(routes::engines))
         .route("/api/venues", get(pack_routes::list_venues))
@@ -344,7 +411,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/{id}/pack/download", get(pack_routes::download))
         .route("/api/projects/{id}/submitted", post(pack_routes::freeze))
         .route("/api/projects/{id}/files", get(routes::list_files).post(routes::create_file).delete(file_routes::delete))
-        .route("/api/projects/{id}/folders", get(file_routes::list_folders).post(file_routes::create_folder))
+        .route("/api/projects/{id}/folders", get(file_routes::list_folders).post(file_routes::create_folder).delete(file_routes::delete_folder))
         .route("/api/projects/{id}/files/rename", post(file_routes::rename))
         .route("/api/projects/{id}/export", get(file_routes::export))
         .route(
@@ -414,6 +481,9 @@ pub struct ServeOptions {
     pub dev: bool,
 }
 
+/// How long a project nobody uses stays in memory. Reopening one reads it from disk in a moment.
+const IDLE_UNLOAD: Duration = Duration::from_secs(10 * 60);
+
 pub async fn serve(state: AppState, opts: ServeOptions) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(opts.bind).await?;
     let addr = listener.local_addr()?;
@@ -421,6 +491,7 @@ pub async fn serve(state: AppState, opts: ServeOptions) -> std::io::Result<()> {
         Some(backup) => backup.clone().spawn(state.store.db().clone()),
         None => tracing::info!("backup is off; set [backup] bucket to copy projects to object storage"),
     }
+    state.spawn_idle_unloader(IDLE_UNLOAD);
     tracing::info!(%addr, "galley listening");
     println!("Galley is running at http://{addr}");
     if opts.dev {
@@ -432,4 +503,73 @@ pub async fn serve(state: AppState, opts: ServeOptions) -> std::io::Result<()> {
             tracing::info!("shutting down");
         })
         .await
+}
+
+#[cfg(test)]
+mod unload_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn an_idle_project_is_written_unloaded_and_reopened_with_its_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.build.sandbox = "none".into();
+        let app = AppState::new(dir.path(), &config).await.unwrap();
+        let meta = app.registry.create("Idle paper").await.unwrap();
+        let project = app.registry.open(&meta.id).await.unwrap();
+        project.doc("main.tex").await.unwrap().reseed("Edited while open").await;
+        app.builds(&meta.id).await.unwrap();
+
+        assert_eq!(app.unload_idle(Duration::ZERO).await, 0, "a project someone holds stays loaded");
+        assert_eq!(app.unload_idle(Duration::from_secs(3600)).await, 0, "a recently used project stays loaded");
+        drop(project);
+        assert_eq!(app.unload_idle(Duration::ZERO).await, 1);
+        assert_eq!(app.unload_idle(Duration::ZERO).await, 0);
+        let on_disk = std::fs::read_to_string(app.registry.root().join(&meta.id).join("main.tex")).unwrap();
+        assert_eq!(on_disk, "Edited while open", "the edit is on disk before the project leaves memory");
+
+        let reopened = app.registry.open(&meta.id).await.unwrap();
+        assert_eq!(reopened.doc("main.tex").await.unwrap().text().await, "Edited while open");
+        app.builds(&meta.id).await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod deletion_tests {
+    use super::*;
+    use axum::extract::{Path, State};
+    use crate::auth::current::CurrentUser;
+
+    #[tokio::test]
+    async fn deletion_drains_external_writers_and_blocks_late_pack_or_comparison() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.build.sandbox = "none".into();
+        let app = AppState::new(dir.path(), &config).await.unwrap();
+        let user = app.store.create_user("writer@example.com", "Writer", "supersecret", false).unwrap();
+        let meta = app.registry.create("Deleting writers").await.unwrap();
+        app.store.set_member(&meta.id, &user.id, Role::Admin).unwrap();
+        let other = app.registry.create("Unrelated project").await.unwrap();
+        let gate = app.project_gate(&meta.id).await;
+        let deleting = gate.write().await;
+        let limit = Duration::from_millis(30);
+        assert!(tokio::time::timeout(limit, crate::pack_routes::pack(State(app.clone()), Path(meta.id.clone()), CurrentUser(user.clone()))).await.is_err());
+        let comparison = serde_json::from_value(json!({ "from": "HEAD" })).unwrap();
+        assert!(tokio::time::timeout(limit, crate::history_routes::latexdiff(State(app.clone()), Path(meta.id.clone()), CurrentUser(user.clone()), Json(comparison))).await.is_err());
+        drop(deleting);
+        let writer = gate.read().await;
+        let mut closing = {
+            let app = app.clone();
+            let id = meta.id.clone();
+            tokio::spawn(async move { app.delete_project(&id).await })
+        };
+        assert!(tokio::time::timeout(limit, &mut closing).await.is_err(), "an active external writer must drain before removal");
+        tokio::time::timeout(Duration::from_secs(2), app.builds(&other.id)).await.unwrap().unwrap();
+        drop(writer);
+        closing.await.unwrap().unwrap();
+        assert!(crate::pack_routes::pack(State(app.clone()), Path(meta.id.clone()), CurrentUser(user.clone())).await.is_err());
+        let comparison = serde_json::from_value(json!({ "from": "HEAD" })).unwrap();
+        assert!(crate::history_routes::latexdiff(State(app.clone()), Path(meta.id.clone()), CurrentUser(user), Json(comparison)).await.is_err());
+        assert!(!app.registry.root().join(&meta.id).exists(), "late external writers must not recreate a project");
+    }
 }

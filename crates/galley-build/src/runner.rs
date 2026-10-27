@@ -1502,28 +1502,21 @@ impl Builder {
             result.message = Some(format!("{message}. Your last PDF is unchanged. Try the build again in a moment."));
             result
         };
-        let sources = {
-            let dir = project_dir.to_path_buf();
-            tokio::task::spawn_blocking(move || crate::remote::pack_sources(&dir)).await
-        };
-        let sources = match sources {
-            Ok(Ok(bytes)) => bytes,
-            _ => return self.finish(fail(local, "The project could not be packed for the build worker".into()), started, &out_dir),
+        let scratch = match remote_scratch(&out_dir, project_dir, &[]).await {
+            Ok(s) => s,
+            Err(_) => return self.finish(fail(local, "The project could not be packed for the build worker".into()), started, &out_dir),
         };
         let job = crate::remote::WorkerJob {
             id: local.id,
-            // The worker names its copy after this, so only plain characters travel.
-            project: project_dir
-                .file_name()
-                .map(|n| n.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect())
-                .unwrap_or_else(|| "project".into()),
+            project: worker_project_name(project_dir),
             main_file: local.main_file.clone(),
             request: req.clone(),
+            compare: false,
         };
         progress("Compiling on a build worker…".into());
         // A stopped worker takes a moment to start, and the reply carries the PDF.
         let limit = self.timeout + Duration::from_secs(60);
-        let outcome = match remote.compile(&job, sources, limit).await {
+        let outcome = match remote.compile(&job, &scratch.path().join(SOURCES), scratch.path(), limit).await {
             Ok(o) => o,
             Err(message) => {
                 tracing::warn!(error = %message, "remote build failed");
@@ -1556,17 +1549,7 @@ impl Builder {
                 result.message = Some("A newer build was requested".into());
                 return self.finish(result, started, &out_dir);
             }
-            let incoming = out_dir.join(".remote-paper.pdf");
-            let incoming_st = out_dir.join(".remote-paper.synctex.gz");
-            let written = crate::buildfs::write(&incoming, &pdf).and_then(|()| match &outcome.synctex {
-                Some(st) => crate::buildfs::write(&incoming_st, st),
-                None => Ok(()),
-            });
-            let published = written.and_then(|()| {
-                publish_pdf(&out_dir, &incoming, outcome.synctex.is_some().then_some(incoming_st.as_path()), &result)
-            });
-            let _ = std::fs::remove_file(&incoming);
-            let _ = std::fs::remove_file(&incoming_st);
+            let published = publish_pdf(&out_dir, &pdf, outcome.synctex.as_deref(), &result);
             match published {
                 Ok(()) => {
                     result.pdf_fresh = true;
@@ -1707,9 +1690,10 @@ impl Builder {
         }
     }
 
-    /// Tells whether `latexdiff` is available. The UI hides PDF compare when it is not.
+    /// Tells whether `latexdiff` is available. The UI hides PDF compare when it is not. With build
+    /// workers, comparisons run there, and the worker reports a missing latexdiff itself.
     pub fn latexdiff_available(&self) -> bool {
-        latexdiff_bin().is_some()
+        self.remote.is_some() || latexdiff_bin().is_some()
     }
 
     /// Make a marked-up PDF that shows the changes between two versions of a `.tex` file. First run
@@ -1725,6 +1709,11 @@ impl Builder {
         engine_kind: EngineKind,
         progress: &(dyn Fn(String) + Send + Sync),
     ) -> Result<()> {
+        crate::zones::prepare(project_dir)?;
+        let out_dir = crate::zones::build_dir(project_dir);
+        if let Some(remote) = &self.remote {
+            return self.latexdiff_remote(remote, project_dir, &out_dir, old_text, new_text, engine_kind, progress).await;
+        }
         let bin = latexdiff_bin().ok_or(crate::Error::LatexdiffUnavailable)?;
         // A comparison is two compiles' worth of work, so it waits its turn like a build.
         let _slot = match self.slots.try_acquire() {
@@ -1733,8 +1722,6 @@ impl Builder {
         };
         let deadline = Instant::now() + self.timeout;
         let engine = self.resolve_engine(engine_kind, progress).await?;
-        crate::zones::prepare(project_dir)?;
-        let out_dir = crate::zones::build_dir(project_dir);
 
         progress("Marking up changes…".into());
         // latexdiff sees only the two texts, in a folder of their own mounted as its project.
@@ -1863,6 +1850,68 @@ async fn read_capped<R: tokio::io::AsyncRead + Unpin>(stream: Option<R>, cap: u6
             }
         }
     }
+}
+
+impl Builder {
+    /// Run a comparison on a build worker: latexdiff and the compile of its output both happen
+    /// there, which keeps the heaviest job off the machine that holds the documents.
+    #[allow(clippy::too_many_arguments)]
+    async fn latexdiff_remote(
+        &self,
+        remote: &crate::remote::RemoteWorker,
+        project_dir: &Path,
+        out_dir: &Path,
+        old_text: &str,
+        new_text: &str,
+        engine_kind: EngineKind,
+        progress: &(dyn Fn(String) + Send + Sync),
+    ) -> Result<()> {
+        let old = format!("{}/old.tex", crate::remote::COMPARE_DIR);
+        let new = format!("{}/new.tex", crate::remote::COMPARE_DIR);
+        let extra = [(old.as_str(), old_text.as_bytes()), (new.as_str(), new_text.as_bytes())];
+        let scratch = remote_scratch(out_dir, project_dir, &extra).await?;
+        let job = crate::remote::WorkerJob {
+            id: 0,
+            project: worker_project_name(project_dir),
+            main_file: String::new(),
+            request: BuildRequest { engine: engine_kind, ..BuildRequest::default() },
+            compare: true,
+        };
+        progress("Comparing on a build worker…".into());
+        let incoming = scratch.path().join("diff.pdf");
+        let limit = self.timeout + Duration::from_secs(60);
+        remote.compare(&job, &scratch.path().join(SOURCES), &incoming, limit).await.map_err(crate::Error::Engine)?;
+        std::fs::rename(&incoming, out_dir.join(LAST_DIFF_PDF))?;
+        Ok(())
+    }
+}
+
+/// The sources archive inside a scratch directory, which holds the reply too and goes away when
+/// the handle drops. It sits in the build directory, so the PDF moves into place by rename.
+const SOURCES: &str = "sources.tar.gz";
+
+async fn remote_scratch(out_dir: &Path, project_dir: &Path, extra: &[(&str, &[u8])]) -> Result<tempfile::TempDir> {
+    std::fs::create_dir_all(out_dir)?;
+    let scratch = tempfile::Builder::new().prefix(".remote-").tempdir_in(out_dir)?;
+    let (dir, dest) = (project_dir.to_path_buf(), scratch.path().join(SOURCES));
+    let extra: Vec<(String, Vec<u8>)> = extra.iter().map(|(n, b)| (n.to_string(), b.to_vec())).collect();
+    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let extra: Vec<(&str, &[u8])> = extra.iter().map(|(n, b)| (n.as_str(), b.as_slice())).collect();
+        let out = std::io::BufWriter::new(std::fs::File::create(&dest)?);
+        crate::remote::pack_sources_to(&dir, &extra, out)?.into_inner().map_err(|e| e.into_error())?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| crate::Error::Engine(format!("packing task failed: {e}")))??;
+    Ok(scratch)
+}
+
+/// The worker names its copy after this, so only plain characters travel.
+fn worker_project_name(project_dir: &Path) -> String {
+    project_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect())
+        .unwrap_or_else(|| "project".into())
 }
 
 /// Find `latexdiff`. Look at the explicit override first, then at `$PATH`.
@@ -2040,6 +2089,8 @@ pub struct ProjectBuilds {
     running: Mutex<bool>,
     /// The worker caches figures between builds. Clients do not see this as a build.
     warming: std::sync::atomic::AtomicBool,
+    closed: std::sync::atomic::AtomicBool,
+    stopped: tokio::sync::Notify,
     next_id: AtomicU64,
     events: broadcast::Sender<BuildEvent>,
     last: RwLock<Option<BuildResult>>,
@@ -2055,8 +2106,13 @@ impl ProjectBuilds {
     ) -> Arc<ProjectBuilds> {
         let (events, _) = broadcast::channel(64);
         let out_dir = crate::zones::build_dir(project_dir);
-        // A build folder from before compiles had their own scratch folders is deleted here.
-        if let Err(e) = crate::zones::prepare(project_dir) {
+        // A build folder from before compiles had their own scratch folders is deleted here. A
+        // project without Galley's folder has nothing to clean, and gets its folders at its first
+        // build, so a queue for a deleted project does not bring the folder back.
+        let galley = project_dir.join(".galley");
+        let existing = std::fs::symlink_metadata(&galley).is_ok_and(|m| m.file_type().is_dir());
+        let prepared = if existing { crate::zones::prepare(project_dir) } else { Ok(()) };
+        if let Err(e) = prepared {
             tracing::warn!(project = %project_dir.display(), error = %e, "the build folder could not be prepared");
         }
         // Nothing of this project runs yet in this process; folders a stopped server left go.
@@ -2111,6 +2167,8 @@ impl ProjectBuilds {
             publication_gate: Mutex::new(()),
             running: Mutex::new(false),
             warming: std::sync::atomic::AtomicBool::new(false),
+            closed: std::sync::atomic::AtomicBool::new(false),
+            stopped: tokio::sync::Notify::new(),
             next_id: AtomicU64::new(next_id),
             events,
             last: RwLock::new(last),
@@ -2146,10 +2204,33 @@ impl ProjectBuilds {
         SyncTex::load(&path, &self.project_dir)
     }
 
+    /// Invalidate queued requests and wait until an active compiler has stopped writing.
+    pub async fn shutdown(&self) {
+        {
+            let _gate = self.publication_gate.lock().await;
+            self.closed.store(true, Ordering::Release);
+            self.next_id.fetch_add(1, Ordering::Relaxed);
+            if let Some((id, _)) = self.pending.lock().await.take() {
+                let _ = self.events.send(BuildEvent::BuildSuperseded { id });
+            }
+        }
+        loop {
+            let stopped = self.stopped.notified();
+            tokio::pin!(stopped);
+            stopped.as_mut().enable();
+            if !*self.running.lock().await { break; }
+            stopped.await;
+        }
+    }
+
     /// Queue a build. This request replaces a request that has not started.
     pub async fn request(self: &Arc<Self>, req: BuildRequest) -> u64 {
         let _gate = self.publication_gate.lock().await;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        if self.closed.load(Ordering::Acquire) {
+            let _ = self.events.send(BuildEvent::BuildSuperseded { id });
+            return id;
+        }
         let mut pending = self.pending.lock().await;
         if pending.as_ref().is_some_and(|(old_id, _)| *old_id > id) {
             let _ = self.events.send(BuildEvent::BuildSuperseded { id });
@@ -2176,6 +2257,7 @@ impl ProjectBuilds {
             let mut pending = self.pending.lock().await;
             let Some((id, req)) = pending.take() else {
                 *self.running.lock().await = false;
+                self.stopped.notify_waiters();
                 return;
             };
             drop(pending);
@@ -2187,6 +2269,7 @@ impl ProjectBuilds {
             if let Some(before) = &self.before {
                 before().await;
             }
+            if self.closed.load(Ordering::Acquire) { continue; }
             let events = self.events.clone();
             let progress = move |message: String| {
                 let _ = events.send(BuildEvent::BuildProgress { id, message });
@@ -2200,7 +2283,7 @@ impl ProjectBuilds {
                 .filter(|f| is_safe_target(&self.project_dir, f))
                 .map(str::to_string)
                 .unwrap_or(default_main);
-            let latest = || self.next_id.load(Ordering::Relaxed) == id + 1;
+            let latest = || !self.closed.load(Ordering::Acquire) && self.next_id.load(Ordering::Relaxed) == id + 1;
             let mut result = self
                 .builder
                 .run_checked(
@@ -2217,6 +2300,7 @@ impl ProjectBuilds {
                 .await;
             result.stale |= self.pending.lock().await.is_some();
             let warm = std::mem::take(&mut result.pending_figures);
+            if self.closed.load(Ordering::Acquire) { continue; }
             persist_result(&self.out_dir(), &result);
             tracing::info!(project = %self.project_dir.display(), id, status = ?result.status, ms = result.profile.total_ms, "build finished");
             *self.last.write().await = Some(result.clone());
@@ -2228,7 +2312,7 @@ impl ProjectBuilds {
                 let made = self
                     .builder
                     .warm_figures(&self.project_dir, req.engine, warm, || async {
-                        self.pending.lock().await.is_some()
+                        self.closed.load(Ordering::Acquire) || self.pending.lock().await.is_some()
                     })
                     .await;
                 self.warming.store(false, Ordering::Relaxed);
@@ -2308,6 +2392,36 @@ mod tests {
         assert!(cache_cold(&engine, project.path()), "a .fmt that is a link");
         std::fs::write(local.join("formats/latex.fmt"), "fmt").unwrap();
         assert!(!cache_cold(&engine, project.path()));
+    }
+
+    #[tokio::test]
+    async fn shutdown_drains_active_work_and_rejects_stale_queue_handles() {
+        let dir = tempfile::tempdir().unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let before: BeforeBuild = {
+            let entered = entered.clone();
+            let release = release.clone();
+            Arc::new(move || {
+                let entered = entered.clone();
+                let release = release.clone();
+                Box::pin(async move { entered.notify_one(); release.notified().await; })
+            })
+        };
+        let queue = ProjectBuilds::new(Arc::new(one_slot_builder()), dir.path(), "main.tex", Some(before));
+        queue.request(BuildRequest::default()).await;
+        entered.notified().await;
+        queue.request(BuildRequest::default()).await;
+        let closing = { let queue = queue.clone(); tokio::spawn(async move { queue.shutdown().await }) };
+        while !queue.closed.load(Ordering::Acquire) { tokio::task::yield_now().await; }
+        assert!(!closing.is_finished(), "deletion must wait for an active writer");
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), closing).await.unwrap().unwrap();
+        queue.request(BuildRequest::default()).await;
+        assert!(!queue.is_running().await);
+        assert!(queue.pending.lock().await.is_none());
+        assert!(queue.last().await.is_none());
+        assert!(!queue.out_dir().exists(), "a closed queue must not create output");
     }
 
     #[cfg(unix)]

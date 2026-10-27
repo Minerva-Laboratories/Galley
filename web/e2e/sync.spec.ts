@@ -23,7 +23,8 @@ test('edits sync between two tabs and land in git', async ({ browser }) => {
   await b.goto(a.url());
   await expect(b.locator('.cm-content')).toContainText('documentclass');
   await dismissTour(b);
-  await expect(a.locator('.presence .n')).toHaveText('2 online');
+  // Both contexts are the same account: project presence counts people, not tabs.
+  await expect(a.locator('.presence .n')).toHaveText('Only you');
 
   const marker = `Synced-${Date.now()}`;
   await a.locator('.cm-content').click();

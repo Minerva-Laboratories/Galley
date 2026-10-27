@@ -52,18 +52,34 @@ pub async fn export(State(app): State<AppState>, Path(id): Path<String>, Current
     let project = app.registry.open(&id).await?;
     let _ = project.flush_now().await;
     let dir = project.workdir().to_path_buf();
-    let bytes = tokio::task::spawn_blocking(move || crate::import::write_zip(&dir))
+    // The zip is written to disk and streamed from there, so a large project costs no memory.
+    let staging = app.registry.staging()?;
+    let path = staging.path().join("export.zip");
+    let zip = {
+        let _turn = app.imports.acquire().await.map_err(|e| AppError::Internal(e.to_string()))?;
+        let path = path.clone();
+        tokio::task::spawn_blocking(move || {
+            let out = std::io::BufWriter::new(std::fs::File::create(&path)?);
+            crate::import::write_zip_to(&dir, out)?.into_inner().map_err(|e| e.into_error())
+        })
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+        .map_err(|e| AppError::Internal(e.to_string()))?
+    };
+    drop(zip);
+    let file = tokio::fs::File::open(&path).await?;
+    let len = file.metadata().await?.len();
+    // The open file outlives its name, so the staging directory can go once the stream starts.
+    drop(staging);
     let filename = project_filename(&app.registry.meta(&id)?.name, "zip");
     app.store.audit(Some(&id), Some(&user), "project.export", None);
     Ok((
         [
             (header::CONTENT_TYPE, "application/zip".to_string()),
             (header::CONTENT_DISPOSITION, content_disposition("attachment", &filename)),
+            (header::CONTENT_LENGTH, len.to_string()),
         ],
-        bytes,
+        axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(file)),
     )
         .into_response())
 }
@@ -182,6 +198,25 @@ pub async fn create_folder(
     app.registry.touch(&id);
     app.store.audit(Some(&id), Some(&user), "folder.create", Some(&path));
     Ok((StatusCode::CREATED, Json(json!({ "path": path }))))
+}
+
+/// DELETE /api/projects/{id}/folders?path=... recursively removes a visible directory.
+pub async fn delete_folder(
+    State(app): State<AppState>, Path(id): Path<String>, Query(q): Query<PathQuery>,
+    CurrentUser(user): CurrentUser,
+) -> Result<Json<Value>, AppError> {
+    app.require(&user, &id, Role::can_edit, "deleting folders").await?;
+    let path = galley_sync::paths::clean_rel_path(&q.path)
+        .ok_or_else(|| AppError::BadRequest("Choose a relative project folder without .. or reserved names.".into()))?;
+    let meta = app.registry.meta(&id)?;
+    if meta.main_file.starts_with(&format!("{path}/")) {
+        return Err(AppError::BadRequest(format!("{path} contains the main file {}. Set a main file outside this folder before deleting it.", meta.main_file)));
+    }
+    let project = app.registry.open(&id).await?;
+    let deleted_files = project.delete_folder(&path, &user.name).await?;
+    app.registry.touch(&id);
+    app.store.audit(Some(&id), Some(&user), "folder.delete", Some(&path));
+    Ok(Json(json!({ "ok": true, "path": path, "deleted_files": deleted_files })))
 }
 
 /// POST /api/projects/{id}/files/rename. A move of the main file moves the setting with it.

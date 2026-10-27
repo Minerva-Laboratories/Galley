@@ -12,6 +12,9 @@
 //!   database can be undone
 //! - `projects/<id>.tar.gz`, the latest copy of each project: its git repository, its working
 //!   files, the live editing state and its settings. Older versions live in the git history inside.
+//!
+//! A project that someone deleted leaves the bucket on the next pass, and a restore skips it, so
+//! deleting a paper deletes it from the backup too. Only the daily databases still name it.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -52,6 +55,7 @@ pub struct BackupStatus {
     pub last_error: Option<String>,
     pub projects_uploaded: usize,
     pub database_uploaded: bool,
+    pub projects_forgotten: usize,
 }
 
 /// The fingerprint of each item at its last successful upload. It survives a restart, so a
@@ -62,6 +66,9 @@ struct Uploaded {
     items: BTreeMap<String, String>,
     #[serde(default)]
     daily: Option<String>,
+    /// Deleted projects whose archive already left the bucket.
+    #[serde(default)]
+    forgotten: std::collections::BTreeSet<String>,
 }
 
 pub struct Backup {
@@ -137,8 +144,8 @@ impl Backup {
             let root = root.clone();
             tokio::task::spawn_blocking(move || project_ids(&root)).await.map_err(join_error)??
         };
-        for id in ids {
-            let dir = root.join(&id);
+        for id in &ids {
+            let dir = root.join(id);
             let key = format!("projects/{id}");
             let print = {
                 let dir = dir.clone();
@@ -147,7 +154,7 @@ impl Backup {
             if lock(&self.uploaded).items.get(&key) == Some(&print) {
                 continue;
             }
-            match self.upload_project(&id, &dir).await {
+            match self.upload_project(id, &dir).await {
                 Ok(()) => {
                     lock(&self.uploaded).items.insert(key, print);
                     projects_uploaded += 1;
@@ -163,16 +170,24 @@ impl Backup {
                 false
             }
         };
+        let projects_forgotten = match self.forget_deleted(db, &ids).await {
+            Ok(n) => n,
+            Err(e) => {
+                errors.push(format!("deleted projects: {e}"));
+                0
+            }
+        };
         self.save_state();
 
         let mut status = lock(&self.status);
         status.projects_uploaded = projects_uploaded;
         status.database_uploaded = database_uploaded;
+        status.projects_forgotten = projects_forgotten;
         if errors.is_empty() {
             status.last_ok = Some(chrono::Utc::now());
             status.last_error = None;
-            if projects_uploaded > 0 || database_uploaded {
-                tracing::info!(projects = projects_uploaded, database = database_uploaded, "backup uploaded");
+            if projects_uploaded > 0 || database_uploaded || projects_forgotten > 0 {
+                tracing::info!(projects = projects_uploaded, database = database_uploaded, forgotten = projects_forgotten, "backup uploaded");
             }
             Ok(status.clone())
         } else {
@@ -180,6 +195,33 @@ impl Backup {
             status.last_error = Some(message.clone());
             Err(BackupError::Http(message))
         }
+    }
+
+    /// Remove the archives of deleted projects. Only the audit log counts as proof of a deletion: a
+    /// project that is missing from disk, say because a volume did not mount, keeps its archive.
+    async fn forget_deleted(&self, db: &Db, live: &[String]) -> Result<usize, BackupError> {
+        let deleted = {
+            let db = db.clone();
+            tokio::task::spawn_blocking(move || -> Result<Vec<String>, BackupError> {
+                let conn = db.conn().map_err(|e| BackupError::Db(e.to_string()))?;
+                deleted_projects(&conn).map_err(|e| BackupError::Db(e.to_string()))
+            })
+            .await
+            .map_err(join_error)??
+        };
+        let mut forgotten = 0;
+        for id in deleted {
+            // Ids are never reused, so a live directory under a deleted id is someone's work.
+            if !is_safe_id(&id) || live.contains(&id) || lock(&self.uploaded).forgotten.contains(&id) {
+                continue;
+            }
+            self.delete(&format!("projects/{id}.tar.gz")).await?;
+            let mut state = lock(&self.uploaded);
+            state.items.remove(&format!("projects/{id}"));
+            state.forgotten.insert(id);
+            forgotten += 1;
+        }
+        Ok(forgotten)
     }
 
     async fn upload_project(&self, id: &str, dir: &Path) -> Result<(), BackupError> {
@@ -240,6 +282,13 @@ impl Backup {
         check(response, key).await.map(drop)
     }
 
+    /// S3 answers a delete of a missing object with success, so a retry is harmless.
+    async fn delete(&self, key: &str) -> Result<(), BackupError> {
+        let url = self.bucket.delete_object(Some(&self.credentials), &format!("{}{key}", self.prefix)).sign(SIGNED_FOR);
+        let response = self.http.delete(url).send().await.map_err(|e| BackupError::Http(e.without_url().to_string()))?;
+        check(response, key).await.map(drop)
+    }
+
     async fn get(&self, key: &str) -> Result<Vec<u8>, BackupError> {
         let url = self.bucket.get_object(Some(&self.credentials), &format!("{}{key}", self.prefix)).sign(SIGNED_FOR);
         let response = self.http.get(url).send().await.map_err(|e| BackupError::Http(e.without_url().to_string()))?;
@@ -292,6 +341,17 @@ impl Backup {
         let db = self.get("galley.db.gz").await?;
         let mut out = std::fs::File::create(&db_path)?;
         std::io::copy(&mut flate2::read::GzDecoder::new(db.as_slice()), &mut out)?;
+        drop(out);
+        // The bucket can still hold a deleted project if the server stopped before its next pass.
+        let deleted = rusqlite::Connection::open(&db_path)
+            .and_then(|conn| deleted_projects(&conn))
+            .map_err(|e| BackupError::Db(e.to_string()))?;
+        // Reserve the deleted ids again, so a new project never takes over an old link.
+        let reserved = self.data_dir.join(crate::registry::RESERVED_IDS_DIR);
+        std::fs::create_dir_all(&reserved)?;
+        for id in deleted.iter().filter(|id| is_safe_id(id)) {
+            std::fs::write(reserved.join(id), "")?;
+        }
 
         let mut report = RestoreReport::default();
         for key in self.list("projects/").await? {
@@ -300,6 +360,10 @@ impl Backup {
             };
             if !is_safe_id(id) {
                 report.skipped.push(key);
+                continue;
+            }
+            if deleted.iter().any(|d| d == id) {
+                report.deleted += 1;
                 continue;
             }
             let bytes = self.get(&key).await?;
@@ -337,6 +401,8 @@ impl Backup {
 pub struct RestoreReport {
     pub projects: usize,
     pub skipped: Vec<String>,
+    /// Projects someone deleted whose archive was still in the bucket.
+    pub deleted: usize,
 }
 
 async fn check(response: reqwest::Response, key: &str) -> Result<reqwest::Response, BackupError> {
@@ -359,6 +425,14 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 fn join_error(e: tokio::task::JoinError) -> BackupError {
     BackupError::Io(std::io::Error::other(e))
+}
+
+fn deleted_projects(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT project_id FROM audit_log WHERE action = 'project.delete' AND project_id IS NOT NULL",
+    )?;
+    let ids = stmt.query_map([], |r| r.get(0))?.collect();
+    ids
 }
 
 fn is_safe_id(id: &str) -> bool {

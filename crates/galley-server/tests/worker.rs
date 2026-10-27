@@ -127,3 +127,33 @@ async fn an_unreachable_worker_is_explained() {
     assert_eq!(r.status, BuildStatus::Error);
     assert!(r.message.unwrap().contains("could not be reached"));
 }
+
+#[tokio::test]
+async fn a_comparison_runs_on_the_worker_and_its_pdf_lands_on_the_server() {
+    let Some(texlive) = texlive() else { return };
+    if !Path::new("/usr/bin/latexdiff").is_file() {
+        eprintln!("skipping: needs latexdiff in /usr/bin");
+        return;
+    }
+    let worker_data = tempfile::tempdir().unwrap();
+    let url = start_worker(worker_data.path(), &texlive).await;
+    let server_data = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let doc = |body: &str| format!("\\documentclass{{article}}\n\\begin{{document}}\n{body}\n\\end{{document}}\n");
+    std::fs::write(project.path().join("main.tex"), doc("Lorem ipsum dolor sit amet.")).unwrap();
+    let core = builder(server_data.path(), &texlive).with_remote(&url, TOKEN);
+
+    core.latexdiff(project.path(), &doc("Lorem ipsum."), &doc("Lorem ipsum dolor sit amet."), EngineKind::PdfLatex, &|_| {})
+        .await
+        .unwrap();
+    let out = project.path().join(".galley/build");
+    assert!(std::fs::read(out.join(galley_build::runner::LAST_DIFF_PDF)).unwrap().starts_with(b"%PDF"));
+    let leftovers: Vec<_> = std::fs::read_dir(&out).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with(".remote-")).collect();
+    assert!(leftovers.is_empty(), "scratch files are removed");
+    let copy = std::fs::read_dir(worker_data.path().join("work")).unwrap().next().unwrap().unwrap().path();
+    assert!(!copy.join(galley_build::remote::COMPARE_DIR).exists(), "the versions do not stay among the worker's sources");
+
+    let broken = core.latexdiff(project.path(), &doc("Lorem."), &doc("\\notacommand"), EngineKind::PdfLatex, &|_| {}).await;
+    let message = broken.unwrap_err().to_string();
+    assert!(message.contains("may not compile"), "the worker's explanation reaches the author: {message}");
+}

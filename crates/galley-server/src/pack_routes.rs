@@ -27,6 +27,8 @@ pub async fn pack(
     Path(id): Path<String>,
     CurrentUser(user): CurrentUser,
 ) -> Result<Json<PackReport>, AppError> {
+    let gate = app.project_gate(&id).await;
+    let _operation = gate.read().await;
     app.require(&user, &id, Role::can_compile, "packaging the project")
         .await?;
     let project = app.registry.open(&id).await?;
