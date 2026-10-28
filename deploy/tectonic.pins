@@ -1,0 +1,25 @@
+# The Tectonic engine Galley compiles with: the binary and its whole package bundle, pinned by
+# hash. Read by galley-build (crates/galley-build/src/install.rs) and by deploy/tectonic-engine.sh,
+# so the image and a self-hosted install lay out the same engine. Change these only on purpose,
+# and all together. Plain NAME=value lines, no quoting or expansion.
+
+TECTONIC_VERSION=0.17.0
+
+# The release archives (checked against GitHub's published digests) and the binary inside each.
+TECTONIC_X86_64_ARCHIVE_SHA256=8533d07f9ccbd7a65824b9e0459041bca34af1eb33daba48f59215593753a3b7
+TECTONIC_X86_64_BINARY_SHA256=a98aa59ad5c1df39a6c9e56cbfc5088f2b11d6c179c0130b97998e4bd46a46da
+TECTONIC_AARCH64_ARCHIVE_SHA256=b10954a95404f3ab2328d2fa59a5ebab8e657f893fab096f98be8db7c0c979b8
+TECTONIC_AARCH64_BINARY_SHA256=19a2b763e5875fffefaa193c42e460ceba5983d027b6d50b0094130d26ba4e4a
+
+# Tectonic's default bundle v33 as one flat tar. BUNDLE_DIGEST is the content of its SHA256SUM file.
+BUNDLE_URL=https://relay.fullyjustified.net/default_bundle_v33.tar
+BUNDLE_SIZE=2881562112
+BUNDLE_SHA256=425685e124746c15ba9bb8e0596bdaad98fce886afa347fbcf9ec0e9acd7fe79
+BUNDLE_DIGEST=6ffe055852f8faf66c0acbe1a7fb27f87b869a90bad1204f3bf4d9683f597c7c
+BUNDLE_ENTRIES=134980
+
+# The engine folder is named engine-<KEY>: the first 16 hex digits of BUNDLE_DIGEST, a dash, and
+# the first 16 of the binary's SHA-256. Formats built for one binary and bundle are never reused
+# by another.
+KEY_X86_64=6ffe055852f8faf6-a98aa59ad5c1df39
+KEY_AARCH64=6ffe055852f8faf6-19a2b763e5875fff

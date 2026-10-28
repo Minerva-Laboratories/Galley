@@ -23,7 +23,7 @@ fn sandbox_kind() -> SandboxKind {
 
 fn builder(data_dir: &Path, texlive: &str) -> Builder {
     let sandbox = Sandbox { kind: sandbox_kind(), docker_image: String::new(), memory_mb: 1024, cpus: 1.0, systemd_scope: false };
-    Builder::new(sandbox, Hints::bundled().unwrap(), Duration::from_secs(120), data_dir, None, 2)
+    Builder::new(sandbox, Hints::bundled().unwrap(), Duration::from_secs(120), data_dir, 2)
         .with_texlive_path(Some(texlive.to_string()))
 }
 

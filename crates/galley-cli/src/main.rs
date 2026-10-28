@@ -206,10 +206,14 @@ enum AdminCommand {
 
 #[derive(Subcommand)]
 enum EngineCommand {
-    /// Download an engine into the data directory
+    /// Install the pinned Tectonic engine and its whole package bundle (2.9 GB) into the data
+    /// directory, so builds never need the network
     Install {
         #[arg(default_value = "tectonic")]
         name: String,
+        /// Read the bundle from this copy of the pinned tar instead of downloading it
+        #[arg(long)]
+        bundle_file: Option<std::path::PathBuf>,
     },
 }
 
@@ -325,11 +329,15 @@ async fn main() -> Result<()> {
             }
         }
         Command::Engine { command } => match command {
-            EngineCommand::Install { name } => {
+            EngineCommand::Install { name, bundle_file } => {
                 anyhow::ensure!(name == "tectonic", "only the tectonic engine can be installed; TeX Live is configured through [build] texlive_path");
                 let dir = galley_build::engine::Tectonic::install_dir(&data_dir);
                 let progress = |m: String| println!("{m}");
-                let path = galley_build::install::install_tectonic(&dir, &progress).await?;
+                let source = match bundle_file {
+                    Some(path) => galley_build::install::BundleSource::File(path),
+                    None => galley_build::install::BundleSource::Download,
+                };
+                let path = galley_build::install::install_engine(&dir, source, &progress).await?;
                 println!("Installed {}", path.display());
             }
         },

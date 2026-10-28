@@ -5,7 +5,6 @@
 
 pub mod buildfs;
 pub mod engine;
-mod fetch;
 pub mod figures;
 pub mod hints;
 pub mod install;

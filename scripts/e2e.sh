@@ -9,17 +9,13 @@ PORT="${GALLEY_E2E_PORT:-7411}"
 DATA="$(mktemp -d)"
 trap 'kill "${SERVER_PID:-}" 2>/dev/null || true; rm -rf "$DATA"' EXIT
 
-# Reuse explicitly prepared engine fixtures for offline, reproducible browser builds.
-if [[ -n "${GALLEY_TEST_TECTONIC:-}" || -n "${GALLEY_TEST_TECTONIC_CACHE:-}" ]]; then
+# Reuse an installed Tectonic engine (see scripts/test-engines.sh) for offline browser builds. Only
+# the engine folder is linked, so nothing Galley tidies at startup reaches the fixture.
+if [[ -n "${GALLEY_TEST_TECTONIC_ENGINES:-}" ]]; then
   mkdir -p "$DATA/tectonic"
-  if [[ -n "${GALLEY_TEST_TECTONIC:-}" ]]; then
-    ln -s "$GALLEY_TEST_TECTONIC" "$DATA/tectonic/tectonic"
-  fi
-  if [[ -n "${GALLEY_TEST_TECTONIC_CACHE:-}" ]]; then
-    ln -s "$GALLEY_TEST_TECTONIC_CACHE" "$DATA/tectonic/cache"
-    # The fixture cache is Galley's own warm-up, so mark it trusted (see TRUSTED_CACHE in engine.rs).
-    touch "$DATA/tectonic/.cache-trusted-1"
-  fi
+  for engine in "$GALLEY_TEST_TECTONIC_ENGINES"/engine-*; do
+    ln -s "$engine" "$DATA/tectonic/"
+  done
 fi
 E2E_ARGS=(--data-dir "$DATA")
 if [[ -n "${GALLEY_E2E_CONFIG:-}" ]]; then

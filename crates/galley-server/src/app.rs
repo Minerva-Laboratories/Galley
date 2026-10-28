@@ -110,12 +110,13 @@ pub async fn make_builder(data_dir: &Path, config: &Config, public: bool) -> std
         hints,
         Duration::from_secs(b.timeout_s),
         data_dir,
-        Some(b.tectonic_path.clone()).filter(|s| !s.is_empty()),
         b.max_concurrent,
     ).with_texlive_path(Some(b.texlive_path.clone()).filter(|s| !s.trim().is_empty()));
+    // What the old on-demand design kept in <data>/tectonic, and stopped installs, go.
+    galley_build::install::tidy(&galley_build::engine::Tectonic::install_dir(data_dir));
     match builder.engine_path().await {
         Some(p) => tracing::info!(path = %p.display(), "tectonic found"),
-        None => tracing::info!("tectonic not installed yet; it is downloaded on the first build"),
+        None => tracing::warn!("{}", galley_build::runner::TECTONIC_MISSING),
     }
     Ok(builder)
 }
@@ -211,8 +212,7 @@ impl AppState {
 
     pub async fn require_engine(&self, engine: EngineKind) -> Result<(), AppError> {
         let item = self.builder.check_engine(engine).await;
-        if item.available || (engine == EngineKind::Tectonic
-            && item.reason.as_deref().is_some_and(|reason| reason.contains("first build can install"))) {
+        if item.available {
             return Ok(());
         }
         Err(AppError::BadRequest(format!(

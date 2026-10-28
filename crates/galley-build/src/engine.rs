@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::sandbox::{GUEST_WORK, Mount, Mounts, Sandbox, Spec};
-use crate::zones::{self, Cleanup, GUEST_CACHE, GUEST_FIG, GUEST_IN, GUEST_OUT, Leaf};
+use crate::zones::{self, Cleanup, GUEST_BUNDLE, GUEST_CACHE, GUEST_FIG, GUEST_IN, GUEST_OUT, Leaf};
 use crate::{Error, Result};
 
 const GUEST_BIN: &str = "/galley/bin/tectonic";
@@ -456,8 +456,8 @@ fn project_source_dirs(project_dir: &Path) -> Vec<PathBuf> {
 
 #[derive(Debug, Clone)]
 pub struct Tectonic {
-    pub binary: PathBuf,
-    pub cache_dir: PathBuf,
+    /// The engine folder, `engine-<KEY>`: the binary, the bundle and the formats built for them.
+    pub root: PathBuf,
 }
 
 /// One compile invocation, ready for the sandbox.
@@ -471,18 +471,28 @@ pub struct CompileSpec {
     pub inputs: Vec<Cleanup>,
 }
 
-/// Marks a shared package cache that only Galley's own documents filled. Written by
-/// [`Tectonic::discard_untrusted_cache`] and by the image's warm-up.
-pub const TRUSTED_CACHE: &str = ".cache-trusted-1";
+/// Where the image puts the engine. A self-hosted install puts it in `<data>/tectonic`.
+pub const IMAGE_ENGINES: &str = "/opt/galley/tectonic";
 
 impl Tectonic {
-    pub(crate) fn local_cache_dir(project_dir: &Path) -> PathBuf {
-        zones::cache_dir(project_dir)
+    pub fn binary(&self) -> PathBuf {
+        self.root.join("tectonic")
     }
 
-    /// Whether `<data_dir>/tectonic` holds the trust marker, as a regular file.
-    fn marked(dir: &Path) -> bool {
-        std::fs::symlink_metadata(dir.join(TRUSTED_CACHE)).is_ok_and(|m| m.file_type().is_file())
+    pub fn bundle(&self) -> PathBuf {
+        self.root.join("bundle")
+    }
+
+    pub fn cache(&self) -> PathBuf {
+        self.root.join("cache")
+    }
+
+    /// The engine key (`<bundle>-<binary>`), from the folder name.
+    pub fn key(&self) -> String {
+        self.root
+            .file_name()
+            .map(|n| n.to_string_lossy().trim_start_matches("engine-").to_string())
+            .unwrap_or_default()
     }
 
     /// Whether a cache holds a finished format file. Tectonic writes a format to a temporary
@@ -497,138 +507,45 @@ impl Tectonic {
         })
     }
 
-    /// `<data_dir>/tectonic/cache` if it is marked trusted, for reports such as `galley doctor`.
-    pub fn trusted_shared_cache(data_dir: &Path) -> Option<PathBuf> {
-        let dir = Self::install_dir(data_dir);
-        let cache = dir.join("cache");
-        (Self::marked(&dir) && cache.is_dir()).then_some(cache)
-    }
-
-    /// The shared cache new project caches are seeded from, if it is marked trusted.
-    pub(crate) fn shared_cache(&self) -> Option<&Path> {
-        let marked = Self::marked(self.cache_dir.parent()?);
-        (marked && self.cache_dir.is_dir()).then_some(self.cache_dir.as_path())
-    }
-
-    /// Throw away a shared package cache that has no trust marker, once per data folder. Until
-    /// 2026-10-01 an author's document ran online with the shared cache writable, so an old one
-    /// may hold planted files, and every project cache is seeded from it. A cache that is a link
-    /// is not Galley's to delete, and its target was just as writable then, so it is left in
-    /// place but not trusted: the operator creates the marker once its contents are checked.
-    pub fn discard_untrusted_cache(data_dir: &Path) -> std::io::Result<()> {
-        let dir = Self::install_dir(data_dir);
-        // A discard that was stopped halfway leaves its renamed copy; finish it.
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                if entry.file_name().to_string_lossy().starts_with(".cache-discarded-") {
-                    let _ = std::fs::remove_dir_all(entry.path());
-                }
-            }
-        }
-        if Self::marked(&dir) {
-            return Ok(());
-        }
-        let cache = dir.join("cache");
-        let marker = dir.join(TRUSTED_CACHE);
-        match std::fs::symlink_metadata(&cache) {
-            Ok(m) if m.file_type().is_symlink() => {
-                tracing::warn!(
-                    cache = %cache.display(),
-                    marker = %marker.display(),
-                    "the shared Tectonic cache is a link, so it is not used; create the marker once its contents are checked"
-                );
-                return Ok(());
-            }
-            Ok(m) if m.is_dir() => {
-                // Renamed first, so a stop halfway never leaves a half-deleted cache in use.
-                let trash = dir.join(zones::unique(".cache-discarded"));
-                std::fs::rename(&cache, &trash)?;
-                match std::fs::remove_dir_all(&trash) {
-                    Ok(()) => tracing::info!(cache = %cache.display(), "discarded the old shared Tectonic cache"),
-                    Err(e) => tracing::warn!(
-                        error = %e,
-                        trash = %trash.display(),
-                        "set aside the old shared Tectonic cache; removing it is retried at the next start"
-                    ),
-                }
-            }
-            Ok(_) => std::fs::remove_file(&cache)?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
-        }
-        std::fs::create_dir_all(&dir)?;
-        crate::buildfs::write(&marker, "")
-    }
-
-    /// Seed the project's cache from the shared one. Only Galley's own `fetch` run writes it, but
-    /// the shared cache is still never mounted into a sandbox. The
-    /// copy is made in a folder no compile can see and then renamed into place, so no compile
-    /// ever finds it half-filled.
-    fn prepare_cache(&self, project_dir: &Path) -> Result<PathBuf> {
-        let local = Self::local_cache_dir(project_dir);
-        let ready = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_dir());
-        if ready(&local) {
-            return Ok(local);
-        }
-        if std::fs::symlink_metadata(&local).is_ok() {
-            std::fs::remove_file(&local)?;
-        }
-        let tmp = local.with_file_name(zones::unique(".tectonic-cache"));
-        std::fs::create_dir(&tmp)?;
-        let filled = if let Some(shared) = self.shared_cache() {
-            copy_cache_tree(shared, &tmp)
-        } else {
-            Ok(())
-        };
-        let renamed = filled.and_then(|()| std::fs::rename(&tmp, &local).map_err(Error::from));
-        if renamed.is_err() {
-            let _ = std::fs::remove_dir_all(&tmp);
-        }
-        // Another run may have renamed its own copy into place first.
-        if ready(&local) { Ok(local) } else { renamed.map(|()| local) }
-    }
-
-    /// The mounts of a compile of the author's document. The package cache is read-only: TeX can
-    /// write to any path it can reach, and the online `fetch` run later loads files from this
-    /// cache, so a writable cache would let a document plant code that then runs with network.
-    /// An offline compile with `--only-cached` writes nothing to the cache once its format files
-    /// exist, and the warm cache or the first `fetch` run provides those.
+    /// The mounts of a compile: the binary, the bundle and the formats, all read-only. A compile
+    /// can never change what the next one reads.
     fn mounts(&self, project_dir: &Path, leaf: &Leaf, guest_out: &str) -> Vec<Mount> {
         let mut mounts = vec![Mount {
-            host: self.binary.clone(),
+            host: self.binary(),
             guest: PathBuf::from(GUEST_BIN),
             writable: false,
         }];
         mounts.extend(common_mounts(project_dir, leaf, guest_out));
         mounts.push(Mount {
-            host: Self::local_cache_dir(project_dir),
+            host: self.bundle(),
+            guest: PathBuf::from(GUEST_BUNDLE),
+            writable: false,
+        });
+        mounts.push(Mount {
+            host: self.cache(),
             guest: PathBuf::from(GUEST_CACHE),
             writable: false,
         });
         mounts
     }
 
-    /// Find Tectonic. Look at the configured path, then `<data_dir>/tectonic/tectonic`, then `$PATH`.
-    pub fn locate(data_dir: &Path, configured: Option<&str>) -> Option<Tectonic> {
-        let cache_dir = data_dir.join("tectonic").join("cache");
-        let candidates = [
-            configured.filter(|s| !s.is_empty()).map(PathBuf::from),
-            Some(data_dir.join("tectonic").join("tectonic")),
-            which("tectonic"),
-        ];
-        candidates
+    /// Find the pinned engine for this machine: the image's, then the one `galley engine
+    /// install` put in `<data_dir>/tectonic`. Only a complete `engine-<KEY>` folder counts.
+    pub fn locate(data_dir: &Path) -> Option<Tectonic> {
+        let pins = crate::install::pins().ok()?;
+        [PathBuf::from(IMAGE_ENGINES), Self::install_dir(data_dir)]
             .into_iter()
-            .flatten()
-            .find(|p| p.is_file())
-            .map(|binary| Tectonic { binary, cache_dir })
+            .map(|dir| dir.join(pins.folder()))
+            .find(|root| crate::install::is_complete(root, &pins))
+            .map(|root| Tectonic { root })
     }
 
     pub fn install_dir(data_dir: &Path) -> PathBuf {
         data_dir.join("tectonic")
     }
 
-    /// Build the sandbox spec that compiles `main_file`. It always runs offline, from the project's
-    /// cache. Missing packages are fetched separately, without the author's document (see `fetch`).
+    /// Build the sandbox spec that compiles `main_file`. It always runs offline, from the
+    /// engine's own bundle.
     pub fn compile(
         &self,
         sandbox: &Sandbox,
@@ -638,7 +555,6 @@ impl Tectonic {
         _timeout_s: u64,
     ) -> Result<CompileSpec> {
         let leaf = Leaf::run(project_dir)?;
-        self.prepare_cache(project_dir)?;
         let (input, stem) = if draft {
             let class = documentclass(
                 &std::fs::read_to_string(project_dir.join(main_file)).unwrap_or_default(),
@@ -672,7 +588,6 @@ impl Tectonic {
         stem: &str,
     ) -> Result<CompileSpec> {
         let (leaf, guest_out) = leaf_for(project_dir, stem)?;
-        self.prepare_cache(project_dir)?;
         self.build_spec(
             sandbox,
             project_dir,
@@ -681,67 +596,6 @@ impl Tectonic {
             &zones::inputs_dir(project_dir).join(build_file),
             stem.to_string(),
         )
-    }
-
-    /// The sandboxed command that fills the project's cache: `source` is a document Galley wrote
-    /// (see crate::fetch), compiled with network. The project is not mounted, only a folder
-    /// holding that document, so no file of the author's is read while the network is on.
-    pub fn fetch(&self, sandbox: &Sandbox, project_dir: &Path, source: &str) -> Result<CompileSpec> {
-        let leaf = Leaf::run(project_dir)?;
-        self.prepare_cache(project_dir)?;
-        let work = zones::inputs_dir(project_dir).join(zones::unique("fetch"));
-        std::fs::create_dir(&work)?;
-        let cleanup = Cleanup::new(work.clone());
-        crate::buildfs::write(&work.join("galley-fetch.tex"), source)?;
-        let mut mounts = vec![Mount {
-            host: self.binary.clone(),
-            guest: PathBuf::from(GUEST_BIN),
-            writable: false,
-        }];
-        mounts.push(Mount {
-            host: leaf.path().to_path_buf(),
-            guest: PathBuf::from(GUEST_OUT),
-            writable: true,
-        });
-        mounts.push(Mount {
-            host: Self::local_cache_dir(project_dir),
-            guest: PathBuf::from(GUEST_CACHE),
-            writable: true,
-        });
-        let map = sandbox.mounts(&work, &mounts);
-        let guest_cache = map.guest(&Self::local_cache_dir(project_dir));
-        let args = [
-            "-X",
-            "compile",
-            "-Z",
-            "continue-on-errors",
-            "--keep-logs",
-            "-o",
-            &map.guest(leaf.path()).to_string_lossy(),
-            &map.guest(&work.join("galley-fetch.tex")).to_string_lossy(),
-        ]
-        .map(String::from)
-        .to_vec();
-        Ok(CompileSpec {
-            spec: Spec {
-                project_dir: work,
-                program: map.guest(&self.binary),
-                mounts,
-                masked: Vec::new(),
-                env: vec![
-                    ("TECTONIC_CACHE_DIR".into(), guest_cache.to_string_lossy().into_owned()),
-                    ("XDG_CACHE_HOME".into(), guest_cache.to_string_lossy().into_owned()),
-                    ("HOME".into(), "/tmp".into()),
-                    ("SOURCE_DATE_EPOCH".into(), "0".into()),
-                ],
-                network: true,
-                args,
-                name: zones::unique("galley-fetch"),
-            },
-            leaf,
-            stem: "galley-fetch".into(),
-            inputs: vec![cleanup],
-        })
     }
 
     /// Assemble the sandboxed Tectonic command for a resolved input and stem.
@@ -792,27 +646,34 @@ impl Tectonic {
                 args.extend(["-Z".to_string(), format!("search-path={}", dir.display())]);
             }
         }
-        args.push("--only-cached".into());
+        // Every package comes from the local bundle; nothing is ever downloaded.
         args.extend([
+            "-b".to_string(),
+            map.guest(&self.bundle()).to_string_lossy().into_owned(),
+            "--only-cached".to_string(),
             "-o".to_string(),
             guest_out.to_string_lossy().into_owned(),
             map.guest(input).to_string_lossy().into_owned(),
         ]);
 
-        let guest_cache = map.guest(&Self::local_cache_dir(project_dir));
+        // The formats are read from the engine's cache, which is read-only. Anything else Tectonic
+        // might want to keep goes to the run's own folder: a private tmpfs in bwrap and docker, the
+        // run's scratch folder without a sandbox (never the host's shared /tmp).
+        let private = if sandbox.kind == crate::SandboxKind::None {
+            guest_out.to_string_lossy().into_owned()
+        } else {
+            "/tmp".to_string()
+        };
         let env = vec![
             (
                 "TECTONIC_CACHE_DIR".to_string(),
-                guest_cache.to_string_lossy().into_owned(),
+                map.guest(&self.cache()).to_string_lossy().into_owned(),
             ),
-            (
-                "XDG_CACHE_HOME".to_string(),
-                guest_cache.to_string_lossy().into_owned(),
-            ),
-            ("HOME".to_string(), "/tmp".to_string()),
+            ("XDG_CACHE_HOME".to_string(), private.clone()),
+            ("HOME".to_string(), private),
             ("SOURCE_DATE_EPOCH".to_string(), "0".to_string()),
         ];
-        let program = map.guest(&self.binary);
+        let program = map.guest(&self.binary());
         // The name is unique for each run. `docker run --rm` removes the previous container
         // asynchronously, so the same name makes a quick rebuild fail with "name already in use".
         let name = zones::unique(&format!(
@@ -838,30 +699,6 @@ impl Tectonic {
             inputs: Vec::new(),
         })
     }
-}
-
-fn copy_cache_tree(source: &Path, destination: &Path) -> Result<()> {
-    for entry in std::fs::read_dir(source)? {
-        let entry = entry?;
-        let target = destination.join(entry.file_name());
-        let kind = entry.file_type()?;
-        if kind.is_dir() {
-            std::fs::create_dir_all(&target)?;
-            copy_cache_tree(&entry.path(), &target)?;
-        } else if kind.is_file() {
-            std::fs::copy(entry.path(), &target)?;
-            let mut permissions = std::fs::metadata(&target)?.permissions();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                permissions.set_mode(permissions.mode() | 0o200);
-            }
-            #[cfg(not(unix))]
-            permissions.set_readonly(false);
-            std::fs::set_permissions(&target, permissions)?;
-        }
-    }
-    Ok(())
 }
 
 /// The class named in `\documentclass[...]{class}`.
@@ -1014,219 +851,101 @@ mod tests {
         );
     }
 
-    #[test]
-    fn tectonic_seeds_only_a_project_local_writable_cache() {
-        let tree = tempfile::tempdir().unwrap();
-        let project = tempfile::tempdir().unwrap();
-        let shared = tree.path().join("cache");
-        std::fs::create_dir_all(shared.join("tectonic/bundles")).unwrap();
-        std::fs::write(shared.join("tectonic/bundles/index"), "cached").unwrap();
-        std::fs::write(tree.path().join(TRUSTED_CACHE), "").unwrap();
-        let mut permissions = std::fs::metadata(shared.join("tectonic/bundles/index"))
-            .unwrap()
-            .permissions();
-        permissions.set_readonly(true);
-        std::fs::set_permissions(shared.join("tectonic/bundles/index"), permissions).unwrap();
-        let binary = tree.path().join("tectonic");
-        std::fs::write(&binary, "").unwrap();
-        std::fs::write(project.path().join("main.tex"), "\\documentclass{article}").unwrap();
-        let engine = Tectonic {
-            binary,
-            cache_dir: shared.clone(),
-        };
-        let sandbox = Sandbox {
+    /// An engine folder with an empty binary, for specs that are only inspected.
+    fn fake_engine(tree: &Path) -> Tectonic {
+        let root = tree.join("engine-0000000000000000-0000000000000000");
+        std::fs::create_dir_all(root.join("bundle")).unwrap();
+        std::fs::create_dir_all(root.join("cache/formats")).unwrap();
+        std::fs::write(root.join("tectonic"), "").unwrap();
+        Tectonic { root }
+    }
+
+    fn bwrap() -> Sandbox {
+        Sandbox {
             kind: crate::SandboxKind::Bwrap,
             docker_image: String::new(),
             memory_mb: 512,
             cpus: 1.0,
             systemd_scope: false,
-        };
-        let spec = engine
-            .compile(&sandbox, project.path(), "main.tex", false, 30)
-            .unwrap();
-        let local = Tectonic::local_cache_dir(project.path());
-        assert_eq!(
-            std::fs::read_to_string(local.join("tectonic/bundles/index")).unwrap(),
-            "cached"
-        );
-        assert!(
-            !std::fs::metadata(local.join("tectonic/bundles/index"))
-                .unwrap()
-                .permissions()
-                .readonly()
-        );
-        assert_eq!(spec.spec.mounts[0].host, engine.binary);
-        let writable: Vec<_> = spec.spec.mounts.iter().filter(|m| m.writable).map(|m| m.host.clone()).collect();
-        assert_eq!(writable, vec![spec.leaf.path().to_path_buf()]);
-        assert!(spec.spec.mounts.iter().any(|m| !m.writable && m.host == local), "the cache is mounted read-only");
-        assert!(spec.spec.check_mounts().is_ok());
-        for key in ["TECTONIC_CACHE_DIR", "XDG_CACHE_HOME"] {
-            assert!(spec.spec.env.iter().any(|(k, v)| k == key && v == GUEST_CACHE));
         }
-        // No half-filled copy is left beside the cache.
-        let beside: Vec<_> = std::fs::read_dir(local.parent().unwrap())
-            .unwrap()
-            .flatten()
-            .filter(|e| e.file_name().to_string_lossy().starts_with(".tectonic-cache"))
-            .collect();
-        assert!(beside.is_empty());
-        assert_eq!(
-            std::fs::read_to_string(shared.join("tectonic/bundles/index")).unwrap(),
-            "cached"
-        );
     }
 
     #[test]
-    fn an_unmarked_shared_cache_is_discarded_once_and_never_seeds_a_project() {
-        let data = tempfile::tempdir().unwrap();
-        let shared = data.path().join("tectonic/cache");
-        std::fs::create_dir_all(shared.join("formats")).unwrap();
-        std::fs::write(shared.join("planted.cls"), "\\relax").unwrap();
-        let engine = Tectonic { binary: data.path().join("tectonic/tectonic"), cache_dir: shared.clone() };
-        assert_eq!(engine.shared_cache(), None, "an unmarked cache is not used");
-        let project = tempfile::tempdir().unwrap();
-        crate::zones::prepare(project.path()).unwrap();
-        let local = engine.prepare_cache(project.path()).unwrap();
-        assert!(!local.join("planted.cls").exists());
-
-        Tectonic::discard_untrusted_cache(data.path()).unwrap();
-        assert!(!shared.exists());
-        assert!(data.path().join("tectonic").join(TRUSTED_CACHE).is_file());
-        let leftovers: Vec<_> = std::fs::read_dir(data.path().join("tectonic"))
-            .unwrap()
-            .flatten()
-            .filter(|e| e.file_name().to_string_lossy().starts_with(".cache-discarded"))
-            .collect();
-        assert!(leftovers.is_empty());
-
-        // Once marked, a cache filled later by Galley is kept and used.
-        std::fs::create_dir_all(shared.join("formats")).unwrap();
-        Tectonic::discard_untrusted_cache(data.path()).unwrap();
-        assert!(shared.is_dir());
-        assert_eq!(engine.shared_cache(), Some(shared.as_path()));
-    }
-
-    #[test]
-    fn a_linked_shared_cache_is_kept_but_not_trusted_until_marked() {
-        let data = tempfile::tempdir().unwrap();
-        let fixture = tempfile::tempdir().unwrap();
-        std::fs::write(fixture.path().join("keep"), "").unwrap();
-        std::fs::create_dir_all(data.path().join("tectonic")).unwrap();
-        let link = data.path().join("tectonic/cache");
-        std::os::unix::fs::symlink(fixture.path(), &link).unwrap();
-        let engine = Tectonic { binary: data.path().join("tectonic/tectonic"), cache_dir: link.clone() };
-        Tectonic::discard_untrusted_cache(data.path()).unwrap();
-        assert!(fixture.path().join("keep").exists());
-        assert!(!data.path().join("tectonic").join(TRUSTED_CACHE).exists());
-        assert_eq!(engine.shared_cache(), None);
-        // The operator's marker is the opt-in.
-        std::fs::write(data.path().join("tectonic").join(TRUSTED_CACHE), "").unwrap();
-        assert_eq!(engine.shared_cache(), Some(link.as_path()));
-    }
-
-    #[test]
-    fn leftovers_of_a_stopped_discard_are_removed_and_only_a_regular_marker_counts() {
-        let data = tempfile::tempdir().unwrap();
-        let dir = data.path().join("tectonic");
-        std::fs::create_dir_all(dir.join(".cache-discarded-1-2-3/formats")).unwrap();
-        // A link named like a leftover goes, but never what it points at.
-        let victim = tempfile::tempdir().unwrap();
-        std::fs::write(victim.path().join("keep"), "").unwrap();
-        std::os::unix::fs::symlink(victim.path(), dir.join(".cache-discarded-9-9-9")).unwrap();
-        std::fs::create_dir_all(dir.join("cache")).unwrap();
-        // A folder where the marker belongs does not count as one.
-        std::fs::create_dir_all(dir.join(TRUSTED_CACHE)).unwrap();
-        let engine = Tectonic { binary: dir.join("tectonic"), cache_dir: dir.join("cache") };
-        assert_eq!(engine.shared_cache(), None);
-        let _ = Tectonic::discard_untrusted_cache(data.path());
-        assert!(!dir.join(".cache-discarded-1-2-3").exists());
-        assert!(std::fs::symlink_metadata(dir.join(".cache-discarded-9-9-9")).is_err());
-        assert!(victim.path().join("keep").exists());
-        assert!(!dir.join("cache").exists());
-        assert_eq!(engine.shared_cache(), None);
-    }
-
-
-    #[test]
-    fn the_authors_document_always_compiles_offline() {
+    fn every_tectonic_run_reads_the_engine_read_only_and_offline() {
         let tree = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
-        let binary = tree.path().join("tectonic");
-        std::fs::write(&binary, "").unwrap();
         std::fs::write(project.path().join("main.tex"), "\\documentclass{article}").unwrap();
-        let engine = Tectonic { binary, cache_dir: tree.path().join("cache") };
-        let sandbox = Sandbox {
-            kind: crate::SandboxKind::Bwrap,
-            docker_image: String::new(),
-            memory_mb: 512,
-            cpus: 1.0,
-            systemd_scope: false,
-        };
+        let engine = fake_engine(tree.path());
+        let sandbox = bwrap();
         for spec in [
             engine.compile(&sandbox, project.path(), "main.tex", false, 30).unwrap(),
             engine.compile(&sandbox, project.path(), "main.tex", true, 30).unwrap(),
             engine.compile_generated(&sandbox, project.path(), "galley-diff.tex", "galley-diff").unwrap(),
+            engine.compile_generated(&sandbox, project.path(), "galley-fig.tex", "galley-fig").unwrap(),
         ] {
             assert!(!spec.spec.network);
-            assert!(spec.spec.args.iter().any(|a| a == "--only-cached"));
-            // The online fetch run loads from this cache, so the document must not write it.
-            let cache = Tectonic::local_cache_dir(project.path());
-            assert!(spec.spec.mounts.iter().any(|m| m.host == cache && !m.writable));
-            assert!(!spec.spec.mounts.iter().any(|m| m.host == cache && m.writable));
+            let args = &spec.spec.args;
+            assert!(args.iter().any(|a| a == "--only-cached"));
+            let b = args.iter().position(|a| a == "-b").expect("-b");
+            assert_eq!(args[b + 1], GUEST_BUNDLE);
+            assert_eq!(spec.spec.mounts[0].host, engine.binary());
+            let writable: Vec<_> = spec.spec.mounts.iter().filter(|m| m.writable).map(|m| m.host.clone()).collect();
+            assert_eq!(writable, vec![spec.leaf.path().to_path_buf()]);
+            for (host, guest) in [(engine.bundle(), GUEST_BUNDLE), (engine.cache(), GUEST_CACHE)] {
+                assert!(spec.spec.mounts.iter().any(|m| m.host == host && m.guest == Path::new(guest) && !m.writable));
+            }
+            assert!(spec.spec.env.iter().any(|(k, v)| k == "TECTONIC_CACHE_DIR" && v == GUEST_CACHE));
+            assert!(spec.spec.env.iter().any(|(k, v)| k == "XDG_CACHE_HOME" && v == "/tmp"));
+            assert!(spec.spec.check_mounts().is_ok());
         }
+        // No per-project package cache appears.
+        assert!(!project.path().join(".galley/scratch/tectonic-cache").exists());
     }
 
     #[test]
-    fn a_fetch_runs_galleys_document_without_the_project() {
+    fn without_a_sandbox_tectonic_keeps_nothing_in_the_shared_tmp() {
         let tree = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
-        let binary = tree.path().join("tectonic");
-        std::fs::write(&binary, "").unwrap();
-        std::fs::write(project.path().join("main.tex"), "\\directlua{}").unwrap();
-        let engine = Tectonic { binary, cache_dir: tree.path().join("cache") };
-        let sandbox = Sandbox {
-            kind: crate::SandboxKind::Bwrap,
-            docker_image: String::new(),
-            memory_mb: 512,
-            cpus: 1.0,
-            systemd_scope: false,
-        };
-        let source = "\\documentclass{article}\n\\usepackage{tikz}\n\\begin{document}\nx\n\\end{document}\n";
-        let spec = engine.fetch(&sandbox, project.path(), source).unwrap();
-        assert!(spec.spec.network);
-        // The project is not what is mounted at /work: only Galley's own document is there.
-        let work = spec.spec.project_dir.clone();
-        assert!(work.starts_with(crate::zones::inputs_dir(project.path())));
-        let names: Vec<String> = std::fs::read_dir(&work)
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(names, vec!["galley-fetch.tex"]);
-        assert_eq!(std::fs::read_to_string(work.join("galley-fetch.tex")).unwrap(), source);
-        // The cache it fills is the project's, the one offline compiles read.
-        assert!(spec.spec.mounts.iter().any(|m| m.writable && m.host == Tectonic::local_cache_dir(project.path())));
-        assert!(spec.spec.env.iter().any(|(k, v)| k == "TECTONIC_CACHE_DIR" && v == GUEST_CACHE));
-        assert!(!spec.spec.args.iter().any(|a| a.starts_with("search-path")));
-        assert!(spec.spec.args.iter().any(|a| a == "/work/galley-fetch.tex"));
-        assert!(spec.spec.check_mounts().is_ok());
-        drop(spec);
-        assert!(!work.exists(), "the fetch document is removed after the run");
+        std::fs::write(project.path().join("main.tex"), "\\documentclass{article}").unwrap();
+        let engine = fake_engine(tree.path());
+        let sandbox = Sandbox { kind: crate::SandboxKind::None, ..bwrap() };
+        let spec = engine.compile(&sandbox, project.path(), "main.tex", false, 30).unwrap();
+        let leaf = spec.leaf.path().to_string_lossy().into_owned();
+        for key in ["XDG_CACHE_HOME", "HOME"] {
+            assert!(spec.spec.env.iter().any(|(k, v)| k == key && *v == leaf), "{key}");
+        }
+        assert!(spec.spec.args.iter().any(|a| *a == engine.bundle().to_string_lossy()));
+    }
+
+    #[test]
+    fn locate_takes_only_a_complete_pinned_engine() {
+        let data = tempfile::tempdir().unwrap();
+        let dir = Tectonic::install_dir(data.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        // A lone binary from the old on-demand download is not an engine.
+        std::fs::write(dir.join("tectonic"), "").unwrap();
+        assert!(Tectonic::locate(data.path()).is_none() || Path::new(IMAGE_ENGINES).is_dir());
+        let Ok(pins) = crate::install::pins() else { return };
+        let root = dir.join(pins.folder());
+        std::fs::create_dir_all(root.join("bundle")).unwrap();
+        std::fs::create_dir_all(root.join("cache/formats")).unwrap();
+        std::fs::write(root.join("tectonic"), "").unwrap();
+        std::fs::write(root.join("bundle/SHA256SUM"), "another bundle").unwrap();
+        std::fs::write(root.join("cache/formats/latex.fmt"), "fmt").unwrap();
+        if !Path::new(IMAGE_ENGINES).is_dir() {
+            assert!(Tectonic::locate(data.path()).is_none(), "the bundle digest differs");
+        }
+        std::fs::write(root.join("bundle/SHA256SUM"), &pins.bundle_digest).unwrap();
+        let found = Tectonic::locate(data.path()).unwrap();
+        assert_eq!(found.key(), pins.key);
     }
 
     #[test]
     fn tectonic_figure_jobs_find_the_wrapper_and_the_figures() {
         let tree = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
-        let binary = tree.path().join("tectonic");
-        std::fs::write(&binary, "").unwrap();
-        let engine = Tectonic { binary, cache_dir: tree.path().join("cache") };
-        let sandbox = Sandbox {
-            kind: crate::SandboxKind::Bwrap,
-            docker_image: String::new(),
-            memory_mb: 512,
-            cpus: 1.0,
-            systemd_scope: false,
-        };
+        let engine = fake_engine(tree.path());
+        let sandbox = bwrap();
         let spec = engine.compile_generated(&sandbox, project.path(), "galley-fig.tex", "galley-fig").unwrap();
         for path in [GUEST_IN, GUEST_FIG] {
             assert!(spec.spec.args.iter().any(|a| a == &format!("search-path={path}")), "{:?}", spec.spec.args);

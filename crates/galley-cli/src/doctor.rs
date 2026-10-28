@@ -171,12 +171,12 @@ async fn engine(config: &Config, data_dir: &Path) -> Vec<Check> {
             )];
         }
     };
+    let unsandboxed = sandbox.kind == galley_build::SandboxKind::None;
     let builder = galley_build::Builder::new(
         sandbox,
         hints,
         std::time::Duration::from_secs(b.timeout_s),
         data_dir,
-        Some(b.tectonic_path.clone()).filter(|s| !s.trim().is_empty()),
         b.max_concurrent,
     )
     .with_texlive_path(Some(b.texlive_path.clone()).filter(|s| !s.trim().is_empty()));
@@ -184,34 +184,28 @@ async fn engine(config: &Config, data_dir: &Path) -> Vec<Check> {
         let selected = item.engine == b.engine;
         out.push(engine_check(item, selected));
     }
-    // A warm bundle cache makes builds fast, and lets them run offline. Galley seeds projects
-    // only from a cache marked trusted (see galley_build::engine::TRUSTED_CACHE).
-    let cache = data_dir.join("tectonic").join("cache");
-    let trusted = galley_build::engine::Tectonic::trusted_shared_cache(data_dir);
-    out.push(match trusted {
-        Some(c) if galley_build::engine::Tectonic::has_formats(&c) => {
-            Check::ok("package cache", format!("warm at {}", c.display()))
+    // The Tectonic engine is the pinned binary with its whole package bundle, installed once, so
+    // builds never need the network.
+    match galley_build::engine::Tectonic::locate(data_dir) {
+        Some(engine) => {
+            out.push(Check::ok("tectonic engine", format!("installed at {}", engine.root.display())));
+            if unsandboxed {
+                out.push(Check::warn(
+                    "tectonic engine",
+                    "compiles run without a sandbox, as the server user, so a document could change the shared engine",
+                    "install bubblewrap or Docker",
+                ));
+            }
         }
-        None if std::fs::symlink_metadata(&cache).is_ok() => Check::warn(
-            "package cache",
-            format!("{} is not marked trusted, so it is not used", cache.display()),
-            format!(
-                "if it is a link, check its contents, then create {}; otherwise the next start \
-                 retries discarding it, so do not mark it",
-                data_dir.join("tectonic").join(galley_build::engine::TRUSTED_CACHE).display()
+        None => out.push(match galley_build::install::pins() {
+            Ok(_) => Check::warn(
+                "tectonic engine",
+                "not installed, so Tectonic builds are unavailable",
+                "run `galley engine install`: it downloads 2.9 GB and needs about 6 GB free while it installs",
             ),
-        ),
-        Some(c) => Check::warn(
-            "package cache",
-            format!("no finished format files yet at {}", c.display()),
-            "the first build fetches them, which needs network access",
-        ),
-        _ => Check::warn(
-            "package cache",
-            "empty; the first build downloads what the document needs",
-            "the first build needs network access, later ones do not",
-        ),
-    });
+            Err(e) => Check::warn("tectonic engine", e.to_string(), "use a TeX Live engine on this machine"),
+        }),
+    }
     out
 }
 

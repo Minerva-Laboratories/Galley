@@ -18,6 +18,8 @@ reqwest = { workspace = true, features = ["stream"] }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml_ng.workspace = true
+# Checks the Tectonic binary and package bundle against deploy/tectonic.pins.
+sha2 = "0.11"
 tar.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true

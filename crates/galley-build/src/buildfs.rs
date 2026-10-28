@@ -133,6 +133,32 @@ pub fn copy(from: &Path, to: &Path) -> std::io::Result<()> {
     copy_capped(from, to, MAX_PDF)
 }
 
+/// Remove `path` even when it is a read-only tree, such as an engine folder. A link is removed
+/// itself and never followed; only real folders inside the tree are made writable first.
+pub fn remove_tree(path: &Path) -> std::io::Result<()> {
+    let meta = std::fs::symlink_metadata(path)?;
+    if !meta.file_type().is_dir() {
+        return std::fs::remove_file(path);
+    }
+    open_folders(path)?;
+    std::fs::remove_dir_all(path)
+}
+
+fn open_folders(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::symlink_metadata(dir)?.permissions().mode();
+    if mode & 0o700 != 0o700 {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode | 0o700))?;
+    }
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            open_folders(&entry.path())?;
+        }
+    }
+    Ok(())
+}
+
 /// The real file behind one of Galley's aliases (`last-good.pdf` and the like), or `None` when
 /// the alias or `current` is not what Galley writes.
 pub fn resolve(out_dir: &Path, alias: &str) -> Option<PathBuf> {

@@ -177,8 +177,6 @@ impl Default for ServerConfig {
 pub struct BuildConfig {
     #[serde(deserialize_with = "deserialize_engine")]
     pub engine: EngineKind,
-    /// Empty = downloaded into <data_dir>/tectonic on first use, or `tectonic` on $PATH.
-    pub tectonic_path: String,
     pub texlive_path: String,
     pub timeout_s: u64,
     pub memory_mb: u64,
@@ -232,7 +230,6 @@ impl Default for BuildConfig {
     fn default() -> Self {
         BuildConfig {
             engine: EngineKind::Tectonic,
-            tectonic_path: String::new(),
             texlive_path: String::new(),
             timeout_s: 120,
             memory_mb: 2048,

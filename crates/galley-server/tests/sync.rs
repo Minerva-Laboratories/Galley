@@ -264,6 +264,19 @@ async fn engine_selection_is_saved_and_role_gated() {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
     }
+    // A stand-in for an installed Tectonic engine: complete as Galley checks it, with a script as
+    // the binary. Its builds fail, which this test does not look at.
+    let pins = galley_build::install::pins().unwrap();
+    let engine = dir.path().join("tectonic").join(pins.folder());
+    std::fs::create_dir_all(engine.join("bundle")).unwrap();
+    std::fs::create_dir_all(engine.join("cache/formats")).unwrap();
+    std::fs::write(engine.join("bundle/SHA256SUM"), &pins.bundle_digest).unwrap();
+    std::fs::write(engine.join("cache/formats/latex.fmt"), "fmt").unwrap();
+    std::fs::write(engine.join("tectonic"), "#!/bin/sh\necho tectonic test-version\n").unwrap();
+    #[cfg(unix)] {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(engine.join("tectonic"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
     let mut config = Config::default();
     config.build.sandbox = "none".into();
     config.build.texlive_path = tex_bin.to_string_lossy().into_owned();
@@ -400,6 +413,27 @@ async fn engine_selection_is_saved_and_role_gated() {
     assert_eq!(restored["engine"], "xelatex");
 }
 
+/// Nothing is downloaded during a build: without an installed engine, a Tectonic build is refused
+/// with the way to install it.
+#[tokio::test]
+async fn a_tectonic_build_without_an_engine_is_refused_with_the_install_command() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = Config::default();
+    config.build.sandbox = "none".into();
+    let state = AppState::new(dir.path(), &config).await.unwrap();
+    if galley_build::engine::Tectonic::locate(dir.path()).is_some() {
+        return; // This machine's image holds an engine.
+    }
+    let admin = signup(&state, "no-engine@example.com", "No engine").await;
+    let (status, _, admin) = rest(&state, &admin, "POST", "/api/projects", Some(json!({"name":"No engine"}))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, refused, _) = rest(
+        &state, &admin, "POST", "/api/projects/no-engine/build", Some(json!({"engine":"tectonic"})),
+    ).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(refused["error"].as_str().is_some_and(|m| m.contains("galley engine install")), "{refused}");
+}
+
 #[tokio::test]
 async fn build_status_restores_pdf_producer_after_restart() {
     let dir = tempfile::tempdir().unwrap();
@@ -435,20 +469,16 @@ async fn build_status_restores_pdf_producer_after_restart() {
 #[tokio::test]
 async fn real_mcp_engine_matrix_preserves_project_selection() {
     if std::env::var("GALLEY_TEST_ENGINE_MATRIX").as_deref() != Ok("1") { return; }
-    let tectonic = std::env::var("GALLEY_TEST_TECTONIC").expect("GALLEY_TEST_TECTONIC is required");
-    let cache = std::env::var("GALLEY_TEST_TECTONIC_CACHE").expect("GALLEY_TEST_TECTONIC_CACHE is required");
+    let engines = std::env::var("GALLEY_TEST_TECTONIC_ENGINES").expect("GALLEY_TEST_TECTONIC_ENGINES is required");
     let texlive = std::env::var("GALLEY_TEST_TEXLIVE_PATH").expect("GALLEY_TEST_TEXLIVE_PATH is required");
-    assert!(std::path::Path::new(&tectonic).is_file());
-    assert!(std::path::Path::new(&cache).is_dir());
+    assert!(std::path::Path::new(&engines).is_dir());
     assert!(std::path::Path::new(&texlive).join("latexmk").is_file());
     let dir = tempfile::tempdir().unwrap();
+    let folder = galley_build::install::pins().unwrap().folder();
     std::fs::create_dir_all(dir.path().join("tectonic")).unwrap();
-    std::os::unix::fs::symlink(&cache, dir.path().join("tectonic/cache")).unwrap();
-    // The fixture cache is Galley's own warm-up, so the test marks it trusted.
-    std::fs::write(dir.path().join("tectonic").join(galley_build::engine::TRUSTED_CACHE), "").unwrap();
+    std::os::unix::fs::symlink(std::path::Path::new(&engines).join(&folder), dir.path().join("tectonic").join(&folder)).unwrap();
     let mut config = Config::default();
     config.build.sandbox = "bwrap".into();
-    config.build.tectonic_path = tectonic;
     config.build.texlive_path = texlive;
     let state = AppState::new(dir.path(), &config).await.unwrap();
     assert_eq!(state.builder.sandbox.kind, galley_build::SandboxKind::Bwrap);

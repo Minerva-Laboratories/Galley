@@ -10,27 +10,21 @@ use galley_build::{
 };
 
 fn setup(data: &Path, timeout: Duration) -> Builder {
-    let tectonic = std::env::var("GALLEY_TEST_TECTONIC").expect("GALLEY_TEST_TECTONIC is required");
-    let cache = std::env::var("GALLEY_TEST_TECTONIC_CACHE")
-        .expect("GALLEY_TEST_TECTONIC_CACHE is required");
+    let engines = std::env::var("GALLEY_TEST_TECTONIC_ENGINES")
+        .expect("GALLEY_TEST_TECTONIC_ENGINES is required");
     let texlive =
         std::env::var("GALLEY_TEST_TEXLIVE_PATH").expect("GALLEY_TEST_TEXLIVE_PATH is required");
     assert!(
-        Path::new(&tectonic).is_file(),
-        "missing Tectonic binary: {tectonic}"
-    );
-    assert!(
-        Path::new(&cache).is_dir(),
-        "missing Tectonic cache: {cache}"
+        Path::new(&engines).is_dir(),
+        "missing Tectonic engines: {engines}"
     );
     assert!(
         Path::new(&texlive).is_dir(),
         "missing TeX Live executable directory: {texlive}"
     );
+    let folder = galley_build::install::pins().unwrap().folder();
     std::fs::create_dir_all(data.join("tectonic")).unwrap();
-    std::os::unix::fs::symlink(cache, data.join("tectonic/cache")).unwrap();
-    // The fixture cache is Galley's own warm-up, so the test marks it trusted.
-    std::fs::write(data.join("tectonic").join(galley_build::engine::TRUSTED_CACHE), "").unwrap();
+    std::os::unix::fs::symlink(std::path::Path::new(&engines).join(&folder), data.join("tectonic").join(&folder)).unwrap();
     let kind = if std::env::var("GALLEY_TEST_SANDBOX").as_deref() == Ok("bwrap") {
         SandboxKind::Bwrap
     } else {
@@ -47,7 +41,6 @@ fn setup(data: &Path, timeout: Duration) -> Builder {
         Hints::bundled().unwrap(),
         timeout,
         data,
-        Some(tectonic),
         1,
     )
     .with_texlive_path(Some(texlive))

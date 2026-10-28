@@ -261,9 +261,9 @@ impl Sandbox {
                 argv.extend(["--ro-bind", dir, dir].map(String::from));
             }
         }
-        // The CA bundle is mounted even without network. Tectonic builds an HTTPS client as soon
-        // as it consults the bundle, and a client with no roots panics before it reports which file
-        // it wanted, which hides the missing package that would trigger the fetch pass.
+        // The CA bundle is mounted even without network, read-only. Tectonic may build an HTTPS
+        // client when it starts, and a client with no roots panics before it reports which file
+        // it wanted, which would hide a missing package behind a crash.
         for f in [
             "/etc/ssl",
             "/etc/ca-certificates",
@@ -345,9 +345,9 @@ impl Sandbox {
         ]);
         c.args(["--read-only", "--tmpfs", "/tmp:rw,exec,size=512m"]);
         c.args(["--user", &format!("{}:{}", uid(), gid())]);
-        // A package fetch needs TLS, and a slim image has no CA bundle, so mount the host bundle.
-        // It is mounted for offline compiles too: Tectonic panics when it builds an HTTPS client
-        // with no roots, which hides the missing file that would trigger the fetch pass.
+        // A slim image has no CA bundle, so mount the host's, read-only. Compiles are offline, but
+        // Tectonic panics when it builds an HTTPS client with no roots, which would hide a missing
+        // package behind a crash.
         for certs in ["/etc/ssl/certs", "/etc/ca-certificates"] {
             if Path::new(certs).is_dir() {
                 c.args(["-v", &format!("{certs}:{certs}:ro")]);

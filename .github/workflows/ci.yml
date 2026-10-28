@@ -70,15 +70,25 @@ jobs:
             texlive-luatex texlive-fonts-recommended texlive-pstricks texlive-bibtex-extra fonts-dejavu-core
           # Ubuntu's AppArmor namespace restriction otherwise prevents the real compile sandbox.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      # The pinned Tectonic bundle (2.9 GB) is kept between runs. Its hash is checked on every use.
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/tectonic-bundle.tar
+          key: tectonic-bundle-${{ hashFiles('deploy/tectonic.pins') }}
+      - name: Download the pinned Tectonic bundle
+        run: |
+          tar="${{ runner.temp }}/tectonic-bundle.tar"
+          [ -f "$tar" ] || curl --proto '=https' --proto-redir '=https' --max-redirs 5 -fsSL -o "$tar" \
+            "$(sed -n 's/^BUNDLE_URL=//p' deploy/tectonic.pins)"
       - name: Compile the strict five-engine integration matrix
         env:
           GALLEY_ENGINE_TEST_ROOT: ${{ runner.temp }}/galley-engines
+          GALLEY_TEST_BUNDLE_TAR: ${{ runner.temp }}/tectonic-bundle.tar
         run: bash scripts/test-engines.sh
       - run: npx playwright install --with-deps chromium
         working-directory: web
       - name: Verify browser compilation and file management
         env:
           GALLEY_TEST_ENGINE_MATRIX: "1"
-          GALLEY_TEST_TECTONIC: ${{ runner.temp }}/galley-engines/tectonic/tectonic
-          GALLEY_TEST_TECTONIC_CACHE: ${{ runner.temp }}/galley-engines/cache
+          GALLEY_TEST_TECTONIC_ENGINES: ${{ runner.temp }}/galley-engines/tectonic
         run: bash scripts/e2e.sh engines.spec.ts files.spec.ts appearance.spec.ts connect-ai.spec.ts projects.spec.ts invitations.spec.ts presence.spec.ts away.spec.ts

@@ -474,9 +474,7 @@ impl Builder {
         let make = || {
             engine.compile(&self.sandbox, &stage, &main_name, false, self.timeout.as_secs())
         };
-        let (run, _) = self
-            .compile_fetching(&engine, &stage, &text, &make, None, None, progress)
-            .await?;
+        let run = self.compile_once(&make, None, None).await?;
         let view = ProjectView {
             main_file: &main_name,
             main_text: &text,

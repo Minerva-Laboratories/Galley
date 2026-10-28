@@ -29,8 +29,10 @@ pub const GUEST_IN: &str = "/galley/in";
 pub const GUEST_OUT: &str = "/tmp/galley-out";
 /// Where figure jobs write the figure cache.
 pub const GUEST_FIG: &str = "/tmp/galley-fig";
-/// Where Tectonic keeps its package cache.
+/// Where Tectonic reads its formats, read-only.
 pub const GUEST_CACHE: &str = "/galley/cache";
+/// Where Tectonic reads its package bundle, read-only.
+pub const GUEST_BUNDLE: &str = "/galley/bundle";
 
 pub fn build_dir(project_dir: &Path) -> PathBuf {
     project_dir.join(".galley").join(BUILD)
@@ -48,7 +50,8 @@ pub fn fig_dir(project_dir: &Path) -> PathBuf {
     scratch_dir(project_dir).join("fig")
 }
 
-pub fn cache_dir(project_dir: &Path) -> PathBuf {
+/// The per-project package cache of the old on-demand design. Removed at the next build.
+fn old_cache_dir(project_dir: &Path) -> PathBuf {
     scratch_dir(project_dir).join("tectonic-cache")
 }
 
@@ -113,6 +116,10 @@ pub fn prepare(project_dir: &Path) -> std::io::Result<()> {
     }
     real_dir(&inputs_dir(project_dir))?;
     real_dir(&scratch_dir(project_dir))?;
+    // Packages now come from the engine's bundle. `remove_tree` never follows a link.
+    if std::fs::symlink_metadata(old_cache_dir(project_dir)).is_ok() {
+        crate::buildfs::remove_tree(&old_cache_dir(project_dir))?;
+    }
     Ok(())
 }
 
@@ -274,6 +281,21 @@ mod tests {
     }
 
     #[test]
+    fn the_old_package_cache_is_removed_without_following_a_link() {
+        let project = tempfile::tempdir().unwrap();
+        let victim = tempfile::tempdir().unwrap();
+        std::fs::write(victim.path().join("keep"), "").unwrap();
+        prepare(project.path()).unwrap();
+        std::fs::create_dir_all(old_cache_dir(project.path()).join("formats")).unwrap();
+        prepare(project.path()).unwrap();
+        assert!(!old_cache_dir(project.path()).exists());
+        symlink(victim.path(), old_cache_dir(project.path())).unwrap();
+        prepare(project.path()).unwrap();
+        assert!(std::fs::symlink_metadata(old_cache_dir(project.path())).is_err());
+        assert!(victim.path().join("keep").exists());
+    }
+
+    #[test]
     fn stale_run_folders_are_swept() {
         let project = tempfile::tempdir().unwrap();
         let leaf = Leaf::run(project.path()).unwrap();
@@ -324,7 +346,7 @@ mod tests {
         assert!(fig_dir(project.path()).join("galley-fig-figure0.pdf").exists());
         Leaf::fig(project.path()).unwrap().discard();
         assert!(!fig_dir(project.path()).exists());
-        assert!(is_scratch(&cache_dir(project.path())));
+        assert!(is_scratch(&fig_dir(project.path())));
         assert!(!is_scratch(&build_dir(project.path())));
         assert!(!is_scratch(&inputs_dir(project.path())));
     }

@@ -3,6 +3,10 @@
 # binary with the web app embedded. It sandboxes the compiles with bubblewrap
 # inside the microVM.
 
+# The Tectonic engine with its whole package bundle (2.9 GB), so builds never download anything.
+# Off by default for a small image; build with --build-arg WARM_TECTONIC=1 to include it.
+ARG WARM_TECTONIC=0
+
 # 1. Build the web app. Only this stage needs Node.
 FROM node:20-bookworm-slim AS web
 WORKDIR /web
@@ -23,8 +27,20 @@ COPY --from=web /web/dist ./web/dist
 ENV GALLEY_SKIP_WEB_BUILD=1
 RUN cargo build --release -p galley-cli
 
-# 3. A small runtime. It holds the binary, a CA bundle and bubblewrap. Tectonic
-#    uses the CA bundle to fetch its own bundle over TLS on the first build.
+# The engine stage depends only on the pins and the script, so Docker reuses it until the pins
+# change: a code change downloads and pushes no new bundle. Every download is checked against
+# deploy/tectonic.pins before it is unpacked.
+FROM debian:bookworm-slim AS tectonic-1
+ARG TARGETARCH
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+COPY deploy/tectonic.pins deploy/tectonic-engine.sh /tmp/engine/
+RUN TARGETARCH="$TARGETARCH" bash /tmp/engine/tectonic-engine.sh /opt/galley/tectonic
+FROM debian:bookworm-slim AS tectonic-0
+RUN mkdir -p /opt/galley/tectonic
+FROM tectonic-${WARM_TECTONIC} AS tectonic
+
+# 3. A small runtime. It holds the binary, a CA bundle and bubblewrap.
 #    bubblewrap provides the compile sandbox.
 FROM debian:bookworm-slim
 # latexdiff is a Perl script. With --no-install-recommends it pulls in no TeX Live.
@@ -45,25 +61,11 @@ RUN if [ "$TEXLIVE" = "1" ]; then \
         texlive-bibtex-extra texlive-science latexmk biber ghostscript \
       && rm -rf /var/lib/apt/lists/*; \
     fi
+# The engine from the stage above, read-only, where Galley looks first. Empty without
+# WARM_TECTONIC=1: then `galley engine install` puts one in the data directory. It comes before
+# the binary, so a code change reuses this layer instead of pushing the bundle again.
+COPY --from=tectonic /opt/galley/tectonic /opt/galley/tectonic
 COPY --from=build /src/target/release/galley /usr/local/bin/galley
-# Tectonic with a warm package cache in the image. A machine with no volume, such as a build worker,
-# otherwise downloads Tectonic and its packages on a user's first build, which takes about a minute.
-# A server's volume mounted at /data hides this copy and keeps its own. Build with
-# --build-arg WARM_TECTONIC=1 to include it. Only Galley's own documents fill this cache, so it is
-# marked trusted; Galley discards an unmarked shared cache once (crate galley-build, engine.rs).
-ARG WARM_TECTONIC=0
-COPY templates /opt/galley-warm/templates
-COPY deploy/tectonic-warm.tex /opt/galley-warm/warm/main.tex
-RUN if [ "$WARM_TECTONIC" = "1" ]; then \
-      galley --data-dir /data engine install \
-      && for d in /opt/galley-warm/warm /opt/galley-warm/templates/*/; do \
-           [ -f "$d/main.tex" ] || continue; \
-           (cd "$d" && TECTONIC_CACHE_DIR=/data/tectonic/cache XDG_CACHE_HOME=/data/tectonic/cache HOME=/tmp \
-             /data/tectonic/tectonic -X compile main.tex -o /tmp >/dev/null 2>&1 || echo "warm-up: $d did not compile"); \
-         done \
-      && touch /data/tectonic/.cache-trusted-1 \
-      && du -sh /data/tectonic/cache; \
-    fi
 COPY deploy/fly/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 # The defaults. Override them in the fly.toml [env] block. GALLEY_DOMAIN turns

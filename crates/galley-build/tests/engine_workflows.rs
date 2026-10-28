@@ -11,12 +11,14 @@ fn enabled() -> bool {
     std::env::var("GALLEY_TEST_ENGINE_MATRIX").as_deref() == Ok("1")
 }
 
+fn engines() -> String {
+    std::env::var("GALLEY_TEST_TECTONIC_ENGINES").expect("an installed Tectonic engine is required")
+}
+
 fn setup(data: &Path) -> Builder {
-    let cache = std::env::var("GALLEY_TEST_TECTONIC_CACHE").expect("warm Tectonic cache required");
+    let folder = galley_build::install::pins().unwrap().folder();
     std::fs::create_dir_all(data.join("tectonic")).unwrap();
-    std::os::unix::fs::symlink(cache, data.join("tectonic/cache")).unwrap();
-    // The fixture cache is Galley's own warm-up, so the test marks it trusted.
-    std::fs::write(data.join("tectonic").join(galley_build::engine::TRUSTED_CACHE), "").unwrap();
+    std::os::unix::fs::symlink(std::path::Path::new(&engines()).join(&folder), data.join("tectonic").join(&folder)).unwrap();
     builder(data)
 }
 
@@ -32,7 +34,6 @@ fn builder(data: &Path) -> Builder {
         Hints::bundled().unwrap(),
         Duration::from_secs(120),
         data,
-        Some(std::env::var("GALLEY_TEST_TECTONIC").unwrap()),
         2,
     )
     .with_texlive_path(Some(std::env::var("GALLEY_TEST_TEXLIVE_PATH").unwrap()))
@@ -532,46 +533,34 @@ fn listing(dir: &Path) -> Vec<(std::path::PathBuf, u64)> {
     out
 }
 
-/// The online package fetch loads files from the project's Tectonic cache, so a document must
-/// not be able to write there. A new project still compiles from the warm cache it is given.
+/// Every compile reads the same engine, so a document must not be able to change it: not the
+/// bundle, not the formats. The engine is mounted read-only, and the planting attempt fails.
 #[tokio::test]
-async fn a_tectonic_document_cannot_plant_files_in_the_package_cache() {
+async fn a_tectonic_document_cannot_plant_files_in_the_engine() {
     if !enabled() {
         return;
     }
     let data = tempfile::tempdir().unwrap();
     let builder = setup(data.path());
     let project = tempfile::tempdir().unwrap();
-    let cache = galley_build::zones::cache_dir(project.path());
-    std::fs::write(
-        project.path().join("main.tex"),
-        "\\documentclass{article}\n\\begin{document}\nHello Galley.\n\\end{document}\n",
-    )
-    .unwrap();
-    assert!(!cache.exists(), "a new project has no cache of its own yet");
-    let first = builder.run(1, project.path(), "main.tex", &request(EngineKind::Tectonic), &|_| {}).await;
-    assert_eq!(first.status, BuildStatus::Ok, "{first:#?}");
-    assert!(first.pdf_fresh);
-    let before = listing(&cache);
+    let before = listing(Path::new(&engines()));
     assert!(!before.is_empty());
-
-    let plant = "\\documentclass{article}\n\\begin{document}\n\\newwrite\\plant\n\\immediate\\openout\\plant=/galley/cache/planted.cls\n\\immediate\\write\\plant{\\relax}\n\\immediate\\closeout\\plant\n\\immediate\\openout\\plant=/galley/cache/formats/planted.fmt\n\\immediate\\write\\plant{\\relax}\n\\immediate\\closeout\\plant\nHello.\n\\end{document}\n";
+    let plant = "\\documentclass{article}\n\\begin{document}\n\\newwrite\\plant\n\\immediate\\openout\\plant=/galley/cache/planted.cls\n\\immediate\\write\\plant{\\relax}\n\\immediate\\closeout\\plant\n\\immediate\\openout\\plant=/galley/cache/formats/planted.fmt\n\\immediate\\write\\plant{\\relax}\n\\immediate\\closeout\\plant\n\\immediate\\openout\\plant=/galley/bundle/article.cls\n\\immediate\\write\\plant{\\relax}\n\\immediate\\closeout\\plant\nHello.\n\\end{document}\n";
     std::fs::write(project.path().join("main.tex"), plant).unwrap();
-    let _ = builder.run(2, project.path(), "main.tex", &request(EngineKind::Tectonic), &|_| {}).await;
-    assert_eq!(listing(&cache), before, "the compile changed the package cache");
+    let _ = builder.run(1, project.path(), "main.tex", &request(EngineKind::Tectonic), &|_| {}).await;
+    assert_eq!(listing(Path::new(&engines())), before, "the compile changed the engine");
+    assert!(!project.path().join(".galley/scratch/tectonic-cache").exists(), "no per-project cache");
 }
 
-/// With no warm cache, the first build fetches what it needs with Galley's own document, which
-/// also builds Tectonic's format files, and the author's compile then runs from a read-only cache.
-/// A package added later is fetched the same way. Needs network: set GALLEY_TEST_NETWORK=1.
+/// A package the project starts using later comes from the bundle at once, with no network and
+/// no second pass.
 #[tokio::test]
-async fn a_cold_cache_is_filled_by_galleys_fetch_and_then_read_only() {
-    if !enabled() || std::env::var("GALLEY_TEST_NETWORK").as_deref() != Ok("1") {
+async fn a_package_added_later_compiles_offline_from_the_bundle() {
+    if !enabled() {
         return;
     }
     let data = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(data.path().join("tectonic/cache")).unwrap();
-    let builder = builder(data.path());
+    let builder = setup(data.path());
     let project = tempfile::tempdir().unwrap();
     std::fs::write(
         project.path().join("main.tex"),
@@ -580,22 +569,13 @@ async fn a_cold_cache_is_filled_by_galleys_fetch_and_then_read_only() {
     .unwrap();
     let first = builder.run(1, project.path(), "main.tex", &request(EngineKind::Tectonic), &|_| {}).await;
     assert_eq!(first.status, BuildStatus::Ok, "{first:#?}");
-    let formats = galley_build::zones::cache_dir(project.path()).join("formats");
-    assert!(std::fs::read_dir(&formats).is_ok_and(|mut d| d.next().is_some()), "the fetch built the formats");
-
     std::fs::write(
         project.path().join("main.tex"),
-        "\\documentclass{article}\n\\usepackage{lipsum}\n\\begin{document}\n\\lipsum[1]\n\\end{document}\n",
+        "\\documentclass{article}\n\\usepackage{lipsum}\n\\usepackage[T1]{fontenc}\n\\usepackage{tikz}\n\\begin{document}\n\\lipsum[1]\n\\end{document}\n",
     )
     .unwrap();
     let added = builder.run(2, project.path(), "main.tex", &request(EngineKind::Tectonic), &|_| {}).await;
     assert_eq!(added.status, BuildStatus::Ok, "{added:#?}");
     assert!(added.pdf_fresh);
-
-    // A fetch cut off before it built the formats leaves a cache the author's compile cannot
-    // finish. It counts as cold, so the next build fetches again instead of failing for good.
-    std::fs::remove_dir_all(&formats).unwrap();
-    let recovered = builder.run(3, project.path(), "main.tex", &request(EngineKind::Tectonic), &|_| {}).await;
-    assert_eq!(recovered.status, BuildStatus::Ok, "{recovered:#?}");
-    assert!(std::fs::read_dir(&formats).is_ok_and(|mut d| d.next().is_some()));
+    assert!(!added.fetched_packages);
 }

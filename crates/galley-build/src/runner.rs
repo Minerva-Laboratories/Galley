@@ -1,5 +1,5 @@
 //! The build queue for one project. The newest request wins. Each job runs the flush hook, then a
-//! sandboxed compile, then an optional package fetch pass, then the log parse, then the artifacts.
+//! sandboxed compile, then the log parse, then the artifacts.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -19,7 +19,7 @@ use crate::hints::{Hints, ProjectView};
 use crate::log::{Diagnostic, Level, RawDiag, parse_log};
 use crate::sandbox::Sandbox;
 use crate::synctex::SyncTex;
-use crate::{Result, install};
+use crate::Result;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BuildRequest {
@@ -275,7 +275,6 @@ pub struct Builder {
     pub timeout: Duration,
     engine: RwLock<Option<Tectonic>>,
     data_dir: PathBuf,
-    configured_path: Option<String>,
     texlive_path: Option<String>,
     /// Compiles running at once across the whole server. One compile can take most of a small
     /// machine's memory, so the rest wait for a slot instead of all starting and being killed.
@@ -299,17 +298,13 @@ pub(crate) enum ResolvedEngine {
 impl ResolvedEngine {
     pub(crate) fn version(&self) -> Option<String> {
         match self {
-            Self::Tectonic(e) => binary_version(&e.binary),
+            Self::Tectonic(e) => binary_version(&e.binary()),
             Self::TexLive(e) => e.version.clone().or_else(|| binary_version(&e.binary)),
         }
     }
     fn identity(&self) -> String {
         match self {
-            Self::Tectonic(e) => format!(
-                "tectonic:{}:{}",
-                self.version().unwrap_or_default(),
-                engine_id(e)
-            ),
+            Self::Tectonic(e) => format!("tectonic:{}:{}", self.version().unwrap_or_default(), e.key()),
             Self::TexLive(e) => format!(
                 "{}:{}",
                 e.kind.id(),
@@ -317,9 +312,6 @@ impl ResolvedEngine {
                     .unwrap_or_else(|| e.binary.display().to_string())
             ),
         }
-    }
-    pub(crate) fn cold(&self, project_dir: &Path) -> bool {
-        matches!(self, Self::Tectonic(e) if cache_cold(e, project_dir))
     }
     pub(crate) fn compile(
         &self,
@@ -372,21 +364,15 @@ impl Builder {
         hints: Hints,
         timeout: Duration,
         data_dir: &Path,
-        configured_path: Option<String>,
         max_concurrent: usize,
     ) -> Builder {
-        if let Err(e) = Tectonic::discard_untrusted_cache(data_dir) {
-            // The cache is then not marked, so no project is seeded from it.
-            tracing::warn!(error = %e, "could not discard the old shared Tectonic cache");
-        }
-        let engine = Tectonic::locate(data_dir, configured_path.as_deref());
+        let engine = Tectonic::locate(data_dir);
         Builder {
             sandbox,
             hints,
             timeout,
             engine: RwLock::new(engine),
             data_dir: data_dir.to_path_buf(),
-            configured_path,
             texlive_path: None,
             slots: tokio::sync::Semaphore::new(max_concurrent.max(1)),
             packing: std::sync::Mutex::new(std::collections::HashSet::new()),
@@ -435,8 +421,8 @@ impl Builder {
         probes: &mut HashMap<(PathBuf, bool, Option<PathBuf>), Option<String>>,
     ) -> EngineAvailability {
         let (available, version, reason) = if kind == EngineKind::Tectonic {
-            match Tectonic::locate(&self.data_dir, self.configured_path.as_deref()) {
-                Some(e) => match self.probe_cached(&e.binary, true, None, probes).await {
+            match Tectonic::locate(&self.data_dir) {
+                Some(e) => match self.probe_cached(&e.binary(), true, None, probes).await {
                     Some(version) => (true, Some(version), None),
                     None => (
                         false,
@@ -447,7 +433,7 @@ impl Builder {
                 None => (
                     false,
                     None,
-                    Some("Tectonic is not installed yet; the first build can install it".into()),
+                    Some(TECTONIC_MISSING.into()),
                 ),
             }
         } else {
@@ -684,16 +670,15 @@ impl Builder {
         result
     }
 
+    /// The engine for `kind`. Nothing is installed here, so `_progress` is not written to; it
+    /// stays for the callers that feed the build bar.
     pub(crate) async fn resolve_engine(
         &self,
         kind: EngineKind,
-        progress: &(dyn Fn(String) + Send + Sync),
+        _progress: &(dyn Fn(String) + Send + Sync),
     ) -> Result<ResolvedEngine> {
         if kind == EngineKind::Tectonic {
-            return self
-                .ensure_engine(progress)
-                .await
-                .map(ResolvedEngine::Tectonic);
+            return self.tectonic().await.map(ResolvedEngine::Tectonic);
         }
         let mut e = TexLive::locate(
             kind,
@@ -720,14 +705,12 @@ impl Builder {
     }
 
     pub async fn engine_path(&self) -> Option<PathBuf> {
-        self.engine.read().await.as_ref().map(|e| e.binary.clone())
+        self.engine.read().await.as_ref().map(|e| e.binary())
     }
 
-    /// Install Tectonic on first use. `progress` feeds the build bar.
-    pub(crate) async fn ensure_engine(
-        &self,
-        progress: &(dyn Fn(String) + Send + Sync),
-    ) -> Result<Tectonic> {
+    /// The installed engine. It is never downloaded during a build: `galley engine install`
+    /// (or the image) puts it in place, and one installed while the server runs is found here.
+    pub(crate) async fn tectonic(&self) -> Result<Tectonic> {
         if let Some(e) = self.engine.read().await.as_ref() {
             return Ok(e.clone());
         }
@@ -735,14 +718,7 @@ impl Builder {
         if let Some(e) = slot.as_ref() {
             return Ok(e.clone());
         }
-        if let Some(found) = Tectonic::locate(&self.data_dir, self.configured_path.as_deref()) {
-            *slot = Some(found.clone());
-            return Ok(found);
-        }
-        install::install_tectonic(&Tectonic::install_dir(&self.data_dir), progress).await?;
-        let found = Tectonic::locate(&self.data_dir, None).ok_or_else(|| {
-            crate::Error::Engine("Tectonic was downloaded but cannot be found".into())
-        })?;
+        let found = Tectonic::locate(&self.data_dir).ok_or_else(|| crate::Error::Engine(TECTONIC_MISSING.into()))?;
         *slot = Some(found.clone());
         Ok(found)
     }
@@ -912,17 +888,7 @@ impl Builder {
                 .collect()
         };
 
-        // A project with no Tectonic bundle needs one network-enabled build to fill its writable
-        // local cache. Existing shared cache contents are copied there before the first compile.
-        let cold = engine.cold(project_dir);
-        progress(
-            if cold {
-                "Fetching packages…"
-            } else {
-                "Compiling…"
-            }
-            .into(),
-        );
+        progress("Compiling…".into());
         let t0 = Instant::now();
 
         // The figure cache runs first when it can. It returns a run to publish, or the reason it
@@ -950,9 +916,6 @@ impl Builder {
             result.figures = match (&eligibility, req.figure_cache) {
                 (_, false) => Some(FigureStats::off("turned off for this project")),
                 (Err(why), true) => Some(FigureStats::off(why)),
-                (Ok(()), true) if cold => {
-                    Some(FigureStats::off("packages are still being fetched"))
-                }
                 (Ok(()), true) => {
                     use_cache = true;
                     None
@@ -986,29 +949,24 @@ impl Builder {
             return self.finish(result, started, &out_dir);
         }
 
-        // Missing bundle files mean packages this project uses are not cached yet. They are fetched
-        // with a document of Galley's own (crate::fetch); the author's document always runs offline.
+        // The author's document always runs offline; every package comes from the engine.
         let had_cached_run = cached_run.is_some();
         let tp = Instant::now();
         let make = || {
             engine.compile(&self.sandbox, project_dir, main_file, req.draft, self.timeout.as_secs())
         };
-        let (run, fetched) = match self
-            .compile_fetching(&engine, project_dir, &main_text, &make, cached_run, Some(deadline), progress)
-            .await
-        {
+        let run = match self.compile_once(&make, cached_run, Some(deadline)).await {
             Ok(r) => r,
             Err(e) => {
                 result.message = Some(e.to_string());
                 return self.finish(result, started, &out_dir);
             }
         };
-        if use_cache && !had_cached_run && !run.timed_out && !fetched {
+        if use_cache && !had_cached_run && !run.timed_out {
             let mut cache = FigCache::load(&out_dir);
             cache.plain_ms = tp.elapsed().as_millis() as u64;
             cache.save(&out_dir);
         }
-        result.fetched_packages = fetched;
         result.profile.compile_ms = t0.elapsed().as_millis() as u64;
 
         if run.timed_out {
@@ -1203,7 +1161,7 @@ impl Builder {
 
         let t = Instant::now();
         let Ok(run) = self
-            .wrapper_once(engine, project_dir, main_file, main_text, deadline)
+            .wrapper_once(engine, project_dir, main_file, deadline)
             .await
         else {
             return plain(
@@ -1219,10 +1177,10 @@ impl Builder {
             // build starts from an empty one instead.
             run.leaf.discard();
         }
-        if run.timed_out || needs_fetch(&run.raw, project_dir) {
+        if run.timed_out {
             return plain(
                 &cache,
-                bypass("a required figure package or font is unavailable in the engine cache"),
+                bypass("the cached pass was stopped at the time limit"),
                 Vec::new(),
                 0,
             );
@@ -1312,7 +1270,7 @@ impl Builder {
         }
         progress("Compiling…".into());
         let Ok(run) = self
-            .wrapper_once(engine, project_dir, main_file, main_text, deadline)
+            .wrapper_once(engine, project_dir, main_file, deadline)
             .await
         else {
             return plain(
@@ -1350,17 +1308,28 @@ impl Builder {
         engine: &ResolvedEngine,
         project_dir: &Path,
         main_file: &str,
-        main_text: &str,
         deadline: Instant,
     ) -> Result<RunOutput> {
         let file = format!("{}.tex", figures::WRAPPER_STEM);
         crate::zones::write_input(project_dir, &file, figures::wrapper_source(main_file))?;
         let make =
             || engine.compile_generated(&self.sandbox, project_dir, &file, figures::WRAPPER_STEM);
-        let (run, _) = self
-            .compile_fetching(engine, project_dir, main_text, &make, None, Some(deadline), &|_| {})
-            .await?;
-        Ok(run)
+        self.compile_once(&make, None, Some(deadline)).await
+    }
+
+    /// Compile once, offline, unless `first` is a run that already happened. A run without a
+    /// deadline gets the build time limit.
+    pub(crate) async fn compile_once(
+        &self,
+        make: &(dyn Fn() -> Result<crate::engine::CompileSpec> + Send + Sync),
+        first: Option<RunOutput>,
+        deadline: Option<Instant>,
+    ) -> Result<RunOutput> {
+        if let Some(run) = first {
+            return Ok(run);
+        }
+        let deadline = deadline.unwrap_or_else(|| Instant::now() + self.timeout);
+        self.run_spec_limited(make()?, deadline.saturating_duration_since(Instant::now())).await
     }
 
     /// Compile `names` on their own, `figure_parallelism()` at a time, recording which picture
@@ -1789,10 +1758,7 @@ impl Builder {
 
         progress("Compiling the comparison…".into());
         let make = || engine.compile_generated(&self.sandbox, project_dir, &file, &stem);
-        let new_text = String::from_utf8_lossy(&ran.stdout).into_owned();
-        let (run, _) = self
-            .compile_fetching(&engine, project_dir, &new_text, &make, None, Some(deadline), progress)
-            .await?;
+        let run = self.compile_once(&make, None, Some(deadline)).await?;
         let pdf = run.output_dir.join(format!("{stem}.pdf"));
         if run.exit_ok
             && !run.timed_out
@@ -1944,16 +1910,9 @@ fn figure_parallelism() -> usize {
 }
 
 /// Identifies the engine build, so an engine upgrade drops every cached figure.
-fn engine_id(engine: &Tectonic) -> String {
-    let meta = std::fs::metadata(&engine.binary).ok();
-    let len = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-    let mtime = meta
-        .and_then(|m| m.modified().ok())
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    format!("{}:{len}:{mtime}", engine.binary.display())
-}
+/// Why Tectonic builds are unavailable when no engine is installed.
+pub const TECTONIC_MISSING: &str =
+    "Tectonic is not installed. Run `galley engine install` once (it downloads 2.9 GB of packages)";
 
 pub(crate) struct RunOutput {
     pub(crate) stem: String,
@@ -1967,47 +1926,6 @@ pub(crate) struct RunOutput {
     pub(crate) stderr_summary: Option<String>,
     pub(crate) raw: Vec<RawDiag>,
     pub(crate) leaf: crate::zones::Leaf,
-}
-
-/// A `File not found` for something that is not in the project points at the bundle cache.
-/// A cold Tectonic cache is empty or missing. It means that no bundle was downloaded before, so
-/// the first compile must run with the network on.
-pub(crate) fn cache_cold(engine: &Tectonic, project_dir: &Path) -> bool {
-    let local = Tectonic::local_cache_dir(project_dir);
-    let dir = if local.is_dir() {
-        local
-    } else {
-        match engine.shared_cache() {
-            Some(shared) => shared.to_path_buf(),
-            None => return true,
-        }
-    };
-    // Tectonic builds its format files on first use, and an author's compile cannot write the
-    // cache. A cache without a finished one (empty, or left by a fetch that was cut off) is
-    // filled by Galley's own fetch run first.
-    !Tectonic::has_formats(&dir)
-}
-
-pub(crate) fn needs_fetch(raw: &[RawDiag], project_dir: &Path) -> bool {
-    let re = regex::Regex::new(r"File `([^']+)' not found").expect("regex");
-    raw.iter().any(|d| {
-        if d.level != Level::Error {
-            return false;
-        }
-        // A font that the bundle has but the cache lacks fails in the same way as a missing
-        // package file. The first italic or small-caps run in an 11pt document is a typical cause.
-        let font_missing = d.message.contains("not loadable")
-            || d.raw.contains("installed font not found")
-            || d.raw.contains("Metric (TFM) file");
-        let tikz_library_missing = d.message.contains("did not find the tikz library");
-        font_missing
-            || tikz_library_missing
-            || re.captures(&d.message).is_some_and(|c| {
-                let name = &c[1];
-                let looks_like_bundle_file = !name.contains('/') && name.contains('.');
-                looks_like_bundle_file && !project_dir.join(name).exists()
-            })
-    })
 }
 
 /// `sections/method` becomes `sections/method.tex`. `./main.tex` becomes `main.tex`. The draft
@@ -2346,53 +2264,7 @@ fn own_failures(n: usize) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn starting_a_builder_discards_an_unmarked_shared_cache() {
-        let data = tempfile::tempdir().unwrap();
-        let shared = data.path().join("tectonic/cache");
-        std::fs::create_dir_all(shared.join("formats")).unwrap();
-        std::fs::write(shared.join("planted.cls"), "\\relax").unwrap();
-        let sandbox = Sandbox {
-            kind: crate::SandboxKind::None,
-            docker_image: String::new(),
-            memory_mb: 512,
-            cpus: 1.0,
-            systemd_scope: false,
-        };
-        let _builder = Builder::new(sandbox, Hints::bundled().unwrap(), Duration::from_secs(5), data.path(), None, 1);
-        assert!(!shared.exists());
-        assert!(data.path().join("tectonic").join(crate::engine::TRUSTED_CACHE).is_file());
-    }
 
-    #[test]
-    fn a_cache_without_format_files_is_cold() {
-        let data = tempfile::tempdir().unwrap();
-        let project = tempfile::tempdir().unwrap();
-        let shared = data.path().join("tectonic/cache");
-        std::fs::create_dir_all(shared.join("formats")).unwrap();
-        std::fs::write(shared.join("formats/latex.fmt"), "fmt").unwrap();
-        let engine = Tectonic { binary: data.path().join("tectonic/tectonic"), cache_dir: shared.clone() };
-        assert!(cache_cold(&engine, project.path()), "an unmarked shared cache does not count");
-        std::fs::write(data.path().join("tectonic").join(crate::engine::TRUSTED_CACHE), "").unwrap();
-        assert!(!cache_cold(&engine, project.path()));
-
-        let local = Tectonic::local_cache_dir(project.path());
-        std::fs::create_dir_all(local.join("bundles")).unwrap();
-        assert!(cache_cold(&engine, project.path()), "bundle files but no formats");
-        std::fs::create_dir_all(local.join("formats")).unwrap();
-        assert!(cache_cold(&engine, project.path()), "an empty formats folder");
-        // What Tectonic leaves when it is stopped while writing a format.
-        std::fs::write(local.join("formats/format_uNXkKt"), "partial").unwrap();
-        assert!(cache_cold(&engine, project.path()), "only a temporary format file");
-        std::fs::write(local.join("formats/broken.fmt"), "").unwrap();
-        assert!(cache_cold(&engine, project.path()), "an empty .fmt");
-        let elsewhere = tempfile::tempdir().unwrap();
-        std::fs::write(elsewhere.path().join("real.fmt"), "fmt").unwrap();
-        std::os::unix::fs::symlink(elsewhere.path().join("real.fmt"), local.join("formats/linked.fmt")).unwrap();
-        assert!(cache_cold(&engine, project.path()), "a .fmt that is a link");
-        std::fs::write(local.join("formats/latex.fmt"), "fmt").unwrap();
-        assert!(!cache_cold(&engine, project.path()));
-    }
 
     #[tokio::test]
     async fn shutdown_drains_active_work_and_rejects_stale_queue_handles() {
@@ -2554,7 +2426,6 @@ mod tests {
             Hints::bundled().unwrap(),
             Duration::from_secs(5),
             &dir,
-            None,
             1,
         )
     }
@@ -2730,45 +2601,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn fetch_only_for_bundle_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let d = |m: &str| RawDiag {
-            level: Level::Error,
-            file: None,
-            line: None,
-            message: m.into(),
-            context: String::new(),
-            raw: String::new(),
-        };
-        assert!(needs_fetch(
-            &[d("LaTeX Error: File `size10.clo' not found")],
-            dir.path()
-        ));
-        assert!(needs_fetch(
-            &[d("LaTeX Error: File `tikz.sty' not found")],
-            dir.path()
-        ));
-        assert!(needs_fetch(
-            &[d(
-                "Package tikz Error: I did not find the tikz library 'external'."
-            )],
-            dir.path()
-        ));
-        assert!(!needs_fetch(
-            &[d("LaTeX Error: File `missingfig' not found")],
-            dir.path()
-        ));
-        assert!(!needs_fetch(
-            &[d("LaTeX Error: File `sections/x.tex' not found")],
-            dir.path()
-        ));
-        std::fs::write(dir.path().join("local.sty"), "").unwrap();
-        assert!(!needs_fetch(
-            &[d("LaTeX Error: File `local.sty' not found")],
-            dir.path()
-        ));
-    }
 
     #[test]
     fn converter_failure_names_the_failed_tool() {
