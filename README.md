@@ -66,8 +66,10 @@ finishes by running `galley doctor`, which reports what is in place and what is 
 galley serve                # http://127.0.0.1:7000
 ```
 
-The first screen asks you to create an admin account. The first build downloads Tectonic, about
-9 MB, into the data directory. Later builds work offline.
+The first screen asks you to create an admin account. Tectonic builds need its engine, installed
+once with `galley engine install`: the pinned binary and Tectonic's whole package bundle, 2.9 GB,
+checked against `deploy/tectonic.pins`. Builds then never use the network. The container image
+built with `--build-arg WARM_TECTONIC=1` already holds it.
 
 ## What it does
 
@@ -255,7 +257,7 @@ documents, so it is never stale.
 galley serve [--port 7000] [--dev]        # run the server
 galley doctor                             # check sandbox, engine, disk, ports, TLS, fonts
 galley init                               # write a default galley.toml
-galley engine install                     # fetch Tectonic now instead of on the first build
+galley engine install [--bundle-file tar]  # install the Tectonic engine and its 2.9 GB bundle
 galley worker [--bind 0.0.0.0:7100]       # compile for a server whose worker_url points here
 galley backup run                         # copy changed projects and the database to the bucket
 galley backup restore                     # rebuild an empty data directory from the bucket
@@ -358,18 +360,18 @@ cargo clippy --workspace --all-targets -- -D warnings
 (cd web && npm run build)
 ```
 
-The compiler integration matrix requires installed TeX Live tools and a warm Tectonic cache. It
-fails on missing tools when explicitly enabled:
+The compiler integration matrix requires installed TeX Live tools and an installed Tectonic
+engine. It fails on missing tools when explicitly enabled:
 
-`bash scripts/test-engines.sh` prepares the Tectonic fixture and runs the Rust and MCP matrix.
-To reuse existing fixtures:
+`bash scripts/test-engines.sh` lays out the Tectonic engine with `deploy/tectonic-engine.sh` and
+runs the Rust and MCP matrix. Set `GALLEY_TEST_BUNDLE_TAR` to a local copy of the pinned bundle tar
+to skip its download. To reuse an engine folder (one that holds `engine-<KEY>`):
 
 ```sh
 GALLEY_TEST_ENGINE_MATRIX=1 \
 GALLEY_TEST_SANDBOX=bwrap \
 GALLEY_TEST_TEXLIVE_PATH=/opt/texlive/bin/x86_64-linux \
-GALLEY_TEST_TECTONIC=/path/to/tectonic \
-GALLEY_TEST_TECTONIC_CACHE=/path/to/tectonic/cache \
+GALLEY_TEST_TECTONIC_ENGINES=/path/to/engines \
 cargo test -p galley-build --test engine_matrix --test engine_workflows -- --nocapture
 ```
 

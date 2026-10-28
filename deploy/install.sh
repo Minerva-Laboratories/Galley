@@ -96,9 +96,11 @@ else
 	"$BIN_DST" --config "$CONF_DIR/galley.toml" init
 fi
 
-# 6. Fetch the Tectonic engine now, so that the first build is fast.
+# 6. Install the Tectonic engine with its whole package bundle. It downloads 2.9 GB once, and then
+#    builds never need the network.
+say "Installing the Tectonic engine (downloads 2.9 GB)..."
 "${AS_GALLEY[@]}" "$BIN_DST" --data-dir "$DATA_DIR" engine install ||
-	say "Engine prefetch skipped (it will download on the first build)."
+	say "Tectonic was not installed, so Tectonic builds are unavailable. Run 'galley engine install' later."
 
 # 7. LanguageTool is optional and needs Java. Never install it silently.
 if [[ $SYSTEM -eq 1 ]] && ! command -v java &>/dev/null && command -v apt-get &>/dev/null; then

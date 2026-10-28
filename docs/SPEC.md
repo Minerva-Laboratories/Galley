@@ -87,7 +87,7 @@ Secondary: *Your TeX, on your terms.*
 - Backend: Rust with `axum`, `tokio`, `yrs` (Yjs port), `git2`, `rusqlite`, `tower-sessions`, `rustls`, `instant-acme` (auto-TLS)
 - Frontend: TypeScript, Vite, CodeMirror 6 (`@codemirror/lang-latex` or custom Lezer grammar), `yjs` + `y-codemirror.next`, PDF.js, Solid or Preact (small runtime), Tailwind with the design tokens above
 - Sandbox: `bubblewrap` first, then `docker`, then `none` (warned, for dev)
-- Compile: Tectonic (bundled download on first use), or a configured TeX Live path
+- Compile: Tectonic (the pinned binary and its whole package bundle, installed once), or a configured TeX Live path
 - Grammar: LanguageTool server jar (optional, downloaded on demand, needs a JRE that the installer offers)
 
 **Process model**: one process on the tokio runtime. Build and agent jobs run as child processes under the sandbox with cgroup limits (`systemd-run --scope` when available).
@@ -101,7 +101,7 @@ Secondary: *Your TeX, on your terms.*
 ~/.galley/
   galley.toml            # config
   galley.db              # SQLite
-  tectonic/              # engine + package cache
+  tectonic/              # engine-<KEY>/: binary, package bundle, formats (read-only)
   languagetool/          # optional
   data/
     <project_id>/
@@ -175,7 +175,7 @@ edit → flusher commit → build request → queue (per-project, latest-wins) �
 - **Latest-wins queue**: a new request cancels a request that has not started. A running build finishes, but Galley marks its result stale if a newer request exists.
 - **Auto-build** (default off): when on, it triggers after the last local edit has paused for `[build].auto_build_delay_s` (10 s by default), only if the previous build finished. On a shared server a build on every pause is most of the compile load, so a browser starts in manual mode unless `[build].auto_build` says otherwise. A mode the person picks in the build bar is remembered in that browser and always wins. A manual `Ctrl+Enter` is always allowed.
 - **Draft mode**: passes the `draft` class option and replaces figures with boxes, for 3–5× faster iteration. Toggle it in the build bar.
-- **Timeout**: 120 s by default (config), memory 2 GB, no network. Tectonic package fetches go through the host-side cache, not from inside the sandbox.
+- **Timeout**: 120 s by default (config), memory 2 GB, no network. Tectonic reads every package from its local bundle, mounted read-only; nothing is downloaded during a build.
 
 ### 6.1.1 Compiler selection and requests
 
@@ -237,7 +237,7 @@ workers), the publication gate and the last-good PDF. A remote build looks the s
   workers must use the same image.
 
 ### 6.2 Sandbox
-`bwrap --ro-bind /usr /usr --ro-bind $TECTONIC_CACHE /cache --bind $PROJECT /work --unshare-all --die-with-parent --new-session --chdir /work tectonic -X compile main.tex`
+`bwrap --ro-bind /usr /usr --ro-bind $ENGINE/bundle /galley/bundle --ro-bind $ENGINE/cache /galley/cache --ro-bind $PROJECT /work --bind $RUN /tmp/galley-out --unshare-all --die-with-parent --new-session --chdir /work tectonic -X compile -b /galley/bundle --only-cached main.tex`
 Project sources are mounted read-only; only the build area and declared caches are writable.
 For TeX Live, distribution roots, configuration and fonts are mounted read-only. Tool discovery uses
 `texlive_path` as an executable directory, or `PATH` when empty, inside the actual compile environment.
