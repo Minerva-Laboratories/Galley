@@ -6,3 +6,12 @@ web/dist/
 .git/
 *.log
 /tmp/
+# Secrets and private deployment notes never enter a build, not even an intermediate stage: a
+# remote builder keeps the layers of `COPY . .`.
+.env*
+**/.env*
+fly-deploy-tokens.txt
+fly.toml
+fly.*.toml
+local/
+CLAUDE.local.md
