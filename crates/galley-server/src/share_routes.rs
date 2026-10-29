@@ -297,6 +297,10 @@ pub async fn revoke_share(
     let revoked = blocking(move || store.revoke_share(&pid, &share_id).map_err(|e| AppError::Internal(e.to_string())))
         .await?
         .ok_or_else(|| AppError::NotFound("That share link no longer exists.".into()))?;
+    // A repeat revoke (a double click, a retry) succeeds and changes nothing, so it tells nobody.
+    if revoked.already_revoked {
+        return Ok(Json(json!({ "ok": true, "removed_guests": 0 })));
+    }
     // The transaction has committed. The removed guests' open sockets re-check their role and
     // are told they lost access.
     app.store.audit(Some(&id), Some(&user), "share.revoke", Some(&sid));

@@ -397,7 +397,8 @@ export function EditorPage({ id }: { id: string }) {
       {graphOpen.value && <CitationGraph id={id} />}
       {paletteOpen.value && <Palette />}
       {shareOpen.value && <ShareModal />}
-      {connectOpen.value && <ConnectAiModal />}
+      {/* Guests cannot create access tokens, so the dialog never opens for them. */}
+      {connectOpen.value && currentUser.value && !currentUser.value.is_guest && <ConnectAiModal />}
       {tourOpen.value && <Tour />}
     </div>
   );

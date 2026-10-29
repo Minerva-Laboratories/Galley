@@ -352,6 +352,75 @@ test.describe('live access checks', () => {
     await expect(signInScreen(guest)).toBeVisible();
   });
 
+  test('a guest is offered no Connect AI, since guests cannot create access tokens', async ({ browser }) => {
+    const owner = await make(browser, 'Owner');
+    const id = await createProject(owner, `Access guest AI ${Date.now()}`);
+    const created = await owner.page.request.post(`/api/projects/${id}/shares`, {
+      headers: { 'x-csrf-token': owner.csrf }, data: { role: 'editor', expires_days: 7 },
+    });
+    expect(created.status()).toBe(201);
+    const link: { path: string } = await created.json();
+    const context = await browser.newContext({ baseURL: base });
+    contexts.push(context);
+    const guest = await context.newPage();
+    const joined = await guest.request.post('/api/auth/landing', { data: { token: link.path.replace('/s/', ''), name: 'AI guest' } });
+    expect(joined.ok()).toBe(true);
+    const guestUser: { id: string; is_guest: boolean } = (await joined.json()).user;
+    expect(guestUser.is_guest).toBe(true);
+
+    // The owner's Share dialog offers Connect AI, so its absence below is meaningful.
+    await openProject(owner, id);
+    await owner.page.getByRole('button', { name: 'Share', exact: true }).click();
+    await expect(owner.page.getByRole('dialog', { name: 'Share project' }).getByRole('button', { name: 'Open Connect AI' })).toBeVisible();
+
+    await guest.goto(`/p/${id}`);
+    await dismissTour(guest);
+    await expect(guest.getByRole('button', { name: 'Connect AI', exact: true })).toHaveCount(0);
+
+    // The palette does not list the command for a guest, though it lists other commands.
+    await guest.getByRole('button', { name: /Search files, commands, sections/ }).click();
+    const palette = guest.getByRole('dialog', { name: 'Command palette' });
+    await expect(palette.getByRole('option', { name: /Show the welcome tour/ })).toBeVisible();
+    await expect(palette.getByRole('option', { name: /Connect an AI client/ })).toHaveCount(0);
+    await palette.getByRole('textbox').fill('Connect an AI client');
+    await expect(palette.getByText('Nothing matches')).toBeVisible();
+    await expect(palette.getByRole('option', { name: /Connect an AI client/ })).toHaveCount(0);
+    await palette.getByRole('textbox').press('Escape');
+    await expect(palette).toBeHidden();
+    await expect(guest.getByRole('dialog', { name: 'Connect an AI client' })).toHaveCount(0);
+
+    // The welcome tour leaves out its Connect AI step for a guest, and counts the steps it shows.
+    await guest.getByRole('button', { name: /Search files, commands, sections/ }).click();
+    await palette.getByRole('option', { name: /Show the welcome tour/ }).click();
+    const tour = guest.getByRole('dialog', { name: 'Welcome tour' });
+    await expect(tour).toBeVisible();
+    const titles: string[] = [];
+    for (let step = 1; ; step++) {
+      await expect(tour.locator('.tour-count')).toHaveText(`${step} of 9`);
+      titles.push((await tour.locator('h3').textContent()) ?? '');
+      if (await tour.getByRole('button', { name: 'Start writing' }).isVisible()) break;
+      await tour.getByRole('button', { name: 'Next' }).click();
+    }
+    expect(titles).toHaveLength(9);
+    expect(titles).toContain('Comments and sharing');
+    expect(titles).not.toContain('Connect your AI assistant');
+    await tour.getByRole('button', { name: 'Start writing' }).click();
+    await expect(tour).toBeHidden();
+
+    // A guest made admin reaches the Share dialog, which has no Connect AI there either.
+    const raised = await owner.page.request.put(`/api/projects/${id}/members/${guestUser.id}`, {
+      headers: { 'x-csrf-token': owner.csrf }, data: { role: 'admin' },
+    });
+    expect(raised.ok()).toBe(true);
+    expect((await raised.json()).status).toBe('applied');
+    await guest.getByRole('button', { name: 'Share', exact: true }).click();
+    const share = guest.getByRole('dialog', { name: 'Share project' });
+    await expect(share).toBeVisible();
+    await expect(share.getByRole('button', { name: 'Revoke' }).first()).toBeVisible();
+    await expect(share.getByRole('button', { name: 'Open Connect AI' })).toHaveCount(0);
+    await expect(share.getByText('AI clients', { exact: true })).toHaveCount(0);
+  });
+
   test('opening a project shows no role notice', async ({ browser }) => {
     const owner = await make(browser, 'Owner');
     const member = await make(browser, 'Viewer');

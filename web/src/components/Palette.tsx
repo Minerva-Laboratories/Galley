@@ -37,7 +37,7 @@ export function Palette() {
       run: () => openFile(f.path),
     }));
     const commandItems: Item[] = commands
-      .filter((c) => c.id !== 'palette')
+      .filter((c) => c.id !== 'palette' && !c.hidden?.())
       .map((c) => ({ id: `cmd:${c.id}`, kind: 'command', title: c.title, hint: c.keys, run: c.run }));
     const all = [...fileItems, ...commandItems];
     const q = query.trim();

@@ -112,7 +112,7 @@ impl Default for LimitsConfig {
             default_ip: Rule::new(3000, 60),
             build_account: Rule::new(30, 60),
             import_account: Rule::new(5, 3600),
-            mcp_account: Rule::new(120, 60),
+            mcp_account: Rule::new(600, 60),
             token_create_account: Rule::new(10, 3600),
             project_create_account: Rule::new(20, 3600),
             invite_account: Rule::new(30, 3600),
@@ -263,6 +263,106 @@ pub struct ServerConfig {
     /// An address for the polite pools of Crossref and OpenAlex. An empty value means anonymous.
     #[serde(default)]
     pub contact_email: String,
+}
+
+impl ServerConfig {
+    /// The public host name: `domain` trimmed and lowercased, or `None` when it is empty (local
+    /// mode). The value builds the one origin that cookies, sockets and single sign-on trust, so
+    /// only these forms are accepted, each with an optional `:port` from 1 to 65535:
+    ///
+    /// - a DNS name such as `galley.example.com`: labels of `a-z`, `0-9` and `-`, separated by
+    ///   dots, with no empty label, no label starting or ending with `-`, no label longer than 63,
+    ///   no name longer than 253, and a last label that is not a number;
+    /// - an IPv4 address such as `192.0.2.7`;
+    /// - a bracketed IPv6 address such as `[2001:db8::1]`, written back in the form browsers send.
+    ///
+    /// Port 443 is the HTTPS default, which browsers leave out of `Origin`, so `host:443` becomes
+    /// `host`. Anything else is an error that names `server.domain`.
+    pub fn public_host(&self) -> Result<Option<String>, String> {
+        if self.domain.is_empty() {
+            return Ok(None);
+        }
+        let refuse = || {
+            format!(
+                "server.domain must be a bare host name such as galley.example.com, an IPv4 address, \
+                 or a bracketed IPv6 address such as [2001:db8::1], with an optional :port and no \
+                 https://, path, user, query or spaces; it is {:?}. Leave it empty to run on localhost only.",
+                self.domain
+            )
+        };
+        let value = self.domain.trim().to_ascii_lowercase();
+        let (host, port) = if let Some(rest) = value.strip_prefix('[') {
+            let (inner, after) = rest.split_once(']').ok_or_else(refuse)?;
+            let ip: std::net::Ipv6Addr = inner.parse().map_err(|_| refuse())?;
+            (format!("[{}]", origin_ipv6(ip)), after)
+        } else {
+            let (name, after) = match value.find(':') {
+                Some(i) => value.split_at(i),
+                None => (value.as_str(), ""),
+            };
+            if name.parse::<std::net::Ipv4Addr>().is_err() && !is_dns_name(name) {
+                return Err(refuse());
+            }
+            (name.to_string(), after)
+        };
+        let port = match port {
+            "" => None,
+            p => {
+                let digits = p.strip_prefix(':').ok_or_else(refuse)?;
+                if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err(refuse());
+                }
+                match digits.parse::<u16>() {
+                    Ok(443) => None,
+                    Ok(n) if n > 0 => Some(n),
+                    _ => return Err(refuse()),
+                }
+            }
+        };
+        Ok(Some(match port {
+            Some(n) => format!("{host}:{n}"),
+            None => host,
+        }))
+    }
+}
+
+/// A lowercase DNS name of letters, digits and hyphens. A last label that is a number is refused,
+/// because a browser would read the whole name as an IPv4 address and send a different origin.
+fn is_dns_name(name: &str) -> bool {
+    let label_ok = |l: &str| {
+        !l.is_empty()
+            && l.len() <= 63
+            && !l.starts_with('-')
+            && !l.ends_with('-')
+            && l.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    };
+    let Some(last) = name.rsplit('.').next() else { return false };
+    let numeric = last.bytes().all(|b| b.is_ascii_digit())
+        || last.strip_prefix("0x").is_some_and(|h| h.bytes().all(|b| b.is_ascii_hexdigit()));
+    !name.is_empty() && name.len() <= 253 && name.split('.').all(label_ok) && !numeric
+}
+
+/// An IPv6 address as the URL standard writes it in an origin: lowercase hex, no leading zeros,
+/// and the first longest run of two or more zero groups shortened to `::`.
+fn origin_ipv6(ip: std::net::Ipv6Addr) -> String {
+    let groups = ip.segments();
+    let (mut best, mut best_len, mut i) = (None, 1, 0);
+    while i < 8 {
+        let start = i;
+        while i < 8 && groups[i] == 0 {
+            i += 1;
+        }
+        if i - start > best_len {
+            best = Some(start);
+            best_len = i - start;
+        }
+        i += 1;
+    }
+    let hex = |g: &[u16]| g.iter().map(|x| format!("{x:x}")).collect::<Vec<_>>().join(":");
+    match best {
+        Some(s) => format!("{}::{}", hex(&groups[..s]), hex(&groups[s + best_len..])),
+        None => hex(&groups),
+    }
 }
 
 impl Default for ServerConfig {
@@ -467,6 +567,93 @@ mod tests {
         assert_eq!(parsed.limits.signup_ip, Rule::new(5, 3600));
         let off: Config = toml::from_str("[limits]\nenabled = false\n").unwrap();
         assert!(!off.limits.enabled);
+    }
+
+    #[test]
+    fn a_rule_missing_a_field_names_it() {
+        for (text, field) in [
+            ("[limits]\nlogin_ip = { count = 2 }\n", "window_secs"),
+            ("[limits]\nlogin_ip = { window_secs = 60 }\n", "count"),
+        ] {
+            let error = toml::from_str::<Config>(text).unwrap_err().to_string();
+            assert!(error.contains(&format!("missing field `{field}`")), "{error}");
+            assert!(error.contains("login_ip"), "the error shows the key: {error}");
+        }
+    }
+
+    #[test]
+    fn the_domain_is_a_bare_host() {
+        let host = |domain: &str| ServerConfig { domain: domain.into(), ..ServerConfig::default() }.public_host();
+        assert_eq!(host(""), Ok(None));
+        assert_eq!(host("galley.example.com"), Ok(Some("galley.example.com".into())));
+        assert_eq!(host("  Galley.Example.COM \n"), Ok(Some("galley.example.com".into())));
+        assert_eq!(host("galley.example.com:8443"), Ok(Some("galley.example.com:8443".into())));
+        assert_eq!(host("galley-demo.fly.dev"), Ok(Some("galley-demo.fly.dev".into())));
+        assert_eq!(host("localhost:7000"), Ok(Some("localhost:7000".into())));
+        assert_eq!(host("192.0.2.7"), Ok(Some("192.0.2.7".into())));
+        assert_eq!(host("192.0.2.7:8443"), Ok(Some("192.0.2.7:8443".into())));
+        assert_eq!(host("[2001:db8::1]"), Ok(Some("[2001:db8::1]".into())));
+        assert_eq!(host("[2001:DB8::1]:8443"), Ok(Some("[2001:db8::1]:8443".into())));
+        assert_eq!(host("[2001:0db8:0:0:0:0:0:1]"), Ok(Some("[2001:db8::1]".into())), "written as browsers send it");
+        assert_eq!(host("[::ffff:192.0.2.7]"), Ok(Some("[::ffff:c000:207]".into())));
+        assert_eq!(host("[1:0:0:2:0:0:0:3]"), Ok(Some("[1:0:0:2::3]".into())), "the longest zero run shortens");
+        assert_eq!(host("[1:2:3:4:5:6:7:8]"), Ok(Some("[1:2:3:4:5:6:7:8]".into())));
+        assert_eq!(host("[::]"), Ok(Some("[::]".into())));
+        // Port 443 is the HTTPS default, which browsers leave out of Origin.
+        assert_eq!(host("galley.example.com:443"), Ok(Some("galley.example.com".into())));
+        assert_eq!(host("Galley.Example.com:0443"), Ok(Some("galley.example.com".into())));
+        assert_eq!(host("[2001:db8::1]:443"), Ok(Some("[2001:db8::1]".into())));
+        assert_eq!(host("galley.example.com:08443"), Ok(Some("galley.example.com:8443".into())));
+        assert_eq!(host(&format!("{}.com", "a".repeat(63))), Ok(Some(format!("{}.com", "a".repeat(63)))));
+        let long = format!("{0}.{0}.{0}.{1}", "a".repeat(63), "a".repeat(61));
+        assert_eq!(long.len(), 253);
+        assert!(host(&long).is_ok());
+        for bad in [
+            " ",
+            "\t\n",
+            "https://galley.example.com",
+            "galley.example.com/",
+            "galley.example.com/app",
+            "galley example.com",
+            "//galley.example.com",
+            "host@evil.com",
+            "user:pw@galley.example.com",
+            "host?x",
+            "host#x",
+            "host\\x",
+            "host:",
+            "host:abc",
+            "host:+80",
+            "host:0",
+            "host:65536",
+            "host:99999999999",
+            "host:80:80",
+            "*.example.com",
+            "galley.example.com.",
+            ".galley.example.com",
+            "galley..example.com",
+            "-galley.example.com",
+            "galley-.example.com",
+            "galley_x.example.com",
+            "gälley.example.com",
+            "1.2.3",
+            "192.0.2.07",
+            "192.0.2.256",
+            "example.0x7f",
+            "2001:db8::1",
+            "[2001:db8::1",
+            "[2001:db8::1]x",
+            "[2001:db8::1]:",
+            "[2001:db8::1]:abc",
+            "[fe80::1%eth0]",
+            "[galley.example.com]",
+            "[]",
+        ] {
+            let error = host(bad).unwrap_err();
+            assert!(error.contains("server.domain"), "{bad:?}: {error}");
+        }
+        assert!(host(&format!("{}.com", "a".repeat(64))).is_err(), "a label is at most 63");
+        assert!(host(&format!("{long}a")).is_err(), "a name is at most 253");
     }
 
     #[test]

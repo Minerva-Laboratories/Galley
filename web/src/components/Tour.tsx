@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useState } from 'preact/hooks';
 import type { ComponentChildren } from 'preact';
-import { finishTour } from '../store/store';
+import { currentUser, finishTour } from '../store/store';
 
 type Step = {
   title: string;
@@ -8,6 +8,8 @@ type Step = {
   /** A CSS selector for the part of the screen the step is about. Without one, or when the part is
    * not on screen, the card sits in the middle. */
   target?: string;
+  /** Leave the step out for guests, whose screen does not have the part it is about. */
+  notForGuests?: boolean;
 };
 
 const STEPS: Step[] = [
@@ -86,6 +88,7 @@ const STEPS: Step[] = [
   {
     title: 'Connect your AI assistant',
     target: '[data-tour="connect"]',
+    notForGuests: true,
     body: (
       <p>
         Connect AI lets OpenAI Codex, Claude Code, Cursor or another assistant read the paper, compile it and propose edits, using your
@@ -128,8 +131,10 @@ const STEPS: Step[] = [
 export function Tour() {
   const [i, setI] = useState(0);
   const [rect, setRect] = useState<DOMRect | null>(null);
-  const step = STEPS[i] ?? STEPS[0]!;
-  const last = i === STEPS.length - 1;
+  const guest = currentUser.value?.is_guest ?? false;
+  const steps = guest ? STEPS.filter((s) => !s.notForGuests) : STEPS;
+  const step = steps[i] ?? steps[0]!;
+  const last = i >= steps.length - 1;
 
   // Find the part of the screen this step is about, and follow it if the window changes size.
   useLayoutEffect(() => {
@@ -193,7 +198,7 @@ export function Tour() {
       )}
       <div class={`tour-card ${rect ? '' : 'centered'}`} style={rect ? style : undefined}>
         <div class="tour-count">
-          {i + 1} of {STEPS.length}
+          {i + 1} of {steps.length}
         </div>
         <h3>{step.title}</h3>
         <div class="tour-body">{step.body}</div>

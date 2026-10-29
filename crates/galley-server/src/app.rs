@@ -150,7 +150,12 @@ pub async fn make_builder(data_dir: &Path, config: &Config, public: bool) -> std
 
 impl AppState {
     pub async fn new(data_dir: &Path, config: &Config) -> std::io::Result<AppState> {
-        let public = !config.server.domain.is_empty();
+        // A malformed domain would build an origin nobody's browser sends, or a wrong callback.
+        let domain = config
+            .server
+            .public_host()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("refusing to start: {e}")))?;
+        let public = domain.is_some();
         let mut builder = make_builder(data_dir, config, public).await?;
         let worker_token = config.build.worker_token.resolve("GALLEY_WORKER_TOKEN");
         if !config.build.worker_url.is_empty() {
@@ -169,7 +174,7 @@ impl AppState {
         let backup = crate::backup::Backup::from_config(&config.backup, data_dir)
             .map_err(std::io::Error::other)?
             .map(Arc::new);
-        let public_url = if config.server.domain.is_empty() { String::new() } else { format!("https://{}", config.server.domain) };
+        let public_url = domain.as_ref().map(|d| format!("https://{d}")).unwrap_or_default();
         let oidc = crate::oidc::Oidc::from_config(&config.oidc, &public_url)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?
             .map(Arc::new);
@@ -177,7 +182,7 @@ impl AppState {
             registry: Arc::new(Registry::new_with_engine(data_dir, config.sync_config(), config.build.engine)?),
             builder,
             store: Store::new(db),
-            secure: !config.server.domain.is_empty(),
+            secure: public,
             public_signup: config.server.public_signup,
             contact_email: (!config.server.contact_email.is_empty()).then(|| config.server.contact_email.clone()),
             grammar: config.grammar.clone(),
@@ -193,9 +198,7 @@ impl AppState {
             password_slots: Arc::new(tokio::sync::Semaphore::new(
                 std::thread::available_parallelism().map_or(2, |n| n.get()),
             )),
-            public_origin: (!config.server.domain.is_empty()).then(|| {
-                format!("https://{}", config.server.domain.trim().trim_end_matches('/').to_ascii_lowercase())
-            }),
+            public_origin: domain.map(|d| format!("https://{d}")),
             access: broadcast::channel(256).0,
             limits: Arc::new(crate::limits::Limiter::new(&config.limits)),
         })

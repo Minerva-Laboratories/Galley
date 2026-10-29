@@ -139,7 +139,8 @@ fn free_megabytes(dir: &Path) -> Option<u64> {
 async fn sandbox(config: &Config) -> Check {
     let b = &config.build;
     let sandbox = galley_build::Sandbox::detect(&b.sandbox, &b.docker_image, b.memory_mb, b.cpus).await;
-    let public = !config.server.domain.is_empty();
+    // A malformed domain still asks for public mode; `public_mode` reports the domain itself.
+    let public = !matches!(config.server.public_host(), Ok(None));
     match sandbox.kind {
         galley_build::SandboxKind::Bwrap => Check::ok("sandbox", "bubblewrap; builds run isolated"),
         galley_build::SandboxKind::Docker => Check::ok("sandbox", format!("docker ({})", b.docker_image)),
@@ -256,10 +257,18 @@ fn port(bind: &str) -> Check {
 }
 
 fn public_mode(config: &Config) -> Vec<Check> {
-    let domain = config.server.domain.trim();
-    if domain.is_empty() {
-        return vec![Check::ok("public mode", "off; serving on the bind address only")];
-    }
+    let domain = match config.server.public_host() {
+        Ok(Some(domain)) => domain,
+        Ok(None) => return vec![Check::ok("public mode", "off; serving on the bind address only")],
+        // The same words `galley serve` stops with.
+        Err(e) => {
+            return vec![Check::fail(
+                "public mode",
+                format!("refusing to start: {e}"),
+                "fix server.domain in galley.toml",
+            )];
+        }
+    };
     let mut out = vec![Check::ok("public mode", format!("on for {domain}; certificates come from Let's Encrypt"))];
     // ACME needs both, and a certificate cannot be issued without them reachable from outside.
     for p in [80u16, 443] {
@@ -383,6 +392,30 @@ mod tests {
     fn credentials_in_a_url_are_never_printed() {
         assert_eq!(redact("http://user:pw@lt.example.org:8010"), "http://***@lt.example.org:8010");
         assert_eq!(redact("http://127.0.0.1:8081"), "http://127.0.0.1:8081");
+    }
+
+    #[test]
+    fn public_mode_checks_the_domain_as_the_server_does() {
+        let with = |domain: &str| {
+            let mut config = Config::default();
+            config.server.domain = domain.into();
+            public_mode(&config)
+        };
+        let off = with("");
+        assert_eq!((off.len(), off[0].level), (1, Level::Ok), "{off:?}");
+        assert!(off[0].detail.starts_with("off"), "{off:?}");
+
+        let bad = with("host@evil.com");
+        assert_eq!((bad.len(), bad[0].level), (1, Level::Fail), "{bad:?}");
+        let startup = galley_server::config::ServerConfig { domain: "host@evil.com".into(), ..Default::default() }
+            .public_host()
+            .unwrap_err();
+        assert_eq!(bad[0].detail, format!("refusing to start: {startup}"));
+        assert!(bad[0].fix.as_deref().is_some_and(|f| f.contains("server.domain")));
+
+        let on = with("  Galley.Example.com:443 ");
+        assert_eq!(on[0].level, Level::Ok, "{on:?}");
+        assert!(on[0].detail.contains("on for galley.example.com;"), "the normalised host is shown: {on:?}");
     }
 
     #[test]

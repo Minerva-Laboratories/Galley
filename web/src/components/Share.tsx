@@ -279,19 +279,24 @@ export function ShareModal() {
           ))}
           <div class="hint" style={{ paddingLeft: 0 }}>Reviewers who open a link only need a display name.</div>
 
-          <div style={{ marginTop: 16, fontWeight: 500 }}>AI clients</div>
-          <div class="hint" style={{ paddingLeft: 0 }}>
-            Claude Code, Cursor and other MCP clients connect from their own panel.{' '}
-            <button
-              class="linkish"
-              onClick={() => {
-                shareOpen.value = false;
-                connectOpen.value = true;
-              }}
-            >
-              Open Connect AI
-            </button>
-          </div>
+          {/* Guests cannot create access tokens, so they get no Connect AI entry point. */}
+          {currentUser.value && !currentUser.value.is_guest && (
+            <>
+              <div style={{ marginTop: 16, fontWeight: 500 }}>AI clients</div>
+              <div class="hint" style={{ paddingLeft: 0 }}>
+                Claude Code, Cursor and other MCP clients connect from their own panel.{' '}
+                <button
+                  class="linkish"
+                  onClick={() => {
+                    shareOpen.value = false;
+                    connectOpen.value = true;
+                  }}
+                >
+                  Open Connect AI
+                </button>
+              </div>
+            </>
+          )}
         </div>
       </div>
     </div>

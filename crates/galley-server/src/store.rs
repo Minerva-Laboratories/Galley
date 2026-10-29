@@ -51,6 +51,8 @@ pub struct RevokedShare {
     pub removed: Vec<String>,
     /// How many open governance requests were cancelled with them.
     pub cancelled_requests: usize,
+    /// The link had been revoked before. Nothing was changed, and nothing was removed.
+    pub already_revoked: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -595,7 +597,8 @@ impl Store {
     /// Revoke a live share link and remove the guests who joined through it, with their sessions
     /// and device tokens, and cancel the open requests that target them. Signed-in users who
     /// joined through the link stay. Guests made admin are removed too, unless no other admin
-    /// would remain. Returns the removed guests' ids, or `None` if no live link matched.
+    /// would remain. Returns the removed guests' ids, or `None` if the project has no such link.
+    /// A link revoked before changes nothing and gives `already_revoked`, so a repeat is harmless.
     pub fn revoke_share(&self, project_id: &str, id: &str) -> Result<Option<RevokedShare>, DbError> {
         let conn = self.db.conn()?;
         // Everything below runs on this one transaction. No `self.*` method that takes its own
@@ -606,7 +609,13 @@ impl Store {
             params![project_id, id],
         )?;
         if n == 0 {
-            return Ok(None);
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM share_links WHERE id = ?2 AND project_id = ?1)",
+                params![project_id, id],
+                |r| r.get(0),
+            )?;
+            // Nothing was written; dropping the transaction rolls it back.
+            return Ok(exists.then(|| RevokedShare { removed: Vec::new(), cancelled_requests: 0, already_revoked: true }));
         }
         let mut guests: Vec<(String, bool)> = {
             let mut stmt = tx.prepare(
@@ -652,7 +661,7 @@ impl Store {
             cancelled += Self::cancel_requests_from_non_admins(&tx, project_id, now)?;
         }
         tx.commit()?;
-        Ok(Some(RevokedShare { removed, cancelled_requests: cancelled }))
+        Ok(Some(RevokedShare { removed, cancelled_requests: cancelled, already_revoked: false }))
     }
 
     // --- checkpoints ------------------------------------------------------------------------
@@ -1399,8 +1408,12 @@ mod tests {
         let (link, token) = s.create_share("p1", Role::Commenter, Some("Reviewers"), None, &owner.id).unwrap();
         assert_eq!(s.share_by_token(&token).unwrap(), Some(("p1".into(), Role::Commenter, link.id.clone())));
         assert_eq!(s.shares("p1").unwrap().len(), 1);
-        assert!(s.revoke_share("p1", &link.id).unwrap().is_some());
-        assert!(s.revoke_share("p1", &link.id).unwrap().is_none(), "already revoked");
+        assert!(s.revoke_share("p2", &link.id).unwrap().is_none(), "a link only revokes in its own project");
+        assert!(!s.revoke_share("p1", &link.id).unwrap().unwrap().already_revoked);
+        let again = s.revoke_share("p1", &link.id).unwrap().unwrap();
+        assert!(again.already_revoked, "a repeat finds the revoked link");
+        assert!(again.removed.is_empty() && again.cancelled_requests == 0);
+        assert!(s.revoke_share("p1", "no-such-link").unwrap().is_none());
         assert!(s.share_by_token(&token).unwrap().is_none());
         assert!(s.shares("p1").unwrap().is_empty());
 

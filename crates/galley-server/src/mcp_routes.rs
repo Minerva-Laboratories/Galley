@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 use crate::app::{AppError, AppState, CollabEvent};
 use crate::auth::current::CurrentUser;
 use crate::auth::Role;
-use crate::limits::{Key, RuleId, TOO_MANY};
+use crate::limits::{Key, McpTurn, RuleId, TOO_MANY};
 use crate::store::{AgentRun, User};
 
 const PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -52,16 +52,30 @@ pub async fn rpc(
         }
     }
     // One request at a time per account, batch included. The next one waits in line, up to
-    // `mcp_wait_secs`; past that every request in it gets the 429 text.
-    let _turn = match app.limits.mcp_turn(&user.id).await {
-        Ok(turn) => turn,
+    // `mcp_wait_secs`; past that every request in it gets the 429 text. A `compile` gives the
+    // turn up while it only waits for its build (the build itself is bounded by `build_account`
+    // and the build queue), so other calls from the account are not held up for minutes.
+    let mut turn = match app.limits.mcp_turn(&user.id).await {
+        Ok(turn) => Some(turn),
         Err(_) => return refuse_all(body),
     };
     match body {
         Value::Array(msgs) => {
             let mut out = Vec::new();
-            for m in msgs {
-                if let Some(r) = handle(&app, &id, &user, m).await {
+            let mut msgs = msgs.into_iter();
+            while let Some(m) = msgs.next() {
+                // A compile earlier in this batch gave the turn up: the rest of the batch waits in
+                // line again, and gets the 429 text when the wait runs out.
+                if turn.is_none() {
+                    match app.limits.mcp_turn(&user.id).await {
+                        Ok(again) => turn = Some(again),
+                        Err(_) => {
+                            out.extend(std::iter::once(m).chain(msgs).filter_map(|m| refusal(&m)));
+                            break;
+                        }
+                    }
+                }
+                if let Some(r) = handle(&app, &id, &user, m, &mut turn).await {
                     out.push(r);
                 }
             }
@@ -71,7 +85,7 @@ pub async fn rpc(
                 Json(Value::Array(out)).into_response()
             }
         }
-        m => match handle(&app, &id, &user, m).await {
+        m => match handle(&app, &id, &user, m, &mut turn).await {
             Some(r) => Json(r).into_response(),
             None => StatusCode::ACCEPTED.into_response(),
         },
@@ -91,19 +105,23 @@ fn request_id(msg: &Value) -> Option<Value> {
     msg.get("id").filter(|id| !id.is_null()).cloned()
 }
 
+/// The 429 answer to one message, or `None` for a notification.
+fn refusal(m: &Value) -> Option<Value> {
+    request_id(m).map(|id| rpc_error(id, TOO_MANY_CODE, TOO_MANY))
+}
+
 /// Answer every request in `body` with the 429 text, as when its account's turn did not come.
 fn refuse_all(body: Value) -> Response {
-    let refuse = |m: &Value| request_id(m).map(|id| rpc_error(id, TOO_MANY_CODE, TOO_MANY));
     match &body {
         Value::Array(msgs) => {
-            let out: Vec<Value> = msgs.iter().filter_map(refuse).collect();
+            let out: Vec<Value> = msgs.iter().filter_map(refusal).collect();
             if out.is_empty() {
                 StatusCode::ACCEPTED.into_response()
             } else {
                 Json(Value::Array(out)).into_response()
             }
         }
-        m => match refuse(m) {
+        m => match refusal(m) {
             Some(r) => Json(r).into_response(),
             None => StatusCode::ACCEPTED.into_response(),
         },
@@ -112,8 +130,9 @@ fn refuse_all(body: Value) -> Response {
 
 /// Turn one JSON-RPC message into its response. Return `None` for a notification. Every message,
 /// notifications included, counts against the account's `mcp_account` limit; a request over it
-/// gets the 429 text, and the rest of a batch is still answered.
-async fn handle(app: &AppState, project: &str, user: &User, msg: Value) -> Option<Value> {
+/// gets the 429 text, and the rest of a batch is still answered. `turn` is the account's MCP turn;
+/// a `compile` releases it (leaves `None`) while it waits for its build.
+async fn handle(app: &AppState, project: &str, user: &User, msg: Value, turn: &mut Option<McpTurn>) -> Option<Value> {
     let id = request_id(&msg);
     let method = msg.get("method").and_then(Value::as_str).unwrap_or("").to_string();
     let params = msg.get("params").cloned().unwrap_or(Value::Null);
@@ -150,7 +169,7 @@ async fn handle(app: &AppState, project: &str, user: &User, msg: Value) -> Optio
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
-            match call_tool(app, project, user, name, args).await {
+            match call_tool(app, project, user, name, args, turn).await {
                 Ok(text) => Ok(json!({ "content": [{ "type": "text", "text": text }], "isError": false })),
                 Err(ToolError::Unknown(n)) => Err((-32602, format!("Unknown tool: {n}"))),
                 Err(ToolError::TooMany) => Err((TOO_MANY_CODE, TOO_MANY.to_string())),
@@ -243,6 +262,7 @@ async fn call_tool(
     user: &User,
     name: &str,
     args: Value,
+    turn: &mut Option<McpTurn>,
 ) -> Result<String, ToolError> {
     match name {
         "list_files" => list_files(app, project).await,
@@ -255,7 +275,7 @@ async fn call_tool(
         "literature" => literature(app, project, user, &args).await,
         "read_log" => read_log(app, project).await,
         "list_engines" => list_engines(app, project).await,
-        "compile" => compile(app, project, user, &args).await,
+        "compile" => compile(app, project, user, &args, turn).await,
         "propose_patch" => propose_patch(app, project, user, &args).await,
         "comment" => comment(app, project, user, &args).await,
         other => Err(ToolError::Unknown(other.to_string())),
@@ -514,6 +534,7 @@ async fn compile(
     project: &str,
     user: &User,
     args: &Value,
+    turn: &mut Option<McpTurn>,
 ) -> Result<String, ToolError> {
     app.require(user, project, Role::can_compile, "building")
         .await?;
@@ -541,6 +562,9 @@ async fn compile(
             engine,
     })
     .await;
+    // The build is queued, and from here this request only waits for its result. Give the
+    // account's turn up meanwhile, so its other MCP calls are not stuck behind a long build.
+    drop(turn.take());
     let finished = tokio::time::timeout(COMPILE_WAIT, wait_for_build(&mut rx, id)).await;
     match finished {
         Ok(Ok(r)) => Ok(summarize(&r)),

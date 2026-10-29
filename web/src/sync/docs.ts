@@ -23,8 +23,54 @@ export interface DocSession {
   destroy(): void;
 }
 
+// Close codes the server uses when it ends a connection for good (SPEC §10.2).
+const SIGNED_OUT = 4401;
+const ACCESS_REMOVED = 4403;
+
+/** Stops every document of one project from reconnecting once the server has ended this session's
+ *  access to it: a document socket closed with 4401 (signed out) or 4403 (access removed). The
+ *  documents share that fate, so one such close stops them all, and a document opened later
+ *  stays disconnected. Other closes, such as a network drop (1006), reconnect as before. Nothing
+ *  is deleted here: offline copies are deleted only by forgetProject, for their owner. */
+export class AccessGate {
+  private stopped = false;
+  private readonly providers = new Set<WebsocketProvider>();
+
+  /** Whether the server has ended access, so no document may connect. */
+  get ended(): boolean {
+    return this.stopped;
+  }
+
+  add(provider: WebsocketProvider) {
+    this.providers.add(provider);
+    // y-websocket emits `closed` last, after it has handled a close the server meant as final
+    // (codes 4400-4499 by default), so stopping here never races its own reconnect logic.
+    provider.on('closed', ({ code }) => {
+      if (code === SIGNED_OUT || code === ACCESS_REMOVED) this.end();
+    });
+    if (this.stopped) provider.disconnect();
+  }
+
+  remove(provider: WebsocketProvider) {
+    this.providers.delete(provider);
+  }
+
+  /** Connect a document again, as when an away tab returns, unless access has ended. */
+  resume(provider: WebsocketProvider) {
+    if (!this.stopped) provider.connect();
+  }
+
+  private end() {
+    if (this.stopped) return;
+    this.stopped = true;
+    for (const provider of this.providers) provider.disconnect();
+  }
+}
+
 const sessions = new Map<string, DocSession>();
 let currentProject: string | null = null;
+// The current project's documents. A new project, or the same one opened again, gets a new gate.
+let gate = new AccessGate();
 // An away tab (see away.ts) disconnects every document and reconnects them on return. Edits keep
 // landing in IndexedDB either way.
 let docsPaused = false;
@@ -33,7 +79,7 @@ export function pauseDocs(paused: boolean) {
   docsPaused = paused;
   for (const s of sessions.values()) {
     if (paused) s.provider.disconnect();
-    else s.provider.connect();
+    else gate.resume(s.provider);
   }
 }
 
@@ -66,8 +112,10 @@ export function openDoc(projectId: string, path: string, userName: string, userI
   const provider = new WebsocketProvider(`${wsBase()}/ws/${encodeURIComponent(projectId)}/doc`, room, ydoc, {
     params: { name: userName },
     maxBackoffTime: 5000,
-    connect: !docsPaused,
+    connect: !docsPaused && !gate.ended,
   });
+  const sessionGate = gate;
+  sessionGate.add(provider);
   provider.awareness.setLocalStateField('user', {
     name: userName,
     color: colorFor(userName).color,
@@ -92,6 +140,7 @@ export function openDoc(projectId: string, path: string, userName: string, userI
     persistence,
     ready,
     destroy() {
+      sessionGate.remove(provider);
       provider.awareness.setLocalState(null);
       provider.destroy();
       void persistence.destroy();
@@ -126,6 +175,7 @@ export function closeAll() {
   for (const s of Array.from(sessions.values())) s.destroy();
   sessions.clear();
   currentProject = null;
+  gate = new AccessGate();
 }
 
 /** Resolve when a database is deleted, when deleting it fails or is blocked, or after 3 s, so a
@@ -199,6 +249,7 @@ export async function forgetProject(projectId: string, paths: string[], userId: 
       sessions.delete(s.path);
     }
     currentProject = null;
+    gate = new AccessGate();
   }
   if (!owned) return;
   try {

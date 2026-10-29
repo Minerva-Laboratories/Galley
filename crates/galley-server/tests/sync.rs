@@ -767,8 +767,11 @@ async fn share_link_landing_and_comments() {
     let (status, _, _) =
         rest(&server.state, &Auth::default(), "POST", "/api/auth/landing", Some(json!({ "token": token, "name": "Late" }))).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    let (status, _, _) = rest(&server.state, &ana, "DELETE", &share, None).await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "a revoked link cannot be revoked again");
+    let (status, out, ana) = rest(&server.state, &ana, "DELETE", &share, None).await;
+    assert_eq!(status, StatusCode::OK, "a repeat revoke succeeds and changes nothing");
+    assert_eq!(out, json!({ "ok": true, "removed_guests": 0 }));
+    let (status, _, _) = rest(&server.state, &ana, "DELETE", "/api/projects/paper/shares/no-such-link", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "a link the project never had is not found");
 }
 
 #[tokio::test]

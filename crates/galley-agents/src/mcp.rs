@@ -11,6 +11,9 @@ pub enum McpError {
     Http { url: String, source: reqwest::Error },
     #[error("the server rejected the token or the project (HTTP {0}); check --url and --token")]
     Status(u16),
+    /// HTTP 429, or the JSON-RPC rate-limit error. The runner does not retry.
+    #[error("the server is rate-limiting this account; try again in a moment")]
+    RateLimited,
     #[error("{0}")]
     Rpc(String),
     #[error("unexpected response from the server: {0}")]
@@ -58,6 +61,9 @@ impl McpClient {
         if status.as_u16() == 202 {
             return Ok(None);
         }
+        if status.as_u16() == 429 {
+            return Err(McpError::RateLimited);
+        }
         if !status.is_success() {
             return Err(McpError::Status(status.as_u16()));
         }
@@ -70,8 +76,7 @@ impl McpClient {
         let msg = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
         let v = self.post(msg).await?.ok_or_else(|| McpError::Shape("no response body".into()))?;
         if let Some(err) = v.get("error") {
-            let m = err.get("message").and_then(Value::as_str).unwrap_or("unknown error");
-            return Err(McpError::Rpc(m.to_string()));
+            return Err(rpc_error(err));
         }
         v.get("result").cloned().ok_or_else(|| McpError::Shape("missing result".into()))
     }
@@ -115,5 +120,32 @@ impl McpClient {
             .and_then(Value::as_str)
             .map(str::to_string)
             .ok_or_else(|| McpError::Shape("prompt has no text".into()))
+    }
+}
+
+/// The server answers every rate-limit refusal with this JSON-RPC code and its 429 text.
+const RATE_LIMITED: i64 = -32000;
+
+fn rpc_error(err: &Value) -> McpError {
+    let m = err.get("message").and_then(Value::as_str).unwrap_or("unknown error");
+    if err.get("code").and_then(Value::as_i64) == Some(RATE_LIMITED) && m.starts_with("Too many attempts") {
+        return McpError::RateLimited;
+    }
+    McpError::Rpc(m.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_rate_limit_reads_as_one() {
+        let limited = json!({ "code": -32000, "message": "Too many attempts. Try again in a few moments." });
+        assert!(matches!(rpc_error(&limited), McpError::RateLimited));
+        assert_eq!(McpError::RateLimited.to_string(), "the server is rate-limiting this account; try again in a moment");
+        let other = json!({ "code": -32601, "message": "Method not found: x" });
+        assert!(matches!(rpc_error(&other), McpError::Rpc(m) if m == "Method not found: x"));
+        let other_server = json!({ "code": -32000, "message": "something else" });
+        assert!(matches!(rpc_error(&other_server), McpError::Rpc(_)));
     }
 }

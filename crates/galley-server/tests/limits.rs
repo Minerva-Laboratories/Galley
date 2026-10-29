@@ -619,3 +619,79 @@ async fn a_signup_that_gets_no_password_slot_is_refused_and_uses_no_budget() {
     // The refused signup did not use the one signup the budget allows.
     assert_eq!(signup("new@example.org", "198.51.100.2").await.status, StatusCode::OK);
 }
+
+/// Install a stand-in Tectonic engine in `data_dir`, complete as Galley checks it. It answers
+/// `--version` at once, and every compile sleeps for `secs` and then fails.
+fn slow_tectonic(data_dir: &std::path::Path, secs: u32) {
+    let pins = galley_build::install::pins().unwrap();
+    let engine = data_dir.join("tectonic").join(pins.folder());
+    std::fs::create_dir_all(engine.join("bundle")).unwrap();
+    std::fs::create_dir_all(engine.join("cache/formats")).unwrap();
+    std::fs::write(engine.join("bundle/SHA256SUM"), &pins.bundle_digest).unwrap();
+    std::fs::write(engine.join("cache/formats/latex.fmt"), "fmt").unwrap();
+    let script = format!(
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then echo tectonic test-version; exit 0; fi\nsleep {secs}\nexit 1\n"
+    );
+    std::fs::write(engine.join("tectonic"), script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(engine.join("tectonic"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_compile_waiting_for_its_build_does_not_hold_the_accounts_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    slow_tectonic(dir.path(), 4);
+    let mut config = Config::default();
+    config.build.sandbox = "none".into();
+    config.limits = LimitsConfig {
+        enabled: true,
+        client_ip_header: "Fly-Client-IP".into(),
+        signup_ip: Rule::new(0, 3600),
+        signup_global: Rule::new(0, 3600),
+        mcp_wait_secs: 1,
+        ..Default::default()
+    };
+    let state = AppState::new(dir.path(), &config).await.unwrap();
+    let meta = state.registry.create("Paper").await.unwrap();
+    let ann = mcp_member(&state, "ann@example.org", &meta.id);
+    let path = format!("/mcp/{}", meta.id);
+
+    // A batch: a compile, then a ping that runs after the compile's build has finished.
+    let compile = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": { "name": "compile", "arguments": { "engine": "tectonic" } } });
+    let batch = {
+        let (state, ann, path) = (state.clone(), ann.clone(), path.clone());
+        tokio::spawn(async move { call(&state, "198.51.100.1", &ann, Method::POST, &path, Some(json!([compile, ping(2)]))).await })
+    };
+    // Wait for the build to start: from then on the compile only waits for its result.
+    let builds = state.builds(&meta.id).await.unwrap();
+    let started = std::time::Instant::now();
+    while !builds.is_running().await {
+        assert!(started.elapsed() < std::time::Duration::from_secs(10), "the build never started");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    // Ann's other calls go ahead meanwhile, well within the 1 s wait for a turn.
+    for id in [3, 4] {
+        let a = call(&state, "198.51.100.1", &ann, Method::POST, &path, Some(ping(id))).await;
+        assert_eq!(a.body["id"], id);
+        assert_eq!(a.body["result"], json!({}), "a ping during a compile is not refused: {}", a.body);
+    }
+    assert!(!batch.is_finished(), "the compile is still waiting for its slow build");
+
+    // The batch finishes: the compile reports its (failed) build, and the ping after it got
+    // the turn back.
+    let done = tokio::time::timeout(std::time::Duration::from_secs(60), batch).await.unwrap().unwrap();
+    let out = done.body.as_array().unwrap_or_else(|| panic!("{}", done.body));
+    assert_eq!(out.len(), 2);
+    assert_eq!(out[0]["id"], 1);
+    assert!(out[0]["result"]["content"][0]["text"].is_string(), "{}", out[0]);
+    assert_eq!(out[1]["id"], 2);
+    assert_eq!(out[1]["result"], json!({}));
+    // Nothing is left holding a turn: the next request goes straight through.
+    let a = call(&state, "198.51.100.1", &ann, Method::POST, &path, Some(ping(5))).await;
+    assert_eq!(a.body["result"], json!({}));
+}

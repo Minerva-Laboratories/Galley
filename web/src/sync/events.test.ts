@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../api';
+import * as Y from 'yjs';
+import { WebsocketProvider } from 'y-websocket';
+import { AccessGate } from './docs';
 import { connectionStatus, pauseEvents, refreshPresence, subscribeEvents } from './events';
 
 const getProject = vi.hoisted(() => vi.fn());
@@ -247,5 +250,114 @@ describe('lost access on the event socket', () => {
     Socket.all[2]!.close();
     await vi.advanceTimersByTimeAsync(0);
     expect(getProject).not.toHaveBeenCalled();
+  });
+});
+
+describe('document connections after access ends', () => {
+  // y-websocket assigns binaryType and detaches handlers on the socket; the fake accepts both.
+  class DocSocket extends Socket {
+    binaryType = '';
+  }
+  let providers: WebsocketProvider[] = [];
+  const docSockets = () => Socket.all.filter((s) => s.url.includes('/doc/'));
+  const provider = (room: string, connect = true) => {
+    const made = new WebsocketProvider('ws://galley.test/ws/p/doc', room, new Y.Doc(), {
+      connect,
+      disableBc: true,
+      maxBackoffTime: 5000,
+      WebSocketPolyfill: DocSocket as unknown as typeof WebSocket,
+    });
+    providers.push(made);
+    return made;
+  };
+  /** The newest socket of a document. */
+  const socketOf = (room: string) => docSockets().filter((s) => s.url.endsWith(`/${room}`)).at(-1)!;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    Socket.all = [];
+    providers = [];
+  });
+  afterEach(() => {
+    for (const p of providers) p.destroy();
+    vi.useRealTimers();
+  });
+
+  it.each([4403, 4401])('one document closed with %i stops every document of the project', (code) => {
+    const gate = new AccessGate();
+    const a = provider('a.tex');
+    const b = provider('b.tex');
+    gate.add(a);
+    gate.add(b);
+    socketOf('a.tex').open();
+    socketOf('b.tex').open();
+    expect(docSockets()).toHaveLength(2);
+
+    socketOf('a.tex').close(code);
+    expect(gate.ended).toBe(true);
+    expect(a.shouldConnect).toBe(false);
+    expect(b.shouldConnect).toBe(false);
+    expect(b.wsconnected).toBe(false);
+    // b's socket closes locally, and nothing reconnects afterwards.
+    vi.advanceTimersByTime(30_000);
+    expect(docSockets()).toHaveLength(2);
+
+    // An away tab returning does not reconnect them, and a document opened later stays offline.
+    gate.resume(a);
+    gate.resume(b);
+    const c = provider('c.tex', false);
+    gate.add(c);
+    vi.advanceTimersByTime(30_000);
+    expect(docSockets()).toHaveLength(2);
+    expect(c.shouldConnect).toBe(false);
+  });
+
+  it('a dropped connection keeps reconnecting', () => {
+    const gate = new AccessGate();
+    const a = provider('a.tex');
+    const b = provider('b.tex');
+    gate.add(a);
+    gate.add(b);
+    socketOf('a.tex').open();
+    socketOf('b.tex').open();
+
+    socketOf('a.tex').close(1006);
+    expect(gate.ended).toBe(false);
+    vi.advanceTimersByTime(5000);
+    expect(docSockets().filter((s) => s.url.endsWith('/a.tex'))).toHaveLength(2);
+    expect(b.shouldConnect).toBe(true);
+    expect(b.wsconnected).toBe(true);
+
+    // Paused and resumed, as an away tab does, it connects again.
+    a.disconnect();
+    gate.resume(a);
+    expect(a.shouldConnect).toBe(true);
+  });
+
+  it('another final close code stops only that document', () => {
+    const gate = new AccessGate();
+    const a = provider('a.tex');
+    const b = provider('b.tex');
+    gate.add(a);
+    gate.add(b);
+    socketOf('a.tex').open();
+    socketOf('b.tex').open();
+
+    socketOf('a.tex').close(4400);
+    expect(gate.ended).toBe(false);
+    expect(b.shouldConnect).toBe(true);
+  });
+
+  it('a removed document is not stopped by the gate', () => {
+    const gate = new AccessGate();
+    const a = provider('a.tex');
+    const b = provider('b.tex');
+    gate.add(a);
+    gate.add(b);
+    gate.remove(b);
+    socketOf('a.tex').open();
+    socketOf('a.tex').close(4403);
+    expect(gate.ended).toBe(true);
+    expect(b.shouldConnect).toBe(true);
   });
 });

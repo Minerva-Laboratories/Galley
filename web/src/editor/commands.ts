@@ -8,6 +8,7 @@ import { clearFigureCache, setDeadline, toggleFigureCache } from '../store/setti
 import {
   build as buildState,
   connectOpen,
+  currentUser,
   narrowPane,
   tourOpen,
   currentSession,
@@ -32,6 +33,8 @@ export interface Command {
   title: string;
   keys?: string;
   run: () => void;
+  /** Whether the palette leaves this command out for the current user. */
+  hidden?: () => boolean;
 }
 
 export const commands: Command[] = [
@@ -40,7 +43,8 @@ export const commands: Command[] = [
   { id: 'problems', title: 'Toggle problems', keys: 'Ctrl ⇧ M', run: toggleProblems },
   { id: 'preview', title: 'Toggle preview', keys: 'Ctrl ⇧ P', run: togglePreview },
   { id: 'sync', title: 'Show cursor line in PDF', run: () => void showInPdf() },
-  { id: 'connect', title: 'Connect an AI client', run: () => (connectOpen.value = true) },
+  // Guests cannot create access tokens, so the palette does not offer them Connect AI.
+  { id: 'connect', title: 'Connect an AI client', run: openConnectAi, hidden: () => !currentUser.value || currentUser.value.is_guest },
   { id: 'tour', title: 'Show the welcome tour', run: () => (tourOpen.value = true) },
   { id: 'draft', title: 'Toggle draft mode', run: () => (toggleDraft(), void build()) },
   { id: 'drawer', title: 'Toggle drawer', keys: 'Ctrl B', run: () => toggleDrawer(drawer.value ?? 'files') },
@@ -64,6 +68,15 @@ export const commands: Command[] = [
     run: () => showToast('Type fig, tab, eq, sec, sub, cite, or todo and press Tab.'),
   },
 ];
+
+/** Guests cannot create access tokens, so the Connect AI dialog is for accounts only. */
+function openConnectAi() {
+  if (!currentUser.value || currentUser.value.is_guest) {
+    showToast("Guests can't connect AI tools. Create an account to connect AI tools.");
+    return;
+  }
+  connectOpen.value = true;
+}
 
 function showDrawer(name: DrawerName) {
   drawer.value = name;

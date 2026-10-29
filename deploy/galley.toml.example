@@ -71,3 +71,10 @@ allow_unsandboxed = false
 # bucket = "galley-backup"
 # prefix = "galley"
 # interval_s = 120
+
+[limits]
+# Rate limits per IP and per account. On by default; see docs/SPEC.md, "Limits".
+# Behind a reverse proxy every request comes from the proxy's address, so name the
+# header that carries the real client IP. It is trusted only when the proxy connects
+# from loopback or a private network. Caddy (deploy/Caddyfile) sets X-Forwarded-For.
+# client_ip_header = "X-Forwarded-For"
