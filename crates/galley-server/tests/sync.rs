@@ -25,11 +25,18 @@ struct Server {
 }
 
 async fn start() -> Server {
+    start_with(|_| {}).await
+}
+
+/// A server on a real port, with the test defaults and then `adjust` applied to its config.
+async fn start_with(adjust: impl FnOnce(&mut Config)) -> Server {
     let dir = tempfile::tempdir().unwrap();
     let mut config = Config::default();
     config.sync.flush_quiet_ms = 150;
     config.build.sandbox = "none".into();
     config.server.public_signup = true; // tests create several accounts directly
+    config.limits.enabled = false; // tests/limits.rs covers the limits
+    adjust(&mut config);
     let state = AppState::new(dir.path(), &config).await.unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -107,6 +114,7 @@ async fn project_downloads_use_the_current_display_name() {
     let dir = tempfile::tempdir().unwrap();
     let mut config = Config::default();
     config.build.sandbox = "none".into();
+    config.limits.enabled = false;
     let state = AppState::new(dir.path(), &config).await.unwrap();
     let auth = signup(&state, "export@example.com", "Author").await;
     let (status, meta, auth) = rest(&state, &auth, "POST", "/api/projects", Some(json!({"name":"Original project"}))).await;
@@ -161,6 +169,7 @@ async fn an_exported_project_with_a_figure_imports_back_through_disk() {
     let dir = tempfile::tempdir().unwrap();
     let mut config = Config::default();
     config.build.sandbox = "none".into();
+    config.limits.enabled = false;
     let state = AppState::new(dir.path(), &config).await.unwrap();
     let auth = signup(&state, "roundtrip@example.com", "Author").await;
     let (_, meta, auth) = rest(&state, &auth, "POST", "/api/projects", Some(json!({"name":"Round trip"}))).await;
@@ -215,6 +224,7 @@ async fn folder_routes_check_roles_and_notify_listeners() {
     let mut config = Config::default();
     config.build.sandbox = "none".into();
     config.server.public_signup = true;
+    config.limits.enabled = false;
     let state = AppState::new(dir.path(), &config).await.unwrap();
     let admin = signup(&state, "folder-admin@example.com", "Admin").await;
     let viewer = signup(&state, "folder-viewer@example.com", "Viewer").await;
@@ -281,6 +291,7 @@ async fn engine_selection_is_saved_and_role_gated() {
     config.build.sandbox = "none".into();
     config.build.texlive_path = tex_bin.to_string_lossy().into_owned();
     config.server.public_signup = true;
+    config.limits.enabled = false;
     let state = AppState::new(dir.path(), &config).await.unwrap();
     let admin = signup(&state, "engine-admin@example.com", "Admin").await;
     let viewer = signup(&state, "engine-viewer@example.com", "Viewer").await;
@@ -420,6 +431,7 @@ async fn a_tectonic_build_without_an_engine_is_refused_with_the_install_command(
     let dir = tempfile::tempdir().unwrap();
     let mut config = Config::default();
     config.build.sandbox = "none".into();
+    config.limits.enabled = false;
     let state = AppState::new(dir.path(), &config).await.unwrap();
     if galley_build::engine::Tectonic::locate(dir.path()).is_some() {
         return; // This machine's image holds an engine.
@@ -439,6 +451,7 @@ async fn build_status_restores_pdf_producer_after_restart() {
     let dir = tempfile::tempdir().unwrap();
     let mut config = Config::default();
     config.build.sandbox = "none".into();
+    config.limits.enabled = false;
     let state = AppState::new(dir.path(), &config).await.unwrap();
     let admin = signup(&state, "producer@example.com", "Producer").await;
     let (status, _, admin) = rest(&state, &admin, "POST", "/api/projects", Some(json!({"name":"Producer test"}))).await;
@@ -480,6 +493,7 @@ async fn real_mcp_engine_matrix_preserves_project_selection() {
     let mut config = Config::default();
     config.build.sandbox = "bwrap".into();
     config.build.texlive_path = texlive;
+    config.limits.enabled = false;
     let state = AppState::new(dir.path(), &config).await.unwrap();
     assert_eq!(state.builder.sandbox.kind, galley_build::SandboxKind::Bwrap);
     let admin = signup(&state, "matrix@example.com", "Matrix").await;
@@ -741,12 +755,44 @@ async fn share_link_landing_and_comments() {
     assert_eq!(comments.as_array().unwrap().len(), 1);
     assert_eq!(comments[0]["author_name"], "Reviewer 2");
 
-    // Revoking the link locks new visitors out.
-    let (status, _, ana) = rest(&server.state, &ana, "DELETE", &format!("/api/projects/paper/shares/{}", link["id"].as_str().unwrap()), None).await;
+    // Revoking the link locks new visitors out and removes the guest who joined through it.
+    let share = format!("/api/projects/paper/shares/{}", link["id"].as_str().unwrap());
+    let (status, out, ana) = rest(&server.state, &ana, "DELETE", &share, None).await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(out, json!({ "ok": true, "removed_guests": 1 }));
     let (status, _, _) = rest(&server.state, &Auth::default(), "GET", &format!("/api/share/{token}"), None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    let _ = ana;
+    let (status, _, _) = rest(&server.state, &guest, "GET", "/api/projects/paper", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "the guest's session is gone");
+    let (status, _, _) =
+        rest(&server.state, &Auth::default(), "POST", "/api/auth/landing", Some(json!({ "token": token, "name": "Late" }))).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) = rest(&server.state, &ana, "DELETE", &share, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "a revoked link cannot be revoked again");
+}
+
+#[tokio::test]
+async fn revoking_a_link_closes_its_guests_sockets() {
+    let server = start().await;
+    let ana = signup(&server.state, "ana@uni.edu", "Ana").await;
+    let (status, meta, ana) = rest(&server.state, &ana, "POST", "/api/projects", Some(json!({ "name": "Revoke" }))).await;
+    assert_eq!(status, StatusCode::CREATED, "{meta}");
+    let id = meta["id"].as_str().unwrap().to_string();
+    let (status, link, ana) =
+        rest(&server.state, &ana, "POST", &format!("/api/projects/{id}/shares"), Some(json!({ "role": "editor" }))).await;
+    assert_eq!(status, StatusCode::CREATED, "{link}");
+    let token = link["path"].as_str().unwrap().strip_prefix("/s/").unwrap().to_string();
+    let (status, landed, guest) =
+        rest(&server.state, &Auth::default(), "POST", "/api/auth/landing", Some(json!({ "token": token, "name": "Guest" }))).await;
+    assert_eq!(status, StatusCode::OK, "{landed}");
+    let mut events = event_socket(&server, &guest, &id).await;
+    assert_eq!(first_event(&mut events).await, json!({ "type": "role_changed", "role": "editor" }));
+
+    let (status, out, _) =
+        rest(&server.state, &ana, "DELETE", &format!("/api/projects/{id}/shares/{}", link["id"].as_str().unwrap()), None).await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    next_event(&mut events, "access_removed").await;
+    assert_eq!(next_close(&mut events).await, Some(4403));
 }
 
 #[tokio::test]
@@ -791,6 +837,54 @@ async fn governance_solo_immediate_then_unanimous_vote() {
     assert_eq!(out["status"], "applied");
     let (status, _, _) = rest(&server.state, &carol, "GET", "/api/projects/gov", None).await;
     assert_eq!(status, StatusCode::OK, "Carol is now a member");
+
+    // Each admin proposes lowering themself, and both get approved. The second would leave no
+    // admin, so its vote resolves as cancelled and nothing changes.
+    let ana_id = user_id(&server.state, &ana).await;
+    let bob_id = user_id(&server.state, &bob).await;
+    let (status, lower_ana, ana) =
+        rest(&server.state, &ana, "PUT", &format!("/api/projects/gov/members/{ana_id}"), Some(json!({ "role": "editor" }))).await;
+    assert_eq!(status, StatusCode::OK, "{lower_ana}");
+    assert_eq!(lower_ana["status"], "pending");
+    let (status, lower_bob, bob) =
+        rest(&server.state, &bob, "PUT", &format!("/api/projects/gov/members/{bob_id}"), Some(json!({ "role": "editor" }))).await;
+    assert_eq!(status, StatusCode::OK, "{lower_bob}");
+    assert_eq!(lower_bob["status"], "pending");
+    let lower_bob_id = lower_bob["request_id"].as_str().unwrap().to_string();
+    let (status, out, _) = rest(
+        &server.state,
+        &bob,
+        "POST",
+        &format!("/api/projects/gov/requests/{}/vote", lower_ana["request_id"].as_str().unwrap()),
+        Some(json!({ "approve": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    assert_eq!(out["status"], "applied");
+
+    let mut events = event_socket(&server, &bob, "gov").await;
+    assert_eq!(first_event(&mut events).await, json!({ "type": "role_changed", "role": "admin" }));
+    let (status, out, _) =
+        rest(&server.state, &bob, "POST", &format!("/api/projects/gov/requests/{lower_bob_id}/vote"), Some(json!({ "approve": true }))).await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    assert_eq!(out, json!({ "status": "cancelled" }));
+    next_event(&mut events, "requests_changed").await;
+    let (_, gov, _) = rest(&server.state, &bob, "GET", "/api/projects/gov/governance", None).await;
+    assert!(gov["requests"].as_array().unwrap().is_empty(), "{gov}");
+    assert_eq!(server.state.store.role_of("gov", &bob_id).unwrap(), Some(galley_server::auth::Role::Admin));
+    let audited: i64 = server
+        .state
+        .store
+        .db()
+        .conn()
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM audit_log WHERE project_id = 'gov' AND action = 'governance.cancel' AND detail = ?1",
+            [&lower_bob_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(audited, 1);
     let _ = ana;
 }
 
@@ -868,6 +962,47 @@ async fn event_socket(server: &Server, auth: &Auth, project: &str) -> EventSocke
     let mut request = format!("ws://{}/ws/{project}/events", server.addr).into_client_request().unwrap();
     request.headers_mut().insert("Cookie", auth.cookie_header().unwrap().parse().unwrap());
     tokio_tungstenite::connect_async(request).await.unwrap().0
+}
+
+/// Skip ping, text and binary frames until the server closes. Returns the close code, or `None`
+/// when the socket ends without one. Fails after 5 s.
+async fn next_close(ws: &mut EventSocket) -> Option<u16> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match ws.next().await {
+                Some(Ok(Message::Close(Some(frame)))) => return Some(u16::from(frame.code)),
+                Some(Ok(Message::Close(None))) | None | Some(Err(_)) => return None,
+                Some(Ok(_)) => continue,
+            }
+        }
+    })
+    .await
+    .expect("the socket did not close in time")
+}
+
+/// The next event of type `kind`, skipping other events. Fails if the socket closes first.
+async fn next_event(socket: &mut EventSocket, kind: &str) -> Value {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match socket.next().await.expect("event socket closed").unwrap() {
+                Message::Text(text) => {
+                    let event: Value = serde_json::from_str(&text).unwrap();
+                    if event["type"] == kind { return event; }
+                }
+                Message::Close(frame) => panic!("event socket closed before {kind}: {frame:?}"),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("no {kind} event in time"))
+}
+
+/// The first frame an event socket sends.
+async fn first_event(socket: &mut EventSocket) -> Value {
+    let msg = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
+    let Message::Text(text) = msg else { panic!("the first frame is not text: {msg:?}") };
+    serde_json::from_str(&text).unwrap()
 }
 
 async fn roster(socket: &mut EventSocket, expected: &[&str]) -> Value {
@@ -951,6 +1086,7 @@ async fn deleting_folders_and_projects_enforces_roles_and_cleans_persistent_stat
     let mut config = Config::default();
     config.build.sandbox = "none".into();
     config.server.public_signup = true;
+    config.limits.enabled = false;
     let state = AppState::new(dir.path(), &config).await.unwrap();
     let admin = signup(&state, "delete-admin@example.com", "Admin").await;
     let editor = signup(&state, "delete-editor@example.com", "Editor").await;
@@ -1016,4 +1152,362 @@ async fn deleting_folders_and_projects_enforces_roles_and_cleans_persistent_stat
     assert!(reopened.registry.open(id).await.is_err());
     assert_eq!(rest(&reopened, &admin, "GET", "/api/projects", None).await.1, json!([]));
     assert!(!dir.path().join("data").join(id).exists(), "stale writers must not recreate the project");
+}
+
+/// POST JSON with no session, and return the status and the raw body bytes.
+async fn post_raw(state: &AppState, path: &str, body: Value) -> (StatusCode, Vec<u8>) {
+    let req = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let res = router(state.clone()).oneshot(req).await.unwrap();
+    let status = res.status();
+    (status, res.into_body().collect().await.unwrap().to_bytes().to_vec())
+}
+
+#[tokio::test]
+async fn failed_logins_look_the_same_for_unknown_and_known_emails() {
+    let server = start().await;
+    signup(&server.state, "known@uni.edu", "Known").await;
+    server.state.store.create_oidc_user("oidc@uni.edu", "O", "sub-1", false).unwrap();
+
+    let mut bodies = Vec::new();
+    for (email, password) in [("nobody@uni.edu", "supersecret"), ("known@uni.edu", "wrong-password"), ("oidc@uni.edu", "supersecret")] {
+        let (status, body) = post_raw(&server.state, "/api/auth/login", json!({ "email": email, "password": password })).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{email}");
+        bodies.push(body);
+    }
+    assert_eq!(bodies[0], bodies[1], "an unknown email answers like a wrong password");
+    assert_eq!(bodies[0], bodies[2], "a single sign-on account answers like a wrong password");
+    let error: Value = serde_json::from_slice(&bodies[0]).unwrap();
+    assert_eq!(error, json!({ "error": "That email and password don't match." }));
+
+    let (status, _) = post_raw(&server.state, "/api/auth/login", json!({ "email": "known@uni.edu", "password": "supersecret" })).await;
+    assert_eq!(status, StatusCode::OK, "the right password still signs in");
+}
+
+#[tokio::test]
+async fn a_login_waits_for_a_free_password_slot() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = Config::default();
+    config.build.sandbox = "none".into();
+    config.limits.enabled = false;
+    let state = AppState::new(dir.path(), &config).await.unwrap();
+    let slots = std::thread::available_parallelism().map_or(2, |n| n.get());
+    assert_eq!(state.password_slots.available_permits(), slots);
+
+    let held = state.password_slots.clone().acquire_many_owned(slots as u32).await.unwrap();
+    let login = {
+        let state = state.clone();
+        tokio::spawn(async move {
+            post_raw(&state, "/api/auth/login", json!({ "email": "nobody@uni.edu", "password": "supersecret" })).await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!login.is_finished(), "no argon2 work starts while every slot is taken");
+    drop(held);
+    let (status, _) = tokio::time::timeout(Duration::from_secs(10), login).await.expect("login finishes once a slot frees").unwrap();
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(state.password_slots.available_permits(), slots, "the login gave its slot back");
+}
+
+/// A JSON-RPC ping to a project's MCP route, with extra headers. Returns the status and JSON body.
+async fn mcp_ping(state: &AppState, project: &str, headers: &[(&str, String)]) -> (StatusCode, Value) {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(format!("/mcp/{project}"))
+        .header("content-type", "application/json");
+    for (name, value) in headers {
+        builder = builder.header(*name, value);
+    }
+    let body = json!({"jsonrpc":"2.0","id":1,"method":"ping"});
+    let res = router(state.clone()).oneshot(builder.body(Body::from(body.to_string())).unwrap()).await.unwrap();
+    let status = res.status();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+}
+
+#[tokio::test]
+async fn guests_cannot_create_or_use_device_tokens() {
+    let server = start().await;
+    let ana = signup(&server.state, "ana@uni.edu", "Ana").await;
+    let (_, _, ana) = rest(&server.state, &ana, "POST", "/api/projects", Some(json!({ "name": "Paper" }))).await;
+    let (status, link, ana) =
+        rest(&server.state, &ana, "POST", "/api/projects/paper/shares", Some(json!({ "role": "editor", "label": "Team" }))).await;
+    assert_eq!(status, StatusCode::CREATED, "{link}");
+    let token = link["path"].as_str().unwrap().strip_prefix("/s/").unwrap().to_string();
+    let (status, landed, guest) =
+        rest(&server.state, &Auth::default(), "POST", "/api/auth/landing", Some(json!({ "token": token, "name": "Guest" }))).await;
+    assert_eq!(status, StatusCode::OK, "{landed}");
+    assert_eq!(landed["user"]["is_guest"], true);
+    let guest_id = landed["user"]["id"].as_str().unwrap().to_string();
+
+    // A guest cannot mint a token.
+    let (status, refused, _) = rest(&server.state, &guest, "POST", "/api/auth/tokens", Some(json!({ "label": "cli" }))).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(refused, json!({ "error": "Guests can't create access tokens. Create an account to connect AI tools." }));
+    assert!(server.state.store.device_tokens(&guest_id).unwrap().is_empty());
+
+    // A guest token made some other way does not authenticate, and is never touched.
+    let (_, guest_token) = server.state.store.create_device_token(&guest_id, "x").unwrap();
+    let bearer = [("authorization", format!("Bearer {guest_token}"))];
+    let res = router(server.state.clone())
+        .oneshot(Request::builder().uri("/api/projects").header("authorization", format!("Bearer {guest_token}")).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    let (status, _) = mcp_ping(&server.state, "paper", &bearer).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let tokens = server.state.store.device_tokens(&guest_id).unwrap();
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens[0].last_used_at, None, "a refused token is never marked used");
+
+    // An account's token still works.
+    let (status, made, _) = rest(&server.state, &ana, "POST", "/api/auth/tokens", Some(json!({ "label": "cli" }))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, pong) = mcp_ping(&server.state, "paper", &[("authorization", format!("Bearer {}", made["token"].as_str().unwrap()))]).await;
+    assert_eq!(status, StatusCode::OK, "{pong}");
+}
+
+/// Try to open a project's event socket with the given headers.
+async fn try_event_socket(
+    addr: &str,
+    project: &str,
+    headers: &[(&'static str, String)],
+) -> Result<EventSocket, tokio_tungstenite::tungstenite::Error> {
+    let mut request = format!("ws://{addr}/ws/{project}/events").into_client_request().unwrap();
+    for (name, value) in headers {
+        request.headers_mut().insert(*name, value.parse().unwrap());
+    }
+    tokio_tungstenite::connect_async(request).await.map(|(socket, _)| socket)
+}
+
+const CROSS_SITE: &str = "Cross-site connections are not allowed.";
+
+fn assert_socket_refused(result: Result<EventSocket, tokio_tungstenite::tungstenite::Error>) {
+    match result {
+        Err(tokio_tungstenite::tungstenite::Error::Http(r)) => {
+            assert_eq!(r.status(), StatusCode::FORBIDDEN);
+            let body: Value = serde_json::from_slice(r.body().as_deref().unwrap_or_default()).unwrap();
+            assert_eq!(body, json!({ "error": CROSS_SITE }));
+        }
+        Err(other) => panic!("expected a 403 handshake, got {other}"),
+        Ok(_) => panic!("a cross-site socket connected"),
+    }
+}
+
+#[tokio::test]
+async fn cross_site_origins_are_refused_on_sockets_and_mcp() {
+    let evil = || ("origin", "https://evil.example".to_string());
+    let server = start().await;
+    let ana = signup(&server.state, "ana@uni.edu", "Ana").await;
+    let (status, _, ana) = rest(&server.state, &ana, "POST", "/api/projects", Some(json!({ "name": "Paper" }))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let cookie = || ("cookie", ana.cookie_header().unwrap());
+
+    // Sockets: another site is refused, the page's own origin connects.
+    assert_socket_refused(try_event_socket(&server.addr, "paper", &[cookie(), evil()]).await);
+    let own = ("origin", format!("http://{}", server.addr));
+    try_event_socket(&server.addr, "paper", &[cookie(), own.clone()]).await.expect("same-origin socket");
+    try_event_socket(&server.addr, "paper", &[cookie()]).await.expect("a socket without an Origin");
+    // Sockets authenticate by cookie only, so a Bearer header never skips the check.
+    assert_socket_refused(
+        try_event_socket(&server.addr, "paper", &[cookie(), evil(), ("authorization", "Bearer x".into())]).await,
+    );
+
+    // MCP with the session cookie: another site is refused, before the session is even looked up.
+    let refusal = json!({ "error": CROSS_SITE });
+    assert_eq!(mcp_ping(&server.state, "paper", &[cookie(), evil()]).await, (StatusCode::FORBIDDEN, refusal.clone()));
+    assert_eq!(
+        mcp_ping(&server.state, "paper", &[("cookie", "galley_session=not-a-session".into()), evil()]).await,
+        (StatusCode::FORBIDDEN, refusal.clone())
+    );
+    let (status, _) = mcp_ping(&server.state, "paper", &[cookie(), own.clone(), ("host", server.addr.clone())]).await;
+    assert_eq!(status, StatusCode::OK, "the page's own origin");
+    // A Bearer call cannot be ridden by another site, so any Origin passes.
+    let (status, made, _) = rest(&server.state, &ana, "POST", "/api/auth/tokens", Some(json!({ "label": "cli" }))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let bearer = ("authorization", format!("Bearer {}", made["token"].as_str().unwrap()));
+    let (status, pong) = mcp_ping(&server.state, "paper", &[bearer, evil()]).await;
+    assert_eq!(status, StatusCode::OK, "{pong}");
+
+    // With a domain set, only https://{domain} is accepted, whatever the Host.
+    let public = start_with(|c| {
+        c.server.domain = "galley.example".into();
+        c.build.allow_unsandboxed = true;
+    })
+    .await;
+    let admin = signup(&public.state, "admin@galley.example", "Admin").await;
+    let (status, _, admin) = rest(&public.state, &admin, "POST", "/api/projects", Some(json!({ "name": "Paper" }))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let cookie = ("cookie", admin.cookie_header().unwrap());
+    try_event_socket(&public.addr, "paper", &[cookie.clone(), ("origin", "https://galley.example".into())])
+        .await
+        .expect("the public origin connects");
+    assert_socket_refused(try_event_socket(&public.addr, "paper", &[cookie.clone(), ("origin", format!("http://{}", public.addr))]).await);
+    assert_socket_refused(try_event_socket(&public.addr, "paper", &[cookie, evil()]).await);
+}
+
+/// The signed-in user's id.
+async fn user_id(state: &AppState, auth: &Auth) -> String {
+    let (_, me, _) = rest(state, auth, "GET", "/api/auth/me", None).await;
+    me["user"]["id"].as_str().unwrap().to_string()
+}
+
+/// An owner's project with a second account invited at `role`. Returns the owner, the member,
+/// the member's id and the project id.
+async fn project_with_member(server: &Server, role: &str) -> (Auth, Auth, String, String) {
+    let ana = signup(&server.state, "ana@uni.edu", "Ana").await;
+    let bob = signup(&server.state, "bob@uni.edu", "Bob").await;
+    let (status, meta, ana) = rest(&server.state, &ana, "POST", "/api/projects", Some(json!({ "name": "Access" }))).await;
+    assert_eq!(status, StatusCode::CREATED, "{meta}");
+    let id = meta["id"].as_str().unwrap().to_string();
+    let (status, out, ana) =
+        rest(&server.state, &ana, "POST", &format!("/api/projects/{id}/members"), Some(json!({ "email": "bob@uni.edu", "role": role }))).await;
+    assert_eq!(status, StatusCode::CREATED, "{out}");
+    assert_eq!(out["status"], "applied");
+    let bob_id = user_id(&server.state, &bob).await;
+    (ana, bob, bob_id, id)
+}
+
+#[tokio::test]
+async fn a_removed_member_loses_both_sockets() {
+    let server = start().await;
+    let (ana, bob, bob_id, id) = project_with_member(&server, "editor").await;
+    let mut events = event_socket(&server, &bob, &id).await;
+    assert_eq!(first_event(&mut events).await, json!({ "type": "role_changed", "role": "editor" }));
+    let mut doc = Client::connect(&server.addr, &bob, &id, "main.tex").await.unwrap();
+
+    let (status, out, _) = rest(&server.state, &ana, "DELETE", &format!("/api/projects/{id}/members/{bob_id}"), None).await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    assert_eq!(out["status"], "applied");
+    next_event(&mut events, "access_removed").await;
+    assert_eq!(next_close(&mut events).await, Some(4403));
+    assert_eq!(next_close(&mut doc.ws).await, Some(4403));
+}
+
+/// Insert marker `P{n};` on `client`'s socket, prove the server handled it, and report whether
+/// the server's document has it. The update carries the client's whole state, so markers the
+/// server dropped while the client was read-only travel with it.
+async fn probe(server: &Server, owner: &Auth, client: &mut Client, id: &str, n: u32) -> bool {
+    let marker = format!("P{n};");
+    {
+        let text = client.doc.get_or_insert_text("content");
+        text.insert(&mut client.doc.transact_mut(), 0, &marker);
+    }
+    let update = client.doc.transact().encode_state_as_update_v1(&yrs::StateVector::default());
+    client.send(YMessage::Sync(SyncMessage::Update(update)).encode_v1()).await;
+    // The server answers sync step 1 with step 2 on the same socket, after the update before it.
+    let sv = client.doc.transact().state_vector();
+    client.send(YMessage::Sync(SyncMessage::SyncStep1(sv)).encode_v1()).await;
+    loop {
+        let frame = client.recv_binary().await;
+        let mut dec = DecoderV1::new(Cursor::new(&frame));
+        if MessageReader::new(&mut dec).any(|m| matches!(m, Ok(YMessage::Sync(SyncMessage::SyncStep2(_))))) {
+            break;
+        }
+    }
+    let fresh = Client::connect(&server.addr, owner, id, "main.tex").await.unwrap();
+    fresh.text().contains(&marker)
+}
+
+#[tokio::test]
+async fn a_lowered_editor_turns_read_only_while_connected() {
+    let server = start().await;
+    let (ana, bob, bob_id, id) = project_with_member(&server, "editor").await;
+    let mut events = event_socket(&server, &bob, &id).await;
+    assert_eq!(first_event(&mut events).await, json!({ "type": "role_changed", "role": "editor" }));
+    let mut doc = Client::connect(&server.addr, &bob, &id, "main.tex").await.unwrap();
+    let mut n = 1;
+    assert!(probe(&server, &ana, &mut doc, &id, n).await, "an editor's edit lands");
+
+    let member = format!("/api/projects/{id}/members/{bob_id}");
+    let (status, out, ana) = rest(&server.state, &ana, "PUT", &member, Some(json!({ "role": "viewer" }))).await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    assert_eq!(next_event(&mut events, "role_changed").await["role"], "viewer");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        n += 1;
+        if !probe(&server, &ana, &mut doc, &id, n).await { break; }
+        assert!(tokio::time::Instant::now() < deadline, "the lowered editor's edits still land");
+    }
+    n += 1;
+    assert!(!probe(&server, &ana, &mut doc, &id, n).await, "edits stay dropped");
+
+    let (status, out, ana) = rest(&server.state, &ana, "PUT", &member, Some(json!({ "role": "editor" }))).await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    assert_eq!(next_event(&mut events, "role_changed").await["role"], "editor");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        n += 1;
+        if probe(&server, &ana, &mut doc, &id, n).await { break; }
+        assert!(tokio::time::Instant::now() < deadline, "edits are not accepted again");
+    }
+}
+
+#[tokio::test]
+async fn signing_out_closes_only_that_sessions_sockets() {
+    let server = start().await;
+    let first = signup(&server.state, "ana@uni.edu", "Ana").await;
+    let (status, _, second) = rest(
+        &server.state,
+        &Auth::default(),
+        "POST",
+        "/api/auth/login",
+        Some(json!({ "email": "ana@uni.edu", "password": "supersecret" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_ne!(first.session, second.session, "two sessions");
+    let uid = user_id(&server.state, &first).await;
+    let (status, meta, first) = rest(&server.state, &first, "POST", "/api/projects", Some(json!({ "name": "Sessions" }))).await;
+    assert_eq!(status, StatusCode::CREATED, "{meta}");
+    let id = meta["id"].as_str().unwrap().to_string();
+    let mut one = event_socket(&server, &first, &id).await;
+    let mut two = event_socket(&server, &second, &id).await;
+    roster(&mut one, &[uid.as_str()]).await;
+    roster(&mut two, &[uid.as_str()]).await;
+
+    let (status, _, _) = rest(&server.state, &first, "POST", "/api/auth/logout", None).await;
+    assert_eq!(status, StatusCode::OK);
+    next_event(&mut one, "signed_out").await;
+    assert_eq!(next_close(&mut one).await, Some(4401));
+
+    // The other session's socket stays open: drain what is queued, then ask for a fresh roster.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    while let Ok(msg) = tokio::time::timeout(Duration::from_millis(200), two.next()).await {
+        match msg.expect("the other session's socket ended").unwrap() {
+            Message::Close(frame) => panic!("the other session's socket closed: {frame:?}"),
+            Message::Ping(_) => two.flush().await.unwrap(),
+            _ => {}
+        }
+    }
+    two.send(Message::Text(json!({ "type": "presence_refresh" }).to_string().into())).await.unwrap();
+    roster(&mut two, &[uid.as_str()]).await;
+
+    let cookie = |auth: &Auth| [("cookie", auth.cookie_header().unwrap())];
+    try_event_socket(&server.addr, &id, &cookie(&second)).await.expect("the other session still connects");
+    match try_event_socket(&server.addr, &id, &cookie(&first)).await {
+        Err(tokio_tungstenite::tungstenite::Error::Http(r)) => assert_eq!(r.status(), StatusCode::UNAUTHORIZED),
+        Err(other) => panic!("expected a 401 handshake, got {other}"),
+        Ok(_) => panic!("a signed-out session connected"),
+    }
+}
+
+#[tokio::test]
+async fn a_signed_in_member_raised_by_a_share_link_gets_role_changed() {
+    let server = start().await;
+    let (ana, bob, _, id) = project_with_member(&server, "viewer").await;
+    let (status, link, _) = rest(&server.state, &ana, "POST", &format!("/api/projects/{id}/shares"), Some(json!({ "role": "editor", "label": "Team" }))).await;
+    assert_eq!(status, StatusCode::CREATED, "{link}");
+    let token = link["path"].as_str().unwrap().strip_prefix("/s/").unwrap().to_string();
+    let mut events = event_socket(&server, &bob, &id).await;
+    assert_eq!(first_event(&mut events).await, json!({ "type": "role_changed", "role": "viewer" }));
+
+    let (status, landed, _) = rest(&server.state, &bob, "POST", "/api/auth/landing", Some(json!({ "token": token, "name": "Bob" }))).await;
+    assert_eq!(status, StatusCode::OK, "{landed}");
+    assert_eq!(landed["role"], "editor");
+    assert_eq!(next_event(&mut events, "role_changed").await["role"], "editor");
 }

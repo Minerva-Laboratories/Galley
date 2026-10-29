@@ -16,6 +16,111 @@ pub struct Config {
     pub grammar: GrammarConfig,
     pub backup: BackupConfig,
     pub oidc: OidcConfig,
+    pub limits: LimitsConfig,
+}
+
+/// One rate rule: at most `count` requests per `window_secs`. A `count` of 0 turns the rule off.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Rule {
+    pub count: u32,
+    pub window_secs: u64,
+}
+
+impl Rule {
+    pub const fn new(count: u32, window_secs: u64) -> Rule {
+        Rule { count, window_secs }
+    }
+}
+
+/// How often anyone may call the server, counted per client IP before the handler and per
+/// account after authentication. The counters live in memory, so a restart resets them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct LimitsConfig {
+    pub enabled: bool,
+    /// The header that carries the client IP, such as `Fly-Client-IP` on Fly or `X-Forwarded-For`
+    /// behind exactly one proxy that overwrites it. Empty uses the TCP peer. The header is
+    /// trusted only when the TCP peer is loopback or private. Behind a proxy without it, every
+    /// client shares the proxy's address.
+    pub client_ip_header: String,
+    /// Failed logins per (email, IP) before a lock that doubles from 1 s to 900 s.
+    pub login_failures: u32,
+    pub max_mcp_batch: usize,
+    /// MCP requests in progress at once per account.
+    pub mcp_concurrent: u32,
+    /// How long a further MCP request waits in line before it is refused.
+    pub mcp_wait_secs: u64,
+    /// The longest wait for a password-hashing slot before a login or signup is refused.
+    pub password_wait_secs: u64,
+    /// Keys each counter map holds. Past that, new keys count in coarser shared buckets.
+    pub max_entries: usize,
+    // Per client IP, before the handler.
+    pub login_ip: Rule,
+    pub signup_ip: Rule,
+    /// Accounts created across the server, by password and by single sign-on.
+    pub signup_global: Rule,
+    pub join_ip: Rule,
+    pub join_global: Rule,
+    /// Guests joining through one share link.
+    pub join_link: Rule,
+    pub share_preview_ip: Rule,
+    pub oidc_ip: Rule,
+    pub build_ip: Rule,
+    pub import_ip: Rule,
+    pub mcp_ip: Rule,
+    pub socket_ip: Rule,
+    /// Every request, on top of its group's rule.
+    pub default_ip: Rule,
+    // Per account, after authentication.
+    pub build_account: Rule,
+    pub import_account: Rule,
+    /// Per JSON-RPC message.
+    pub mcp_account: Rule,
+    pub token_create_account: Rule,
+    pub project_create_account: Rule,
+    pub invite_account: Rule,
+    pub lookup_account: Rule,
+    pub socket_account: Rule,
+    /// Failed logins per email from anywhere. Past it, the email is locked for networks without
+    /// a recent successful login.
+    pub login_email_failures: Rule,
+}
+
+impl Default for LimitsConfig {
+    fn default() -> Self {
+        LimitsConfig {
+            enabled: true,
+            client_ip_header: String::new(),
+            login_failures: 5,
+            max_mcp_batch: 20,
+            mcp_concurrent: 1,
+            mcp_wait_secs: 60,
+            password_wait_secs: 5,
+            max_entries: 100_000,
+            login_ip: Rule::new(20, 600),
+            signup_ip: Rule::new(5, 3600),
+            signup_global: Rule::new(100, 3600),
+            join_ip: Rule::new(20, 3600),
+            join_global: Rule::new(200, 3600),
+            join_link: Rule::new(50, 3600),
+            share_preview_ip: Rule::new(30, 60),
+            oidc_ip: Rule::new(20, 600),
+            build_ip: Rule::new(120, 60),
+            import_ip: Rule::new(20, 3600),
+            mcp_ip: Rule::new(600, 60),
+            socket_ip: Rule::new(600, 60),
+            default_ip: Rule::new(3000, 60),
+            build_account: Rule::new(30, 60),
+            import_account: Rule::new(5, 3600),
+            mcp_account: Rule::new(120, 60),
+            token_create_account: Rule::new(10, 3600),
+            project_create_account: Rule::new(20, 3600),
+            invite_account: Rule::new(30, 3600),
+            lookup_account: Rule::new(30, 60),
+            socket_account: Rule::new(300, 60),
+            login_email_failures: Rule::new(50, 3600),
+        }
+    }
 }
 
 /// Single sign-on through an OpenID Connect provider. Off while `issuer` is empty. Register
@@ -346,6 +451,22 @@ mod tests {
         assert_eq!(parsed.server.bind, "127.0.0.1:7000");
         assert_eq!(parsed.sync.flush_quiet_ms, 4000);
         assert_eq!(parsed.build.engine, EngineKind::Tectonic);
+        assert_eq!(parsed.limits, LimitsConfig::default());
+        assert!(parsed.limits.enabled);
+    }
+
+    #[test]
+    fn limits_parse_from_a_partial_section() {
+        let parsed: Config = toml::from_str(
+            "[limits]\nclient_ip_header = \"Fly-Client-IP\"\nlogin_ip = { count = 2, window_secs = 60 }\n",
+        )
+        .unwrap();
+        assert!(parsed.limits.enabled);
+        assert_eq!(parsed.limits.client_ip_header, "Fly-Client-IP");
+        assert_eq!(parsed.limits.login_ip, Rule::new(2, 60));
+        assert_eq!(parsed.limits.signup_ip, Rule::new(5, 3600));
+        let off: Config = toml::from_str("[limits]\nenabled = false\n").unwrap();
+        assert!(!off.limits.enabled);
     }
 
     #[test]

@@ -18,6 +18,7 @@ use serde_json::{json, Value};
 use crate::app::{AppError, AppState, CollabEvent};
 use crate::auth::current::CurrentUser;
 use crate::auth::Role;
+use crate::limits::{Key, RuleId, TOO_MANY};
 use crate::store::{AgentRun, User};
 
 const PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -44,6 +45,18 @@ pub async fn rpc(
     if app.require(&user, &id, Role::can_view, "using this project").await.is_err() {
         return (StatusCode::NOT_FOUND, Json(json!({ "error": "No such project." }))).into_response();
     }
+    let limits = app.limits.config();
+    if let Value::Array(msgs) = &body {
+        if app.limits.enabled() && msgs.len() > limits.max_mcp_batch {
+            return Json(rpc_error(Value::Null, INVALID_REQUEST, "Batch too large")).into_response();
+        }
+    }
+    // One request at a time per account, batch included. The next one waits in line, up to
+    // `mcp_wait_secs`; past that every request in it gets the 429 text.
+    let _turn = match app.limits.mcp_turn(&user.id).await {
+        Ok(turn) => turn,
+        Err(_) => return refuse_all(body),
+    };
     match body {
         Value::Array(msgs) => {
             let mut out = Vec::new();
@@ -65,16 +78,50 @@ pub async fn rpc(
     }
 }
 
-/// Turn one JSON-RPC message into its response. Return `None` for a notification.
+const INVALID_REQUEST: i64 = -32600;
+/// The JSON-RPC server error used for every rate-limit refusal, with [`TOO_MANY`] as its text.
+const TOO_MANY_CODE: i64 = -32000;
+
+fn rpc_error(id: Value, code: i64, message: &str) -> Value {
+    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
+}
+
+/// The JSON-RPC request id of a message, or `None` for a notification.
+fn request_id(msg: &Value) -> Option<Value> {
+    msg.get("id").filter(|id| !id.is_null()).cloned()
+}
+
+/// Answer every request in `body` with the 429 text, as when its account's turn did not come.
+fn refuse_all(body: Value) -> Response {
+    let refuse = |m: &Value| request_id(m).map(|id| rpc_error(id, TOO_MANY_CODE, TOO_MANY));
+    match &body {
+        Value::Array(msgs) => {
+            let out: Vec<Value> = msgs.iter().filter_map(refuse).collect();
+            if out.is_empty() {
+                StatusCode::ACCEPTED.into_response()
+            } else {
+                Json(Value::Array(out)).into_response()
+            }
+        }
+        m => match refuse(m) {
+            Some(r) => Json(r).into_response(),
+            None => StatusCode::ACCEPTED.into_response(),
+        },
+    }
+}
+
+/// Turn one JSON-RPC message into its response. Return `None` for a notification. Every message,
+/// notifications included, counts against the account's `mcp_account` limit; a request over it
+/// gets the 429 text, and the rest of a batch is still answered.
 async fn handle(app: &AppState, project: &str, user: &User, msg: Value) -> Option<Value> {
-    let id = msg.get("id").cloned();
+    let id = request_id(&msg);
     let method = msg.get("method").and_then(Value::as_str).unwrap_or("").to_string();
     let params = msg.get("params").cloned().unwrap_or(Value::Null);
-    let is_notification = id.is_none() || matches!(id, Some(Value::Null));
-    if is_notification {
-        return None;
+    let counted = app.limits.hit(RuleId::McpAccount, Key::Account(user.id.clone()));
+    let id = id?;
+    if counted.is_err() {
+        return Some(rpc_error(id, TOO_MANY_CODE, TOO_MANY));
     }
-    let id = id.unwrap();
     let result: Result<Value, (i64, String)> = match method.as_str() {
         "initialize" => {
             let requested = params.get("protocolVersion").and_then(Value::as_str).unwrap_or("");
@@ -106,6 +153,7 @@ async fn handle(app: &AppState, project: &str, user: &User, msg: Value) -> Optio
             match call_tool(app, project, user, name, args).await {
                 Ok(text) => Ok(json!({ "content": [{ "type": "text", "text": text }], "isError": false })),
                 Err(ToolError::Unknown(n)) => Err((-32602, format!("Unknown tool: {n}"))),
+                Err(ToolError::TooMany) => Err((TOO_MANY_CODE, TOO_MANY.to_string())),
                 Err(ToolError::Failed(text)) => {
                     Ok(json!({ "content": [{ "type": "text", "text": text }], "isError": true }))
                 }
@@ -173,6 +221,8 @@ fn tool_schemas() -> Value {
 enum ToolError {
     Unknown(String),
     Failed(String),
+    /// Over a per-account rate limit: answered as a JSON-RPC error with the 429 text.
+    TooMany,
 }
 
 impl From<AppError> for ToolError {
@@ -202,7 +252,7 @@ async fn call_tool(
         "context" => context(app, project, &args).await,
         "bib" => bib(app, project, &args).await,
         "math" => math(app, project, &args).await,
-        "literature" => literature(app, project, &args).await,
+        "literature" => literature(app, project, user, &args).await,
         "read_log" => read_log(app, project).await,
         "list_engines" => list_engines(app, project).await,
         "compile" => compile(app, project, user, &args).await,
@@ -315,7 +365,7 @@ async fn bib(app: &AppState, project: &str, _args: &Value) -> Result<String, Too
 }
 
 /// Catalogue lookups (docs/RETRIEVAL.md §5). They are opt-in per project. They never send document text.
-async fn literature(app: &AppState, project: &str, args: &Value) -> Result<String, ToolError> {
+async fn literature(app: &AppState, project: &str, user: &User, args: &Value) -> Result<String, ToolError> {
     let meta = app.registry.meta(project).map_err(AppError::from)?;
     if !meta.literature {
         return Err(ToolError::Failed(
@@ -324,6 +374,8 @@ async fn literature(app: &AppState, project: &str, args: &Value) -> Result<Strin
                 .into(),
         ));
     }
+    // Each lookup counts like the editor's catalogue lookups, against the same account budget.
+    app.limits.hit(RuleId::LookupAccount, Key::Account(user.id.clone())).map_err(|_| ToolError::TooMany)?;
     let kind = arg_str(args, "kind").unwrap_or("coverage").to_string();
     let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(10).clamp(1, 25) as usize;
     let p = app.registry.open(project).await?;
@@ -465,6 +517,8 @@ async fn compile(
 ) -> Result<String, ToolError> {
     app.require(user, project, Role::can_compile, "building")
         .await?;
+    // Each compile counts like a build from the editor, against the same account budget.
+    app.limits.hit(RuleId::BuildAccount, Key::Account(user.id.clone())).map_err(|_| ToolError::TooMany)?;
     let builds = app.builds(project).await?;
     let mut rx = builds.subscribe();
     let file = arg_str(args, "file").map(str::to_string);
@@ -793,6 +847,7 @@ mod engine_wait_tests {
         let dir = tempfile::tempdir().unwrap();
         let mut config = crate::config::Config::default();
         config.build.sandbox = "none".into();
+        config.limits.enabled = false;
         let app = AppState::new(dir.path(), &config).await.unwrap();
         let user = app.store.create_user("proposal@example.com", "Writer", "supersecret", false).unwrap();
         let meta = app.registry.create("Proposal deletion").await.unwrap();

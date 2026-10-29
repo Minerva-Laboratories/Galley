@@ -283,6 +283,10 @@ export interface SourceLocation {
 export type ProjectEvent =
   | { type: 'presence'; users: { id: string; name: string }[] }
   | { type: 'project_deleted' }
+  // Access checks on the live connection (SPEC §10.2). The first frame is always role_changed.
+  | { type: 'role_changed'; role: Role2 }
+  | { type: 'access_removed' }
+  | { type: 'signed_out' }
   | { type: 'commit'; sha: string; short_sha: string; message: string; author: string; time: string }
   | { type: 'file_created'; path: string }
   | { type: 'file_deleted'; path: string }
@@ -338,9 +342,10 @@ export interface GovernanceState {
   requests: RoleRequest[];
 }
 
-/** What a governed action returned: applied now, or waiting for votes. */
+/** What a governed action returned: applied now, waiting for votes, or cancelled because
+ *  there was nothing left to apply. */
 export interface GovernResult {
-  status: 'applied' | 'pending' | 'rejected' | 'gone';
+  status: 'applied' | 'pending' | 'rejected' | 'gone' | 'cancelled';
   request_id?: string;
 }
 

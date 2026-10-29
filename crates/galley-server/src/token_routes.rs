@@ -21,6 +21,11 @@ pub async fn create(
     CurrentUser(user): CurrentUser,
     Json(body): Json<NewToken>,
 ) -> Result<(StatusCode, Json<Value>), AppError> {
+    if user.is_guest {
+        return Err(AppError::Forbidden(
+            "Guests can't create access tokens. Create an account to connect AI tools.".into(),
+        ));
+    }
     let label = body.label.trim().to_string();
     if label.is_empty() {
         return Err(AppError::BadRequest("Give the token a label, like the client it is for.".into()));

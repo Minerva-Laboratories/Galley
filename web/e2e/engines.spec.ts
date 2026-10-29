@@ -72,6 +72,11 @@ test('compiler selection shows availability, saves only on success, and respects
     if (route.request().method() === 'GET') return route.fulfill({ json: { ...meta, engine: 'pdflatex', role: 'viewer' } });
     return route.continue();
   });
+  // The event socket's first frame carries the real role; present it as viewer too.
+  await readonly.routeWebSocket(`**/ws/${id}/events`, (ws) => {
+    const server = ws.connectToServer();
+    server.onMessage((m) => ws.send(String(m).includes('"type":"role_changed"') ? JSON.stringify({ type: 'role_changed', role: 'viewer' }) : m));
+  });
   await readonly.goto(page.url());
   await expect(readonly.locator('.build .eng')).toContainText('Next: pdfLaTeX');
   await expect(readonly.getByRole('combobox', { name: 'Compiler' })).toHaveCount(0);

@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'preact/hooks';
 import { effect } from '@preact/signals';
-import { EditorState } from '@codemirror/state';
+import { Compartment, EditorState } from '@codemirror/state';
 import {
   EditorView,
   drawSelection,
@@ -59,6 +59,11 @@ export function Editor({ session }: { session: DocSession }) {
     let disposeDeco: (() => void) | null = null;
     let disposeQuiet: (() => void) | null = null;
     let disposeDiag: (() => void) | null = null;
+    let disposeEditable: (() => void) | null = null;
+    // Edit rights can change while the file is open (a role change on the event socket), so the
+    // read-only extensions live in a compartment and are swapped in place.
+    const editable = new Compartment();
+    const editableExtensions = (can: boolean) => [EditorState.readOnly.of(!can), EditorView.editable.of(can)];
     let repaint: (() => void) | null = null;
 
     // Mount only once the document's content has loaded (see DocSession.ready), so the editor
@@ -86,8 +91,7 @@ export function Editor({ session }: { session: DocSession }) {
           galleyHighlighting,
           collabField,
           syncOnClick,
-          EditorState.readOnly.of(!canEdit.value),
-          EditorView.editable.of(canEdit.value),
+          editable.of(editableExtensions(canEdit.peek())),
           yCollab(session.ytext, session.provider.awareness, { undoManager }),
           autoLabels,
           keymap.of([
@@ -122,6 +126,10 @@ export function Editor({ session }: { session: DocSession }) {
         void suggestMode.value;
         repaint?.();
       });
+      disposeEditable = effect(() => {
+        const can = canEdit.value;
+        boundView.dispatch({ effects: editable.reconfigure(editableExtensions(can)) });
+      });
       disposeQuiet = effect(() => {
         boundView.dom.classList.toggle('quiet', quietMode.value);
       });
@@ -147,6 +155,7 @@ export function Editor({ session }: { session: DocSession }) {
       disposeDeco?.();
       disposeQuiet?.();
       disposeDiag?.();
+      disposeEditable?.();
       if (view && editorView.value === view) editorView.value = null;
       view?.destroy();
       undoManager?.destroy();

@@ -1,5 +1,6 @@
 // Auth actions. Kept out of components so the gate and forms share one source of truth.
 import { api, ApiError } from '../api';
+import { forgetUserCopies } from '../sync/docs';
 import { authReady, currentUser, needsSetup, publicSignup, setDisplayName, ssoLabel } from './store';
 
 export async function loadMe(): Promise<void> {
@@ -32,12 +33,34 @@ export async function signup(email: string, name: string, password: string): Pro
   setDisplayName(user.name);
 }
 
+// Set while this tab's own Sign out is in flight. The server's signed_out frame on the event socket
+// can arrive before the HTTP answer and must not show "You were signed out." here. Once the answer
+// is in, the local user is gone, and a late frame finds no one to sign out.
+let signingOut = false;
+export function isSigningOut(): boolean {
+  return signingOut;
+}
+
 export async function logout(): Promise<void> {
+  const previousUserId = currentUser.value?.id ?? null;
+  signingOut = true;
+  let confirmed = false;
   try {
     await api.logout();
+    confirmed = true;
   } catch {
     // Even if the call fails, drop the local identity.
   }
+  dropLocalIdentity();
+  signingOut = false;
+  // An explicit Sign out deletes this account's offline copies in this browser, and never another
+  // account's. Edits not yet synced are lost by this click.
+  if (confirmed && previousUserId) void forgetUserCopies(previousUserId);
+}
+
+/** Forget the signed-in user locally, without calling the server: after this tab's Sign out, or
+ *  when the server reports that the session ended elsewhere. Offline copies are kept here. */
+export function dropLocalIdentity(): void {
   currentUser.value = null;
 }
 

@@ -102,6 +102,7 @@ async fn galley(p: &Provider, domains: &[&str], public_signup: bool) -> (AppStat
     let dir = tempfile::tempdir().unwrap();
     let mut config = Config::default();
     config.build.sandbox = "none".into();
+    config.limits.enabled = false;
     config.server.public_signup = public_signup;
     config.oidc.issuer = p.issuer.clone();
     config.oidc.client_id = CLIENT.into();
@@ -229,4 +230,40 @@ async fn a_cancelled_sign_in_says_so() {
     let (state, _dir) = galley(&p, &[], true).await;
     let res = fetch(&state, "/api/auth/oidc/callback?error=access_denied&state=x", "").await;
     assert!(location(&res).contains("cancelled"));
+}
+
+#[tokio::test]
+async fn a_single_sign_on_account_counts_against_the_global_signup_budget() {
+    let p = provider().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = Config::default();
+    config.build.sandbox = "none".into();
+    config.server.public_signup = true;
+    config.limits.signup_global = galley_server::config::Rule::new(1, 3600);
+    config.oidc.issuer = p.issuer.clone();
+    config.oidc.client_id = CLIENT.into();
+    config.oidc.redirect_url = "http://localhost/api/auth/oidc/callback".into();
+    let state = AppState::new(dir.path(), &config).await.unwrap();
+    state.store.create_user("admin@example.edu", "Admin", "password-123", true).unwrap();
+
+    // A password signup uses the budget.
+    let signup = Request::post("/api/auth/signup")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({ "email": "first@example.org", "name": "First", "password": "password-123" }).to_string()))
+        .unwrap();
+    assert_eq!(router(state.clone()).oneshot(signup).await.unwrap().status(), StatusCode::OK);
+
+    // A new single sign-on account is then sent back to the sign-in screen with the message, and
+    // no account or session is created.
+    let start = fetch(&state, "/api/auth/oidc/start", "").await;
+    let to = url::Url::parse(&location(&start)).unwrap();
+    let q: HashMap<String, String> = to.query_pairs().into_owned().collect();
+    *p.next.lock().unwrap() = Some((q["nonce"].clone(), Who { sub: "u-9", email: "second@example.org", verified: true }));
+    let cookie = format!("galley_oidc_state={}", cookies(&start)["galley_oidc_state"]);
+    let back = fetch(&state, &format!("/api/auth/oidc/callback?code=c&state={}", q["state"]), &cookie).await;
+    assert!(back.status().is_redirection(), "{}", back.status());
+    assert_eq!(location(&back), "/?signin_error=Too+many+attempts.+Try+again+in+a+few+moments.");
+    assert!(!cookies(&back).contains_key("galley_session"));
+    assert!(state.store.user_by_email("second@example.org").unwrap().is_none());
+    assert!(state.store.user_by_oidc_sub("u-9").unwrap().is_none());
 }

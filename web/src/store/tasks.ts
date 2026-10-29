@@ -26,7 +26,7 @@ export function watchTasks(): () => void {
       return;
     }
     const name = displayName.peek() || currentUser.peek()?.name || 'Anonymous';
-    const sessions = list.map((f) => openDoc(id, f.path, name));
+    const sessions = list.map((f) => openDoc(id, f.path, name, currentUser.peek()?.id ?? ''));
     const refresh = () => {
       tasks.value = sessions.flatMap((s) => collectTasks(s.path, s.ytext.toString()));
     };
@@ -52,7 +52,7 @@ export async function markDone(task: Task): Promise<void> {
   const id = project.value?.id;
   if (!id) return;
   const name = displayName.value || currentUser.value?.name || 'Anonymous';
-  const session = openDoc(id, task.file, name);
+  const session = openDoc(id, task.file, name, currentUser.value?.id ?? '');
   await session.ready;
   const range = removalRange(session.ytext.toString(), task);
   if (!range) {

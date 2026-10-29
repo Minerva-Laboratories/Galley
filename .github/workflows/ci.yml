@@ -91,4 +91,4 @@ jobs:
         env:
           GALLEY_TEST_ENGINE_MATRIX: "1"
           GALLEY_TEST_TECTONIC_ENGINES: ${{ runner.temp }}/galley-engines/tectonic
-        run: bash scripts/e2e.sh engines.spec.ts files.spec.ts appearance.spec.ts connect-ai.spec.ts projects.spec.ts invitations.spec.ts presence.spec.ts away.spec.ts
+        run: bash scripts/e2e.sh engines.spec.ts files.spec.ts appearance.spec.ts connect-ai.spec.ts projects.spec.ts invitations.spec.ts presence.spec.ts away.spec.ts access.spec.ts

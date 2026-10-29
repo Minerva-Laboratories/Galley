@@ -37,13 +37,28 @@ export function pauseDocs(paused: boolean) {
   }
 }
 
-export function openDoc(projectId: string, path: string, userName: string): DocSession {
+// Which account made a project's offline copies, so signing out deletes only that account's
+// copies and never another's in the same browser. Storage is optional: without it nothing is
+// recorded, and nothing is deleted on sign-out.
+const OWNER_PREFIX = 'galley:idb-owner:';
+
+function recordOwner(projectId: string, userId: string) {
+  if (!userId) return;
+  try {
+    localStorage.setItem(`${OWNER_PREFIX}${projectId}`, userId);
+  } catch {
+    // Storage is optional.
+  }
+}
+
+export function openDoc(projectId: string, path: string, userName: string, userId: string): DocSession {
   if (currentProject !== projectId) {
     closeAll();
     currentProject = projectId;
   }
   const existing = sessions.get(path);
   if (existing) return existing;
+  recordOwner(projectId, userId);
 
   const ydoc = new Y.Doc();
   const ytext = ydoc.getText(TEXT_NAME);
@@ -111,4 +126,106 @@ export function closeAll() {
   for (const s of Array.from(sessions.values())) s.destroy();
   sessions.clear();
   currentProject = null;
+}
+
+/** Resolve when a database is deleted, when deleting it fails or is blocked, or after 3 s, so a
+ *  copy that another tab still holds open never hangs the caller. */
+function deleteDatabase(name: string): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, 3000);
+    const done = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    try {
+      const req = indexedDB.deleteDatabase(name);
+      req.onsuccess = done;
+      req.onerror = done;
+      req.onblocked = done;
+    } catch {
+      done();
+    }
+  });
+}
+
+/** The names of every database in this origin, or null when the browser cannot list them. */
+async function databaseNames(): Promise<string[] | null> {
+  try {
+    if (typeof indexedDB === 'undefined' || typeof indexedDB.databases !== 'function') return null;
+    return (await indexedDB.databases()).map((d) => d.name).filter((n): n is string => !!n);
+  } catch {
+    return null;
+  }
+}
+
+/** Whether `userId` is the recorded owner of a project's offline copies. A missing key, an empty
+ *  id, or unreadable storage all answer no: another account's data is never deleted on a guess. */
+function ownsCopies(projectId: string, userId: string | null | undefined): boolean {
+  if (!userId) return false;
+  try {
+    return localStorage.getItem(`${OWNER_PREFIX}${projectId}`) === userId;
+  } catch {
+    return false;
+  }
+}
+
+/** Delete this browser's offline copies of a project: after the user lost access to it, or when
+ *  it was deleted. `paths` names the files to delete when the browser cannot list databases.
+ *  `userId` is the account that is signed in now. The copies are deleted only when that account
+ *  is their recorded owner; otherwise they belong to someone else (or to nobody known) and are
+ *  kept. The project's open documents in this tab are closed either way. */
+export async function forgetProject(projectId: string, paths: string[], userId: string | null | undefined): Promise<void> {
+  const prefix = `galley:${projectId}:`;
+  // Decided now, before anything else can record a new owner.
+  const owned = ownsCopies(projectId, userId);
+  // Let a navigation that started this unmount the editor first: a document is never destroyed
+  // under a mounted editor, and navigation never waits on storage.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  if (currentProject === projectId) {
+    for (const s of Array.from(sessions.values())) {
+      try {
+        if (owned) await s.persistence.clearData();
+        else await s.persistence.destroy();
+      } catch {
+        // The database is deleted below as well, when it is this account's.
+      }
+      try {
+        s.provider.awareness.setLocalState(null);
+        s.provider.destroy();
+        s.ydoc.destroy();
+      } catch {
+        // Keep going: the rest still has to be deleted.
+      }
+      sessions.delete(s.path);
+    }
+    currentProject = null;
+  }
+  if (!owned) return;
+  try {
+    const names = await databaseNames();
+    const targets = names ? names.filter((n) => n.startsWith(prefix)) : paths.map((p) => `${prefix}${p}`);
+    await Promise.all(targets.map(deleteDatabase));
+  } catch {
+    // Storage may be unavailable, as in a private window.
+  }
+  try {
+    localStorage.removeItem(`${OWNER_PREFIX}${projectId}`);
+  } catch {
+    // Storage is optional.
+  }
+}
+
+/** Delete the offline copies this account made in this browser, on an explicit sign-out. Copies
+ *  owned by another account, or with no recorded owner, are left alone. */
+export async function forgetUserCopies(userId: string): Promise<void> {
+  const projects: string[] = [];
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key?.startsWith(OWNER_PREFIX) && localStorage.getItem(key) === userId) projects.push(key.slice(OWNER_PREFIX.length));
+    }
+  } catch {
+    return;
+  }
+  for (const projectId of projects) await forgetProject(projectId, [], userId);
 }

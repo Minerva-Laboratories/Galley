@@ -297,10 +297,10 @@ export function movedFile(from: string, to: string) {
 }
 
 let toastTimer: ReturnType<typeof setTimeout> | undefined;
-export function showToast(message: string, action?: ToastState['action']) {
+export function showToast(message: string, action?: ToastState['action'], ms = 4000) {
   toast.value = { message, action };
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (toast.value = null), 4000);
+  toastTimer = setTimeout(() => (toast.value = null), ms);
 }
 
 export function resetProject() {

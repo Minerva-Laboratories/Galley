@@ -74,7 +74,7 @@ export async function addSuggestion(replacement: string): Promise<void> {
 export async function acceptSuggestion(s: Suggestion): Promise<void> {
   const id = project.value?.id;
   if (!id) return;
-  const session = openDoc(id, s.file, displayName.value || currentUser.value?.name || 'Anonymous');
+  const session = openDoc(id, s.file, displayName.value || currentUser.value?.name || 'Anonymous', currentUser.value?.id ?? '');
   const from = resolveAnchor(session.ydoc, s.anchor);
   const to = resolveAnchor(session.ydoc, s.anchor_end);
   if (from === null || to === null || to < from) {

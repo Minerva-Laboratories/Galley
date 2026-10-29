@@ -42,10 +42,11 @@ export function SubmitDrawer() {
   useEffect(() => {
     if (!meta) return;
     const name = displayName.value || currentUser.value?.name || 'Anonymous';
+    const userId = currentUser.value?.id ?? '';
     const tex = files.value.filter((f) => f.kind === 'text' && f.path.endsWith('.tex'));
     const read = () => {
-      const main = openDoc(meta.id, meta.main_file, name).ytext.toString();
-      const others = tex.filter((f) => f.path !== meta.main_file).map((f) => openDoc(meta.id, f.path, name).ytext.toString());
+      const main = openDoc(meta.id, meta.main_file, name, userId).ytext.toString();
+      const others = tex.filter((f) => f.path !== meta.main_file).map((f) => openDoc(meta.id, f.path, name, userId).ytext.toString());
       setTexts({ main, others });
     };
     read();

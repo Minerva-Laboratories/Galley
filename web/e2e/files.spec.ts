@@ -71,6 +71,11 @@ test('folders organize existing files, persist, sync and receive new files and u
   await expect(handle).toHaveAttribute('aria-valuenow', '280');
   const meta = await (await other.request.get(`/api/projects/${id}`)).json();
   await other.route(`**/api/projects/${id}`, (route) => route.fulfill({ json: { ...meta, role: 'viewer' } }));
+  // The event socket's first frame carries the real role; present it as viewer too.
+  await other.routeWebSocket(`**/ws/${id}/events`, (ws) => {
+    const server = ws.connectToServer();
+    server.onMessage((m) => ws.send(String(m).includes('"type":"role_changed"') ? JSON.stringify({ type: 'role_changed', role: 'viewer' }) : m));
+  });
   await other.reload();
   await expect(other.getByRole('button', { name: 'Folder empty', exact: true })).toBeVisible();
   await expect(other.getByRole('button', { name: 'New folder', exact: true })).toHaveCount(0);

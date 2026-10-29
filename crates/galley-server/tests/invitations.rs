@@ -10,6 +10,7 @@ async fn state() -> (tempfile::TempDir, AppState) {
     let dir = tempfile::tempdir().unwrap();
     let mut config = Config::default();
     config.build.sandbox = "none".into();
+    config.limits.enabled = false;
     let state = AppState::new(dir.path(), &config).await.unwrap();
     (dir, state)
 }

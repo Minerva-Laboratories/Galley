@@ -22,10 +22,15 @@ if [[ -n "${GALLEY_E2E_CONFIG:-}" ]]; then
   E2E_ARGS+=(--config "$GALLEY_E2E_CONFIG")
 else
   # Separate real users exercise invitations and presence. This config exists only in the
-  # disposable fixture directory and never changes the deployment's signup policy.
+  # disposable fixture directory and never changes the deployment's signup policy. The browser
+  # tests sign up and sign in far more often than the rate limits allow one client, so they are
+  # off here; a custom GALLEY_E2E_CONFIG must also set `[limits] enabled = false`.
   cat > "$DATA/e2e.toml" <<'CONFIG'
 [server]
 public_signup = true
+
+[limits]
+enabled = false
 CONFIG
   E2E_ARGS+=(--config "$DATA/e2e.toml")
 fi

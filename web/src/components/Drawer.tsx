@@ -63,7 +63,7 @@ function goToAnchor(file: string, anchor: string) {
   const id = project.value?.id;
   if (!id) return;
   openFile(file);
-  const session = openDoc(id, file, displayName.value || currentUser.value?.name || 'Anonymous');
+  const session = openDoc(id, file, displayName.value || currentUser.value?.name || 'Anonymous', currentUser.value?.id ?? '');
   const pos = resolveAnchor(session.ydoc, anchor);
   const view = editorView.value;
   if (view && currentSession.value?.path === file && pos !== null) {

@@ -9,7 +9,7 @@ import {
   type RoleRequest,
   type ShareLink,
 } from '../api';
-import { connectOpen, currentUser, project, shareOpen, sharingNonce, showToast } from '../store/store';
+import { connectOpen, currentUser, isAdmin, project, shareOpen, sharingNonce, showToast } from '../store/store';
 import { initials } from '../sync/colors';
 
 const ROLES: Role2[] = ['admin', 'editor', 'commenter', 'viewer'];
@@ -21,10 +21,14 @@ const MODE_LABEL: Record<GovernanceMode, string> = {
   unanimous: 'Every admin must approve',
 };
 
+/** A request passed, but its target left the project or it would have left no admin. */
+const CANCELLED_MSG = 'That person is no longer a member, or the change would leave no admin, so nothing changed.';
+
 function outcomeToast(r: GovernResult, appliedMsg: string) {
   if (r.status === 'applied') showToast(appliedMsg);
   else if (r.status === 'pending') showToast('Requested — it needs other admins to approve.');
   else if (r.status === 'rejected') showToast('That change was rejected.');
+  else if (r.status === 'cancelled') showToast(CANCELLED_MSG);
 }
 
 /** The one-liner that registers this project in Claude Code. Other clients take the same URL and header. */
@@ -71,6 +75,12 @@ export function ShareModal() {
   }, []);
 
   const close = () => (shareOpen.value = false);
+
+  // Sharing and governance are for admins. A role lowered while the dialog is open closes it.
+  const admin = isAdmin.value;
+  useEffect(() => {
+    if (!admin) shareOpen.value = false;
+  }, [admin]);
 
   const adminCount = members.filter((m) => m.role === 'admin' && !m.is_guest).length;
 
@@ -299,6 +309,7 @@ function RequestCard({ req, projectId, adminCount, onDone }: { req: RoleRequest;
       const r = await api.voteRequest(projectId, req.id, approve);
       if (r.status === 'applied') showToast('Approved — the change was applied.');
       else if (r.status === 'rejected') showToast('The request was rejected.');
+      else if (r.status === 'cancelled') showToast(CANCELLED_MSG);
       await onDone();
     } catch (e) {
       showToast(e instanceof ApiError ? e.message : 'Could not record your vote.');

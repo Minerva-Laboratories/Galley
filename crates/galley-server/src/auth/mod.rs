@@ -32,6 +32,30 @@ pub fn verify_password(password: &str, hash: &str) -> bool {
     }
 }
 
+/// A hash of a throwaway password, made with the same algorithm and parameters as real hashes.
+/// A login whose email has no password hash verifies against it, so every failure costs the same.
+static DUMMY_HASH: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    hash_password("galley-dummy-password-never-matches").expect("argon2 hashes a fixed string")
+});
+
+/// Verify `password` against `hash`. Without a hash, verify against a dummy hash and return false,
+/// so an unknown email, a guest and a single sign-on account take as long as a wrong password.
+/// This is slow, blocking work: call it from `spawn_blocking`.
+pub fn verify_password_or_dummy(password: &str, hash: Option<&str>) -> bool {
+    match hash {
+        Some(h) => verify_password(password, h),
+        None => {
+            std::hint::black_box(verify_password(password, &DUMMY_HASH));
+            false
+        }
+    }
+}
+
+/// Build the dummy hash ahead of the first login. This is blocking work: call it from `spawn_blocking`.
+pub fn warm() {
+    std::sync::LazyLock::force(&DUMMY_HASH);
+}
+
 /// A URL-safe random token for a share link or a session cookie. 32 bytes of entropy give 43 characters.
 pub fn random_token() -> String {
     let mut bytes = [0u8; 32];
@@ -141,6 +165,29 @@ mod tests {
         assert!(verify_password("correct horse battery staple", &hash));
         assert!(!verify_password("wrong", &hash));
         assert!(!verify_password("x", "not-a-hash"));
+    }
+
+    #[test]
+    fn a_missing_hash_never_verifies() {
+        let hash = hash_password("correct horse battery staple").unwrap();
+        assert!(!verify_password_or_dummy("correct horse battery staple", None));
+        assert!(!verify_password_or_dummy("galley-dummy-password-never-matches", None));
+        assert!(verify_password_or_dummy("correct horse battery staple", Some(&hash)));
+        assert!(!verify_password_or_dummy("wrong", Some(&hash)));
+    }
+
+    #[test]
+    fn the_dummy_hash_uses_the_real_algorithm_and_parameters() {
+        warm();
+        let fresh = hash_password("anything").unwrap();
+        let fresh = PasswordHash::new(&fresh).unwrap();
+        let dummy = PasswordHash::new(&DUMMY_HASH).unwrap();
+        assert_eq!(dummy.algorithm, fresh.algorithm);
+        assert_eq!(dummy.version, fresh.version);
+        for name in ["m", "t", "p"] {
+            assert!(fresh.params.get_str(name).is_some(), "a real hash names {name}");
+            assert_eq!(dummy.params.get_str(name), fresh.params.get_str(name), "parameter {name}");
+        }
     }
 
     #[test]

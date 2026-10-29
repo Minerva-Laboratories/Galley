@@ -2,7 +2,7 @@
 // sync, undo, and commit like typing (SPEC.md §6.3).
 import type { Fix } from '../api';
 import { openDoc } from '../sync/docs';
-import { displayName, project } from '../store/store';
+import { currentUser, displayName, project } from '../store/store';
 import { lineEndOffset, lineRange } from './lines';
 
 export interface FixOutcome {
@@ -13,7 +13,7 @@ export interface FixOutcome {
 export function applyFix(fix: Fix): FixOutcome {
   const id = project.value?.id;
   if (!id) return { ok: false, message: 'No project is open.' };
-  const session = openDoc(id, fix.file, displayName.value || 'Anonymous');
+  const session = openDoc(id, fix.file, displayName.value || 'Anonymous', currentUser.value?.id ?? '');
   const text = session.ytext.toString();
 
   if (fix.kind === 'insert') {

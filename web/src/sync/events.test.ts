@@ -1,7 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ApiError } from '../api';
 import { connectionStatus, pauseEvents, refreshPresence, subscribeEvents } from './events';
 
-vi.mock('../api', () => ({ wsBase: () => 'ws://galley.test' }));
+const getProject = vi.hoisted(() => vi.fn());
+vi.mock('../api', () => ({
+  wsBase: () => 'ws://galley.test',
+  api: { getProject },
+  ApiError: class ApiError extends Error {
+    constructor(readonly status: number, message = 'failed') { super(message); }
+  },
+}));
 
 class Socket {
   static OPEN = 1;
@@ -9,12 +17,12 @@ class Socket {
   readyState = 0;
   onopen?: () => void;
   onmessage?: (event: { data: string }) => void;
-  onclose?: () => void;
+  onclose?: (event: { code: number }) => void;
   onerror?: () => void;
   send = vi.fn();
   constructor(readonly url: string) { Socket.all.push(this); }
   open() { this.readyState = 1; this.onopen?.(); }
-  close() { this.readyState = 3; this.onclose?.(); }
+  close(code = 1006) { this.readyState = 3; this.onclose?.({ code }); }
   message(data: unknown) { this.onmessage?.({ data: JSON.stringify(data) }); }
 }
 
@@ -118,5 +126,126 @@ describe('away tabs and the event socket', () => {
     expect(Socket.all).toHaveLength(2);
     Socket.all[1]!.open();
     expect(statuses.at(-1)).toBe('online');
+  });
+});
+
+describe('lost access on the event socket', () => {
+  let stop: (() => void) | undefined;
+  beforeEach(() => {
+    vi.useFakeTimers();
+    Socket.all = [];
+    getProject.mockReset();
+    vi.stubGlobal('WebSocket', Socket);
+    vi.stubGlobal('window', new EventTarget());
+  });
+  afterEach(() => {
+    stop?.();
+    pauseEvents(false);
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  // Nothing may open a new socket: not a retry, an away tab returning, or the network coming back.
+  const expectNoReconnect = () => {
+    const count = Socket.all.length;
+    pauseEvents(true);
+    pauseEvents(false);
+    window.dispatchEvent(new Event('online'));
+    vi.advanceTimersByTime(60_000);
+    expect(Socket.all).toHaveLength(count);
+  };
+
+  it.each(['access_removed', 'signed_out'])('stops for good after a %s frame', (type) => {
+    const event = vi.fn();
+    stop = subscribeEvents('p', event);
+    Socket.all[0]!.open();
+    Socket.all[0]!.message({ type });
+    expect(event).toHaveBeenCalledWith({ type });
+    Socket.all[0]!.close(type === 'access_removed' ? 4403 : 4401);
+    expectNoReconnect();
+  });
+
+  it.each([4403, 4401])('stops for good after close %i', (code) => {
+    const status = vi.fn();
+    stop = subscribeEvents('p', vi.fn(), status);
+    Socket.all[0]!.open();
+    Socket.all[0]!.close(code);
+    expect(status).toHaveBeenLastCalledWith('offline');
+    expectNoReconnect();
+    expect(getProject).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [4403, 'access_removed'],
+    [4401, 'signed_out'],
+  ])('close %i with no notice before it delivers %s once', (code, type) => {
+    const event = vi.fn();
+    stop = subscribeEvents('p', event);
+    Socket.all[0]!.open();
+    Socket.all[0]!.close(code);
+    expect(event).toHaveBeenCalledTimes(1);
+    expect(event).toHaveBeenCalledWith({ type });
+    expectNoReconnect();
+    expect(event).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [4403, 'access_removed'],
+    [4401, 'signed_out'],
+  ])('a notice followed by close %i delivers %s only once', (code, type) => {
+    const event = vi.fn();
+    stop = subscribeEvents('p', event);
+    Socket.all[0]!.open();
+    Socket.all[0]!.message({ type });
+    Socket.all[0]!.close(code);
+    expect(event).toHaveBeenCalledTimes(1);
+    expect(event).toHaveBeenCalledWith({ type });
+    expectNoReconnect();
+    expect(event).toHaveBeenCalledTimes(1);
+  });
+
+  const twoFailedConnects = async () => {
+    Socket.all[0]!.close();
+    expect(getProject).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1000);
+    Socket.all[1]!.close();
+    await vi.advanceTimersByTimeAsync(0);
+  };
+
+  it.each([
+    [404, 'access_removed'],
+    [401, 'signed_out'],
+  ])('asks the server after two failed connects, and %i reports %s', async (status, type) => {
+    getProject.mockRejectedValue(new ApiError(status, 'no'));
+    const event = vi.fn();
+    stop = subscribeEvents('p', event);
+    await twoFailedConnects();
+    expect(getProject).toHaveBeenCalledTimes(1);
+    expect(getProject).toHaveBeenCalledWith('p');
+    expect(event).toHaveBeenCalledWith({ type });
+    expectNoReconnect();
+  });
+
+  it('keeps retrying when the check fails for another reason', async () => {
+    getProject.mockRejectedValue(new ApiError(500, 'down'));
+    const event = vi.fn();
+    stop = subscribeEvents('p', event);
+    await twoFailedConnects();
+    expect(getProject).toHaveBeenCalledTimes(1);
+    expect(event).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(2000);
+    expect(Socket.all).toHaveLength(3);
+  });
+
+  it('an open socket resets the count of failed connects', async () => {
+    stop = subscribeEvents('p', vi.fn());
+    Socket.all[0]!.close();
+    vi.advanceTimersByTime(1000);
+    Socket.all[1]!.open();
+    Socket.all[1]!.close();
+    vi.advanceTimersByTime(1000);
+    Socket.all[2]!.close();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(getProject).not.toHaveBeenCalled();
   });
 });

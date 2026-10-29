@@ -42,7 +42,7 @@ export async function renameLabel(): Promise<void> {
   let touched = 0;
   for (const f of files.value) {
     if (f.kind !== 'text' || !f.path.endsWith('.tex')) continue;
-    const session = openDoc(id, f.path, name);
+    const session = openDoc(id, f.path, name, currentUser.value?.id ?? '');
     await session.ready;
     await whenSynced(session);
     const edits = renameInText(session.ytext.toString(), from, to);

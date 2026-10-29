@@ -4,7 +4,8 @@ import { Editor } from '../editor/Editor';
 import { build as runBuild, handleWindowKey } from '../editor/commands';
 import { loadCollab, upsertComment, upsertSuggestion, markSuggestion } from '../store/collab';
 import { watchTasks } from '../store/tasks';
-import { closeAll, closeDoc, openDoc } from '../sync/docs';
+import { closeAll, closeDoc, forgetProject, openDoc } from '../sync/docs';
+import { dropLocalIdentity, isSigningOut, loadMe } from '../store/auth';
 import { connectionStatus, subscribeEvents, type EventConnection } from '../sync/events';
 import { colorFor } from '../sync/colors';
 import {
@@ -12,6 +13,7 @@ import {
   autoBuild,
   autoBuildDelayMs,
   build,
+  canEdit,
   checkpoints,
   comments,
   commits,
@@ -80,11 +82,19 @@ export function EditorPage({ id }: { id: string }) {
     // The event socket starts while project metadata and compiler probes are loading.
     // Keep the newest event so a slow GET cannot replace a change made in another tab.
     let eventEngine: EngineKind | null = null;
+    // The event socket reports the role at connect and on every change. Once it has, a slower
+    // project load must not put back an older role.
+    let roleFromSocket = false;
+    // Set once the event socket below exists. The load is awaited, so it always is by then.
+    let stopEvents = () => {};
+    // Only a 404 from the project itself means this account cannot open it. The other calls in
+    // the load are kept apart from it, so their 404 never deletes offline copies.
+    const metaLoad = api.getProject(id);
     (async () => {
       try {
         const ticket = folderTicket();
         const [meta, list, log, cps, status, dirs] = await Promise.all([
-          api.getProject(id),
+          metaLoad,
           api.listFiles(id),
           api.history(id),
           api.checkpoints(id).catch(() => []),
@@ -99,7 +109,7 @@ export function EditorPage({ id }: { id: string }) {
           engineAvailabilityError.value = false;
           project.value = project.value?.id === id ? { ...project.value, engine: eventEngine ?? engines.selected } : project.value;
         }).catch(() => { if (!cancelled) engineAvailabilityError.value = true; });
-        projectRole.value = meta.role;
+        if (!roleFromSocket) projectRole.value = meta.role;
         files.value = list;
         applyFolders(ticket, dirs);
         commits.value = log;
@@ -120,6 +130,19 @@ export function EditorPage({ id }: { id: string }) {
         if (!tourSeen()) setTimeout(() => !cancelled && (tourOpen.value = true), 900);
       } catch (e) {
         if (!cancelled) setError(e instanceof ApiError ? e.message : 'Could not load the project.');
+        // A project this account cannot open keeps none of this account's offline copies in this
+        // browser, and its event socket stops retrying so the error stays on screen. The user is
+        // read now, before anything else can change it; another account's copies are kept.
+        const userId = currentUser.value?.id;
+        if (cancelled) return;
+        const missing = await metaLoad.then(
+          () => false,
+          (err: unknown) => err instanceof ApiError && err.status === 404,
+        );
+        if (!cancelled && missing) {
+          stopEvents();
+          void forgetProject(id, [], userId);
+        }
       }
     })();
     const refreshFolders = () => {
@@ -136,10 +159,56 @@ export function EditorPage({ id }: { id: string }) {
             clientId: user.id, name: user.name, color: colorFor(user.name).color,
           }));
           break;
-        case 'project_deleted':
+        case 'project_deleted': {
+          const paths = files.value.map((f) => f.path);
+          const userId = currentUser.value?.id;
           showToast('This project was deleted.');
           navigate('/');
+          void forgetProject(id, paths, userId);
           break;
+        }
+        case 'access_removed': {
+          // Leaving unmounts the editor and closes the documents (the cleanup below); the offline
+          // copies are deleted after that, and navigation never waits on storage.
+          const paths = files.value.map((f) => f.path);
+          const userId = currentUser.value?.id;
+          const guest = currentUser.value?.is_guest === true;
+          showToast('You no longer have access to this project.');
+          // A guest removed by a revoke usually loses their session too (no other project left),
+          // so they go to the sign-in screen rather than an empty projects page they cannot use.
+          // The server is then asked who is signed in: a guest who still belongs to another
+          // project gets their identity back.
+          if (guest) dropLocalIdentity();
+          navigate('/');
+          void forgetProject(id, paths, userId);
+          if (guest) void loadMe();
+          break;
+        }
+        case 'signed_out':
+          // This tab's own Sign out handles itself, and a late frame finds no user left.
+          if (isSigningOut() || !currentUser.value) break;
+          // Signed out elsewhere: offline copies are kept, since they may hold unsynced edits.
+          showToast('You were signed out.');
+          dropLocalIdentity();
+          navigate('/');
+          break;
+        case 'role_changed': {
+          if (projectRole.value === null) {
+            // The first frame arrived before the project loaded: no change to announce.
+            projectRole.value = ev.role;
+            roleFromSocket = true;
+            break;
+          }
+          if (ev.role === projectRole.value) break;
+          const couldEdit = canEdit.value;
+          projectRole.value = ev.role;
+          roleFromSocket = true;
+          const detail = couldEdit && !canEdit.value ? ' Editing is off.' : !couldEdit && canEdit.value ? ' You can edit now.' : '';
+          showToast(`Your role is now ${ev.role}.${detail}`, undefined, 3000);
+          // Sharing and governance are for admins only.
+          if (ev.role !== 'admin') shareOpen.value = false;
+          break;
+        }
         case 'commit': {
           const commit = { sha: ev.sha, short_sha: ev.short_sha, message: ev.message, author: ev.author, time: ev.time };
           commits.value = [commit, ...commits.value.filter((c) => c.sha !== commit.sha)];
@@ -225,6 +294,7 @@ export function EditorPage({ id }: { id: string }) {
       connection.value = connectionStatus(status, provider ? provider.wsconnected ? 'online' : provider.wsconnecting ? 'connecting' : 'offline' : null);
       if (status !== 'online') peers.value = [];
     });
+    stopEvents = unsubscribe;
     return () => {
       cancelled = true;
       unsubscribe();
@@ -243,7 +313,7 @@ export function EditorPage({ id }: { id: string }) {
       connection.value = connectionStatus(projectConnection.current, null);
       return;
     }
-    const session = openDoc(id, path, displayName.value || 'Anonymous');
+    const session = openDoc(id, path, displayName.value || 'Anonymous', currentUser.value?.id ?? '');
     currentSession.value = session;
     const onStatus = ({ status }: { status: string }) => {
       const document = status === 'connected' ? 'online' : status === 'connecting' ? 'connecting' : 'offline';

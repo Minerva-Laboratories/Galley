@@ -51,11 +51,38 @@ pub struct AppState {
     pub(crate) presence: Arc<std::sync::Mutex<ws::ProjectPresence>>,
     /// Zip imports and project downloads that may run at once. Each holds up to tens of megabytes.
     pub(crate) imports: Arc<tokio::sync::Semaphore>,
+    /// Argon2 hashes and verifies from login and signup that may run at once. Each uses about
+    /// 19 MiB and a core, so a login flood cannot exhaust memory or the blocking pool.
+    pub password_slots: Arc<tokio::sync::Semaphore>,
+    /// `https://{domain}` when a domain is set. Browser connections to the socket and MCP routes
+    /// must come from this origin. Without a domain, the origin must match the Host header.
+    pub public_origin: Option<String>,
+    /// Membership and session changes. Open sockets re-check their access when one concerns them.
+    access: broadcast::Sender<AccessChanged>,
+    /// Request counters per client IP and per account, from `[limits]`. They live here because
+    /// tests rebuild the router for each request.
+    pub limits: Arc<crate::limits::Limiter>,
+}
+
+/// Something that may change what a user can do on a live connection. It carries only ids, never
+/// a token. A socket re-checks its own role and session when it receives one.
+#[derive(Clone, Debug)]
+pub enum AccessChanged {
+    /// A project's members or roles changed.
+    Project(String),
+    /// A user signed out of one session.
+    User(String),
 }
 
 impl FromRef<AppState> for Store {
     fn from_ref(state: &AppState) -> Store {
         state.store.clone()
+    }
+}
+
+impl FromRef<AppState> for Arc<crate::limits::Limiter> {
+    fn from_ref(state: &AppState) -> Arc<crate::limits::Limiter> {
+        state.limits.clone()
     }
 }
 
@@ -163,7 +190,25 @@ impl AppState {
             collab: Arc::new(RwLock::new(HashMap::new())),
             presence: Arc::default(),
             imports: Arc::new(tokio::sync::Semaphore::new(2)),
+            password_slots: Arc::new(tokio::sync::Semaphore::new(
+                std::thread::available_parallelism().map_or(2, |n| n.get()),
+            )),
+            public_origin: (!config.server.domain.is_empty()).then(|| {
+                format!("https://{}", config.server.domain.trim().trim_end_matches('/').to_ascii_lowercase())
+            }),
+            access: broadcast::channel(256).0,
+            limits: Arc::new(crate::limits::Limiter::new(&config.limits)),
         })
+    }
+
+    /// Tell open sockets that access may have changed. Nobody listening is not an error.
+    pub fn access_changed(&self, ev: AccessChanged) {
+        let _ = self.access.send(ev);
+    }
+
+    /// Receive access changes from now on.
+    pub fn subscribe_access(&self) -> broadcast::Receiver<AccessChanged> {
+        self.access.subscribe()
     }
 
     /// The role a user has on a project, or `None` if they have no access.
@@ -333,10 +378,22 @@ pub enum AppError {
     Conflict(String),
     #[error("{0}")]
     Internal(String),
+    /// A rate limit refused the request. The wait is sent as `Retry-After`.
+    #[error("{}", crate::limits::TOO_MANY)]
+    TooManyRequests(Duration),
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
+        if let AppError::TooManyRequests(wait) = &self {
+            let secs = crate::limits::retry_after_secs(*wait);
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(axum::http::header::RETRY_AFTER, secs.to_string())],
+                Json(json!({ "error": crate::limits::TOO_MANY })),
+            )
+                .into_response();
+        }
         let (status, message) = match &self {
             AppError::Registry(RegistryError::NotFound(id)) => (
                 StatusCode::NOT_FOUND,
@@ -466,12 +523,22 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/{id}/suggestions/{sid}/status", post(collab_routes::set_suggestion_status))
         .layer(middleware::from_fn(current::csrf_guard));
 
-    Router::new()
-        .merge(api)
+    // The socket and MCP routes sit outside the CSRF-checked API and accept the session cookie,
+    // so a browser connection must come from Galley's own origin. A route layer runs before the
+    // handlers' extractors, so a refused request costs no lookup.
+    let cross_site_checked = Router::new()
         .route("/mcp/{id}", get(mcp_routes::info).post(mcp_routes::rpc))
         .route("/ws/{id}/events", get(ws::events))
         .route("/ws/{id}/doc/{*path}", get(ws::doc))
+        .route_layer(middleware::from_fn_with_state(state.clone(), current::origin_guard));
+
+    Router::new()
+        .merge(api)
+        .merge(cross_site_checked)
         .fallback(assets::serve)
+        // Stage 1 of the rate limits. It wraps every route and the fallback, so it runs before
+        // the socket and MCP origin check and before any extractor.
+        .layer(middleware::from_fn_with_state(state.clone(), crate::limits::enforce))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -485,6 +552,8 @@ pub struct ServeOptions {
 const IDLE_UNLOAD: Duration = Duration::from_secs(10 * 60);
 
 pub async fn serve(state: AppState, opts: ServeOptions) -> std::io::Result<()> {
+    // Build the login dummy hash now, off the async threads, so the first failed login is not slower.
+    tokio::task::spawn_blocking(crate::auth::warm).await.map_err(std::io::Error::other)?;
     let listener = tokio::net::TcpListener::bind(opts.bind).await?;
     let addr = listener.local_addr()?;
     match &state.backup {
@@ -497,7 +566,9 @@ pub async fn serve(state: AppState, opts: ServeOptions) -> std::io::Result<()> {
     if opts.dev {
         println!("Dev mode: start `cd web && npm run dev` and open the Vite URL; it proxies here.");
     }
-    axum::serve(listener, router(state))
+    // The peer address lets the rate limits tell clients apart and decide whether to trust a
+    // client-IP header.
+    axum::serve(listener, router(state).into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
             tracing::info!("shutting down");
@@ -514,6 +585,7 @@ mod unload_tests {
         let dir = tempfile::tempdir().unwrap();
         let mut config = Config::default();
         config.build.sandbox = "none".into();
+        config.limits.enabled = false;
         let app = AppState::new(dir.path(), &config).await.unwrap();
         let meta = app.registry.create("Idle paper").await.unwrap();
         let project = app.registry.open(&meta.id).await.unwrap();
@@ -545,6 +617,7 @@ mod deletion_tests {
         let dir = tempfile::tempdir().unwrap();
         let mut config = Config::default();
         config.build.sandbox = "none".into();
+        config.limits.enabled = false;
         let app = AppState::new(dir.path(), &config).await.unwrap();
         let user = app.store.create_user("writer@example.com", "Writer", "supersecret", false).unwrap();
         let meta = app.registry.create("Deleting writers").await.unwrap();

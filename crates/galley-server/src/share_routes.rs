@@ -9,7 +9,7 @@ use chrono::{Duration, Utc};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::app::{AppError, AppState, CollabEvent};
+use crate::app::{AccessChanged, AppError, AppState, CollabEvent};
 use crate::auth::current::CurrentUser;
 use crate::auth::Role;
 use crate::store::{GovernanceMode, Member, Resolution, RoleRequest, ShareLink, User};
@@ -294,19 +294,25 @@ pub async fn revoke_share(
     app.require(&user, &id, Role::is_admin, "revoking share links").await?;
     let store = app.store.clone();
     let (pid, share_id) = (id.clone(), sid.clone());
-    let removed = blocking(move || store.revoke_share(&pid, &share_id).map_err(|e| AppError::Internal(e.to_string()))).await?;
-    if !removed {
-        return Err(AppError::NotFound("That share link no longer exists.".into()));
-    }
+    let revoked = blocking(move || store.revoke_share(&pid, &share_id).map_err(|e| AppError::Internal(e.to_string())))
+        .await?
+        .ok_or_else(|| AppError::NotFound("That share link no longer exists.".into()))?;
+    // The transaction has committed. The removed guests' open sockets re-check their role and
+    // are told they lost access.
     app.store.audit(Some(&id), Some(&user), "share.revoke", Some(&sid));
-    Ok(Json(json!({ "ok": true })))
+    app.access_changed(AccessChanged::Project(id.clone()));
+    app.emit(&id, CollabEvent::MembersChanged).await;
+    if revoked.cancelled_requests > 0 {
+        app.emit(&id, CollabEvent::RequestsChanged).await;
+    }
+    Ok(Json(json!({ "ok": true, "removed_guests": revoked.removed.len() })))
 }
 
 /// A public route. It reports what a share link grants, so the landing page can name the project.
 pub async fn preview(State(app): State<AppState>, Path(token): Path<String>) -> Result<Json<Value>, AppError> {
     let store = app.store.clone();
     let resolved = blocking(move || store.share_by_token(&token).map_err(|e| AppError::Internal(e.to_string()))).await?;
-    let (project_id, role) = resolved
+    let (project_id, role, _) = resolved
         .ok_or_else(|| AppError::NotFound("This share link is invalid, revoked, or expired.".into()))?;
     let name = app.registry.meta(&project_id).map(|m| m.name).unwrap_or_else(|_| "a project".into());
     Ok(Json(json!({ "project_name": name, "role": role })))
@@ -344,6 +350,9 @@ async fn finish(app: &AppState, user: &User, project_id: &str, request_id: &str,
     match resolution {
         Resolution::Applied => {
             app.store.audit(Some(project_id), Some(user), &format!("governance.apply.{kind}"), Some(request_id));
+            // Open sockets on this project re-check their role, so a removed or lowered member
+            // loses access while connected.
+            app.access_changed(AccessChanged::Project(project_id.into()));
             app.emit(project_id, CollabEvent::MembersChanged).await;
             app.emit(project_id, CollabEvent::RequestsChanged).await;
         }
@@ -352,6 +361,11 @@ async fn finish(app: &AppState, user: &User, project_id: &str, request_id: &str,
             app.emit(project_id, CollabEvent::RequestsChanged).await;
         }
         Resolution::Pending => {
+            app.emit(project_id, CollabEvent::RequestsChanged).await;
+        }
+        Resolution::Cancelled => {
+            // The request passed, but its target is gone or it would leave no admin.
+            app.store.audit(Some(project_id), Some(user), "governance.cancel", Some(request_id));
             app.emit(project_id, CollabEvent::RequestsChanged).await;
         }
         Resolution::Gone => {}
@@ -364,6 +378,7 @@ fn status_word(r: Resolution) -> &'static str {
         Resolution::Rejected => "rejected",
         Resolution::Pending => "pending",
         Resolution::Gone => "gone",
+        Resolution::Cancelled => "cancelled",
     }
 }
 

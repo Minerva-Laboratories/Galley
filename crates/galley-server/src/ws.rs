@@ -1,13 +1,15 @@
 //! WebSockets. There is one y-protocol socket for each client and document, and one JSON event
 //! socket for each project. Both authenticate from the session cookie and enforce the caller's
 //! role. The document socket is wire-compatible with `y-websocket`. A user who cannot edit
-//! connects read-only.
+//! connects read-only. Both re-check the role and then the session when an access change concerns
+//! them, and every minute. A removed member's sockets close with 4403, a signed-out session's with
+//! 4401, and a changed role applies in place.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::response::Response;
@@ -16,10 +18,14 @@ use galley_sync::project::Housekeeping;
 use galley_sync::{DocHandle, ProjectSync};
 use tokio::sync::broadcast::error::RecvError;
 
-use crate::app::{AppError, AppState};
+use crate::app::{AccessChanged, AppError, AppState};
 use crate::auth::current::SESSION_COOKIE;
-use crate::auth::Role;
+use crate::auth::{Role, Secret};
 use crate::store::User;
+
+/// How often an open socket re-checks its access when no change event arrives. This catches a
+/// change made outside this process, such as a password reset from the CLI.
+const ACCESS_RECHECK: Duration = Duration::from_secs(60);
 
 /// Presence belongs to the project event connection, independently of open documents. Track
 /// each socket separately so an old socket closing after a reconnect cannot remove the new one.
@@ -90,18 +96,136 @@ impl Drop for PresenceConnection {
     }
 }
 
-/// Resolve the session cookie to a user, or 401.
-async fn authenticate(app: &AppState, headers: &HeaderMap) -> Result<User, AppError> {
+/// Resolve the session cookie to a user, or 401, then count the connection against the account's
+/// `socket_account` limit (429 when over). The session token comes back too, redacted on `Debug`,
+/// so the socket can re-check that this session is still signed in.
+async fn authenticate(app: &AppState, headers: &HeaderMap) -> Result<(User, Secret), AppError> {
     let token = CookieJar::from_headers(headers)
         .get(SESSION_COOKIE)
-        .map(|c| c.value().to_string())
+        .map(|c| Secret(c.value().to_string()))
         .ok_or_else(|| AppError::Unauthorized("Sign in to connect.".into()))?;
     let store = app.store.clone();
-    let user = tokio::task::spawn_blocking(move || store.session_user(&token))
+    let lookup = token.clone();
+    let user = tokio::task::spawn_blocking(move || store.session_user(&lookup.0))
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?
         .map_err(|e| AppError::Internal(e.to_string()))?;
-    user.ok_or_else(|| AppError::Unauthorized("Your session expired. Reload the page.".into()))
+    let user = user.ok_or_else(|| AppError::Unauthorized("Your session expired. Reload the page.".into()))?;
+    // Stage 2 of the rate limits for sockets: per account, so opening more sessions buys nothing.
+    app.limits
+        .hit(crate::limits::RuleId::SocketAccount, crate::limits::Key::Account(user.id.clone()))
+        .map_err(AppError::TooManyRequests)?;
+    Ok((user, token))
+}
+
+/// The outcome of re-checking an open socket's access.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Recheck {
+    /// The user is no longer a member of the project.
+    Removed,
+    /// The socket's session ended, or now belongs to someone else.
+    SignedOut,
+    /// Still a member, with this role.
+    Role(Role),
+}
+
+/// Re-check the role first, then the session, in one blocking task. The role comes first so a
+/// guest whose membership and session were both removed is told "removed". A database error
+/// gives `None`: the socket keeps its current state and is never closed for it.
+pub(crate) async fn recheck(app: &AppState, token: &Secret, user_id: &str, project_id: &str) -> Option<Recheck> {
+    let store = app.store.clone();
+    let (token, uid, pid) = (token.clone(), user_id.to_string(), project_id.to_string());
+    let checked = tokio::task::spawn_blocking(move || -> Result<Recheck, crate::db::DbError> {
+        let Some(role) = store.role_of(&pid, &uid)? else { return Ok(Recheck::Removed) };
+        Ok(match store.session_user(&token.0)? {
+            Some(user) if user.id == uid => Recheck::Role(role),
+            _ => Recheck::SignedOut,
+        })
+    })
+    .await;
+    match checked {
+        Ok(Ok(outcome)) => Some(outcome),
+        Ok(Err(e)) => {
+            tracing::warn!(project = project_id, error = %e, "could not re-check socket access; keeping it open");
+            None
+        }
+        Err(e) => {
+            tracing::warn!(project = project_id, error = %e, "could not re-check socket access; keeping it open");
+            None
+        }
+    }
+}
+
+/// What an open socket needs to re-check its access: who it is for, its session, and the access
+/// change events since before its connect check.
+struct SocketAccess {
+    app: AppState,
+    user_id: String,
+    token: Secret,
+    project_id: String,
+    changes: tokio::sync::broadcast::Receiver<AccessChanged>,
+    /// Whether `changes` can still deliver. The sender lives as long as the process, so this
+    /// stays true in practice; if it ever closes, the periodic re-check carries on alone.
+    open: bool,
+}
+
+/// After an access re-check: the socket was closed, its state stays, or its role is this one.
+enum Rechecked {
+    Closed,
+    Keep,
+    Role(Role),
+}
+
+impl SocketAccess {
+    /// Whether a received access change concerns this socket. A lagged or closed channel may
+    /// have dropped one that did, so it counts.
+    fn concerns(&mut self, changed: Result<AccessChanged, RecvError>) -> bool {
+        match changed {
+            Ok(AccessChanged::Project(p)) => p == self.project_id,
+            Ok(AccessChanged::User(u)) => u == self.user_id,
+            Err(RecvError::Lagged(_)) => true,
+            Err(RecvError::Closed) => {
+                self.open = false;
+                true
+            }
+        }
+    }
+
+    /// Re-check, and close the socket when access is gone. The event socket first sends a JSON
+    /// notice (`access_removed` or `signed_out`) so the page knows why.
+    async fn recheck_or_close(&self, socket: &mut WebSocket, notice: bool) -> Rechecked {
+        let (kind, code, reason) = match recheck(&self.app, &self.token, &self.user_id, &self.project_id).await {
+            None => return Rechecked::Keep,
+            Some(Recheck::Role(role)) => return Rechecked::Role(role),
+            Some(Recheck::Removed) => ("access_removed", 4403, "access removed"),
+            Some(Recheck::SignedOut) => ("signed_out", 4401, "signed out"),
+        };
+        if notice {
+            let frame = serde_json::json!({ "type": kind }).to_string();
+            let _ = socket.send(Message::Text(frame.into())).await;
+        }
+        let _ = socket.send(Message::Close(Some(CloseFrame { code, reason: reason.into() }))).await;
+        // Wait briefly for the peer's close reply. Dropping the connection while the peer's
+        // frames are unread resets it, and the peer could lose the notice and the close code.
+        let _ = tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(Ok(msg)) = socket.recv().await {
+                if matches!(msg, Message::Close(_)) { break; }
+            }
+        })
+        .await;
+        Rechecked::Closed
+    }
+}
+
+/// A periodic re-check timer whose first tick is one period away.
+fn recheck_timer() -> tokio::time::Interval {
+    let mut timer = tokio::time::interval_at(tokio::time::Instant::now() + ACCESS_RECHECK, ACCESS_RECHECK);
+    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    timer
+}
+
+fn role_changed(role: Role) -> String {
+    serde_json::json!({ "type": "role_changed", "role": role.as_str() }).to_string()
 }
 
 pub async fn doc(
@@ -110,7 +234,9 @@ pub async fn doc(
     Path((id, path)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let user = authenticate(&app, &headers).await?;
+    // Subscribe before the connect check, so a change made after it is never missed.
+    let changes = app.subscribe_access();
+    let (user, token) = authenticate(&app, &headers).await?;
     let role = app.require(&user, &id, Role::can_view, "opening this document").await?;
     let project = app.registry.open(&id).await?;
     // Only a file that exists gets a live document. An editor of a deleted file must not recreate it.
@@ -119,23 +245,27 @@ pub async fn doc(
     }
     let doc = project.doc(&path).await?;
     let may_edit = role.can_edit();
+    let access = SocketAccess { app: app.clone(), user_id: user.id.clone(), token, project_id: id.clone(), changes, open: true };
     Ok(ws.on_upgrade(move |socket| async move {
-        let edited = doc_session(socket, Arc::clone(&project), doc, user.name.clone(), may_edit).await;
+        let edited = doc_session(socket, Arc::clone(&project), doc, user.name.clone(), access, may_edit).await;
         if edited {
             app.registry.touch(&id);
         }
     }))
 }
 
-/// Returns whether this client edited the document.
+/// Returns whether this client edited the document. A role change sets `may_edit` in place; it
+/// applies from the next incoming update.
 async fn doc_session(
     mut socket: WebSocket,
     project: Arc<ProjectSync>,
     doc: Arc<DocHandle>,
     name: String,
-    may_edit: bool,
+    mut access: SocketAccess,
+    mut may_edit: bool,
 ) -> bool {
     use std::collections::HashSet;
+    let mut recheck_tick = recheck_timer();
     let mut inbox = doc.subscribe();
     let mut project_events = project.subscribe_events();
     let mut announced: HashSet<yrs::block::ClientID> = HashSet::new();
@@ -210,7 +340,20 @@ async fn doc_session(
                     break;
                 }
                 Err(RecvError::Closed) => break,
-            }
+            },
+            changed = access.changes.recv(), if access.open => {
+                if !access.concerns(changed) { continue; }
+                match access.recheck_or_close(&mut socket, false).await {
+                    Rechecked::Closed => break,
+                    Rechecked::Role(role) => may_edit = role.can_edit(),
+                    Rechecked::Keep => {}
+                }
+            },
+            _ = recheck_tick.tick() => match access.recheck_or_close(&mut socket, false).await {
+                Rechecked::Closed => break,
+                Rechecked::Role(role) => may_edit = role.can_edit(),
+                Rechecked::Keep => {}
+            },
         }
     }
 
@@ -227,29 +370,36 @@ pub async fn events(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let user = authenticate(&app, &headers).await?;
-    app.require(&user, &id, Role::can_view, "watching this project").await?;
+    // Subscribe before the connect check, so a change made after it is never missed.
+    let changes = app.subscribe_access();
+    let (user, token) = authenticate(&app, &headers).await?;
+    let role = app.require(&user, &id, Role::can_view, "watching this project").await?;
     let project = app.registry.open(&id).await?;
     let builds = app.builds(&id).await?;
     let collab = app.collab_channel(&id).await;
-    Ok(ws.on_upgrade(move |socket| events_session(socket, project, builds, collab, app, id, user)))
+    let access = SocketAccess { app, user_id: user.id.clone(), token, project_id: id, changes, open: true };
+    Ok(ws.on_upgrade(move |socket| events_session(socket, project, builds, collab, access, user, role)))
 }
 
 /// One socket carries sync events for commits and files, build events, and collaboration events.
-/// Every frame is a JSON object with a `type` field.
+/// Every frame is a JSON object with a `type` field. The first frame is `role_changed` with the
+/// caller's role at connect; later ones come only when a re-check finds a different role.
 async fn events_session(
     mut socket: WebSocket,
     project: Arc<ProjectSync>,
     builds: Arc<galley_build::ProjectBuilds>,
     collab: tokio::sync::broadcast::Sender<String>,
-    app: AppState,
-    project_id: String,
+    mut access: SocketAccess,
     user: User,
+    mut role: Role,
 ) {
+    let app = access.app.clone();
     let mut rx = project.subscribe_events();
     let mut brx = builds.subscribe();
     if project.is_deleted() { return; }
-    let (presence, mut crx) = PresenceConnection::join(app.presence.clone(), project_id, &user, collab);
+    if socket.send(Message::Text(role_changed(role).into())).await.is_err() { return; }
+    let mut recheck_tick = recheck_timer();
+    let (presence, mut crx) = PresenceConnection::join(app.presence.clone(), access.project_id.clone(), &user, collab);
     let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_pong = tokio::time::Instant::now();
@@ -297,9 +447,57 @@ async fn events_session(
                 Err(RecvError::Lagged(_)) => break,
                 Err(RecvError::Closed) => break,
             },
+            changed = access.changes.recv(), if access.open => {
+                if !access.concerns(changed) { continue; }
+                match access.recheck_or_close(&mut socket, true).await {
+                    Rechecked::Closed => break,
+                    Rechecked::Role(r) if r != role => { role = r; role_changed(r) }
+                    Rechecked::Role(_) | Rechecked::Keep => continue,
+                }
+            },
+            _ = recheck_tick.tick() => match access.recheck_or_close(&mut socket, true).await {
+                Rechecked::Closed => break,
+                Rechecked::Role(r) if r != role => { role = r; role_changed(r) }
+                Rechecked::Role(_) | Rechecked::Keep => continue,
+            },
         };
         if socket.send(Message::Text(frame.into())).await.is_err() {
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod recheck_tests {
+    use super::*;
+    use crate::config::Config;
+
+    #[tokio::test]
+    async fn recheck_reports_the_role_then_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.build.sandbox = "none".into();
+        config.limits.enabled = false;
+        let app = AppState::new(dir.path(), &config).await.unwrap();
+        let user = app.store.create_user("member@example.com", "Member", "supersecret", false).unwrap();
+        let other = app.store.create_user("other@example.com", "Other", "supersecret", false).unwrap();
+        app.store.set_member("paper", &user.id, Role::Editor).unwrap();
+        let first = Secret(app.store.create_session(&user.id, 1).unwrap());
+        let second = Secret(app.store.create_session(&user.id, 1).unwrap());
+        let others = Secret(app.store.create_session(&other.id, 1).unwrap());
+
+        assert_eq!(recheck(&app, &first, &user.id, "paper").await, Some(Recheck::Role(Role::Editor)));
+        app.store.set_member("paper", &user.id, Role::Viewer).unwrap();
+        assert_eq!(recheck(&app, &first, &user.id, "paper").await, Some(Recheck::Role(Role::Viewer)));
+
+        // A session that belongs to someone else never passes as this user's.
+        assert_eq!(recheck(&app, &others, &user.id, "paper").await, Some(Recheck::SignedOut));
+        app.store.delete_session(&first.0).unwrap();
+        assert_eq!(recheck(&app, &first, &user.id, "paper").await, Some(Recheck::SignedOut));
+        assert_eq!(recheck(&app, &second, &user.id, "paper").await, Some(Recheck::Role(Role::Viewer)), "other sessions stay");
+
+        app.store.remove_member("paper", &user.id).unwrap();
+        assert_eq!(recheck(&app, &second, &user.id, "paper").await, Some(Recheck::Removed));
+        assert_eq!(recheck(&app, &first, &user.id, "paper").await, Some(Recheck::Removed), "removal wins over a signed-out session");
     }
 }

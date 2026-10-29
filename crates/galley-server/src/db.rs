@@ -15,6 +15,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (3, include_str!("../migrations/0003_checkpoints.sql")),
     (4, include_str!("../migrations/0004_agents.sql")),
     (5, include_str!("../migrations/0005_oidc.sql")),
+    (6, include_str!("../migrations/0006_share_guests.sql")),
 ];
 
 pub type Conn = PooledConnection<SqliteConnectionManager>;
@@ -136,5 +137,9 @@ mod tests {
         db.migrate().unwrap();
         let versions: i64 = conn.query_row("SELECT COUNT(*) FROM schema_version", [], |r| r.get(0)).unwrap();
         assert_eq!(versions as usize, MIGRATIONS.len());
+        // 0006 records the share link a guest joined through.
+        let mut stmt = conn.prepare("SELECT name FROM pragma_table_info('members')").unwrap();
+        let columns: Vec<String> = stmt.query_map([], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
+        assert!(columns.iter().any(|c| c == "via_share"), "{columns:?}");
     }
 }
