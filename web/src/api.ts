@@ -312,6 +312,8 @@ export interface Member {
   email: string;
   role: Role2;
   is_guest: boolean;
+  /** The share link a guest joined through, if any. */
+  via_share: string | null;
 }
 
 export type Role2 = 'admin' | 'editor' | 'commenter' | 'viewer';

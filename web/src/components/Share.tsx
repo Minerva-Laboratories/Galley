@@ -48,7 +48,8 @@ export function ShareModal() {
   const [inviteRole, setInviteRole] = useState<Role2>('editor');
   const [linkRole, setLinkRole] = useState<Role2>('commenter');
   const [linkExpiry, setLinkExpiry] = useState(30);
-  const [madeLink, setMadeLink] = useState<string | null>(null);
+  // The new link's URL is shown once: the server keeps only a hash of its token.
+  const [madeLink, setMadeLink] = useState<{ id: string; url: string } | null>(null);
   const nonce = sharingNonce.value;
 
   const refresh = async () => {
@@ -142,7 +143,7 @@ export function ShareModal() {
     if (!id) return;
     try {
       const link = await api.createShare(id, linkRole, null, linkExpiry);
-      setMadeLink(`${location.origin}${link.path}`);
+      setMadeLink({ id: link.id, url: `${location.origin}${link.path}` });
       void refresh();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not create a link.');
@@ -154,10 +155,39 @@ export function ShareModal() {
     try {
       await api.revokeShare(id, link.id);
       setLinks((prev) => prev.filter((x) => x.id !== link.id));
+      setMadeLink((made) => (made?.id === link.id ? null : made));
+      // Revoking also removed the link's guests.
+      void refresh();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not revoke the link.');
     }
   };
+
+  const memberRow = (m: Member) => (
+    <div class="member" key={m.user_id}>
+      <span class="av" style={{ background: 'var(--slate)' }}>{initials(m.name)}</span>
+      <div style={{ minWidth: 0 }}>
+        <div class="n">{m.name}{m.is_guest ? ' · guest' : ''}</div>
+        <div class="e">{m.email || 'joined by link'}</div>
+      </div>
+      {m.user_id === currentUser.value?.id ? (
+        <span style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--text-2)' }}>{m.role} (you)</span>
+      ) : (
+        <>
+          <select value={m.role} onChange={(e) => void changeRole(m, (e.target as HTMLSelectElement).value as Role2)} style={{ marginLeft: 'auto' }}>
+            {ROLES.map((r) => (
+              <option key={r} value={r}>
+                {r}
+              </option>
+            ))}
+          </select>
+          <button class="tb icon" title="Remove" aria-label={`Remove ${m.name}`} onClick={() => void remove(m)}>
+            ×
+          </button>
+        </>
+      )}
+    </div>
+  );
 
   const copy = (text: string) =>
     navigator.clipboard?.writeText(text).then(
@@ -186,31 +216,8 @@ export function ShareModal() {
             </>
           )}
 
-          {members.map((m) => (
-            <div class="member" key={m.user_id}>
-              <span class="av" style={{ background: 'var(--slate)' }}>{initials(m.name)}</span>
-              <div style={{ minWidth: 0 }}>
-                <div class="n">{m.name}{m.is_guest ? ' · guest' : ''}</div>
-                <div class="e">{m.email || 'joined by link'}</div>
-              </div>
-              {m.user_id === currentUser.value?.id ? (
-                <span style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--text-2)' }}>{m.role} (you)</span>
-              ) : (
-                <>
-                  <select value={m.role} onChange={(e) => void changeRole(m, (e.target as HTMLSelectElement).value as Role2)} style={{ marginLeft: 'auto' }}>
-                    {ROLES.map((r) => (
-                      <option key={r} value={r}>
-                        {r}
-                      </option>
-                    ))}
-                  </select>
-                  <button class="tb icon" title="Remove" aria-label={`Remove ${m.name}`} onClick={() => void remove(m)}>
-                    ×
-                  </button>
-                </>
-              )}
-            </div>
-          ))}
+          {/* Guests of a live link are listed under that link instead. */}
+          {members.filter((m) => !links.some((l) => l.id === m.via_share)).map(memberRow)}
 
           <form class="field" style={{ marginTop: 14 }} onSubmit={invite}>
             <input placeholder="name@university.edu" aria-label="Invite email" type="email" value={email} disabled={inviting} onInput={(e) => setEmail((e.target as HTMLInputElement).value)} />
@@ -261,22 +268,30 @@ export function ShareModal() {
           </div>
           {madeLink && (
             <div class="link">
-              <span>{madeLink}</span>
-              <button class="tb" onClick={() => copy(madeLink)}>
+              <span>{madeLink.url}</span>
+              <button class="tb" onClick={() => copy(madeLink.url)}>
                 Copy
               </button>
             </div>
           )}
-          {links.map((l) => (
-            <div class="link" key={l.id}>
-              <span>
-                {l.role} · {l.expires_at ? `expires ${new Date(l.expires_at).toLocaleDateString()}` : 'never expires'}
-              </span>
-              <button class="tb" onClick={() => void revoke(l)}>
-                Revoke
-              </button>
-            </div>
-          ))}
+          {links.map((l) => {
+            const guests = members.filter((m) => m.via_share === l.id);
+            return (
+              <div key={l.id}>
+                <div class="link">
+                  <span>
+                    {l.role} · {l.expires_at ? `expires ${new Date(l.expires_at).toLocaleDateString()}` : 'never expires'}
+                  </span>
+                  <button class="tb" onClick={() => void revoke(l)}>
+                    Revoke
+                  </button>
+                </div>
+                <div class="link-guests" aria-label="Joined through this link">
+                  {guests.length > 0 ? guests.map(memberRow) : <div class="hint" style={{ paddingLeft: 0 }}>No one has joined through this link yet.</div>}
+                </div>
+              </div>
+            );
+          })}
           <div class="hint" style={{ paddingLeft: 0 }}>Reviewers who open a link only need a display name.</div>
 
           {/* Guests cannot create access tokens, so they get no Connect AI entry point. */}

@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use crate::app::{AccessChanged, AppError, AppState, CollabEvent};
 use crate::auth::current::CurrentUser;
 use crate::auth::Role;
-use crate::store::{GovernanceMode, Member, Resolution, RoleRequest, ShareLink, User};
+use crate::store::{DeadShare, GovernanceMode, Member, Resolution, RoleRequest, ShareLink, Store, User};
 
 async fn blocking<T, F>(f: F) -> Result<T, AppError>
 where
@@ -315,11 +315,27 @@ pub async fn revoke_share(
 /// A public route. It reports what a share link grants, so the landing page can name the project.
 pub async fn preview(State(app): State<AppState>, Path(token): Path<String>) -> Result<Json<Value>, AppError> {
     let store = app.store.clone();
-    let resolved = blocking(move || store.share_by_token(&token).map_err(|e| AppError::Internal(e.to_string()))).await?;
-    let (project_id, role, _) = resolved
-        .ok_or_else(|| AppError::NotFound("This share link is invalid, revoked, or expired.".into()))?;
+    let resolved = blocking(move || match store.share_by_token(&token) {
+        Ok(Some(live)) => Ok(live),
+        Ok(None) => Err(unavailable_share(&store, &token)),
+        Err(e) => Err(AppError::Internal(e.to_string())),
+    })
+    .await?;
+    let (project_id, role, _) = resolved;
     let name = app.registry.meta(&project_id).map(|m| m.name).unwrap_or_else(|_| "a project".into());
     Ok(Json(json!({ "project_name": name, "role": role })))
+}
+
+/// The error for a share token that does not resolve. A revoked or expired link says which, so
+/// the person knows to ask for a new one. Any other token gets the generic text. The message
+/// never names the project or the role.
+pub(crate) fn unavailable_share(store: &Store, token: &str) -> AppError {
+    let message = match store.dead_share(token) {
+        Ok(Some(DeadShare::Revoked)) => "This link was revoked and can no longer be used. Ask for a new one.",
+        Ok(Some(DeadShare::Expired)) => "This link has expired. Ask for a new one.",
+        _ => "This share link is invalid, revoked, or expired. Ask for a new one.",
+    };
+    AppError::NotFound(message.into())
 }
 
 // --- governance plumbing ------------------------------------------------------------------

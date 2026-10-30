@@ -352,6 +352,48 @@ test.describe('live access checks', () => {
     await expect(signInScreen(guest)).toBeVisible();
   });
 
+  test('the Share dialog lists guests under their link, removes one, and a revoked link says so', async ({ browser }) => {
+    const owner = await make(browser, 'Owner');
+    const id = await createProject(owner, `Access link guests ${Date.now()}`);
+    const created = await owner.page.request.post(`/api/projects/${id}/shares`, {
+      headers: { 'x-csrf-token': owner.csrf }, data: { role: 'commenter', expires_days: 7 },
+    });
+    expect(created.status()).toBe(201);
+    const link: { path: string } = await created.json();
+    const token = link.path.replace('/s/', '');
+    for (const name of ['Guest One', 'Guest Two']) {
+      const context = await browser.newContext({ baseURL: base });
+      contexts.push(context);
+      const joined = await (await context.newPage()).request.post('/api/auth/landing', { data: { token, name } });
+      expect(joined.ok()).toBe(true);
+    }
+
+    await openProject(owner, id);
+    await owner.page.getByRole('button', { name: 'Share', exact: true }).click();
+    const share = owner.page.getByRole('dialog', { name: 'Share project' });
+    const under = share.getByLabel('Joined through this link');
+    await expect(under.getByText('Guest One · guest')).toBeVisible();
+    await expect(under.getByText('Guest Two · guest')).toBeVisible();
+    await expect(share.getByText('Guest One · guest')).toHaveCount(1);
+
+    // One guest is removed on their own; the other stays under the link.
+    await under.getByRole('button', { name: 'Remove Guest One' }).click();
+    await expect(under.getByText('Guest One · guest')).toHaveCount(0);
+    await expect(under.getByText('Guest Two · guest')).toBeVisible();
+
+    // Revoking the link removes the rest, and the link page explains why it no longer works.
+    await share.getByRole('button', { name: 'Revoke' }).click();
+    await expect(share.getByText('Guest Two · guest')).toHaveCount(0);
+    const context = await browser.newContext({ baseURL: base });
+    contexts.push(context);
+    const visitor = await context.newPage();
+    await visitor.goto(link.path);
+    await expect(visitor.getByRole('heading', { name: 'Link unavailable' })).toBeVisible();
+    const alert = visitor.getByRole('alert');
+    await expect(alert).toHaveText('This link was revoked and can no longer be used. Ask for a new one.');
+    await expect(alert).toHaveClass(/\berr\b/);
+  });
+
   test('a guest is offered no Connect AI, since guests cannot create access tokens', async ({ browser }) => {
     const owner = await make(browser, 'Owner');
     const id = await createProject(owner, `Access guest AI ${Date.now()}`);

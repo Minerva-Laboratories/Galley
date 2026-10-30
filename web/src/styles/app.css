@@ -1358,6 +1358,11 @@ a {
   border-radius: 6px;
   padding: 6px 10px;
 }
+.link-guests {
+  padding: 2px 0 0 12px;
+  border-left: 2px solid var(--line);
+  margin: 4px 0 0 6px;
+}
 .link span {
   flex: 1;
   overflow: hidden;

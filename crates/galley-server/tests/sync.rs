@@ -755,18 +755,34 @@ async fn share_link_landing_and_comments() {
     assert_eq!(comments.as_array().unwrap().len(), 1);
     assert_eq!(comments[0]["author_name"], "Reviewer 2");
 
+    // The owner's members list names the link each guest joined through. A guest cannot list it.
+    let (status, members, ana) = rest(&server.state, &ana, "GET", "/api/projects/paper/members", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let reviewer = members.as_array().unwrap().iter().find(|m| m["name"] == "Reviewer 2").unwrap();
+    assert_eq!(reviewer["via_share"], link["id"]);
+    let owner = members.as_array().unwrap().iter().find(|m| m["name"] == "Ana").unwrap();
+    assert_eq!(owner["via_share"], Value::Null);
+    let (status, _, guest) = rest(&server.state, &guest, "GET", "/api/projects/paper/members", None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
     // Revoking the link locks new visitors out and removes the guest who joined through it.
     let share = format!("/api/projects/paper/shares/{}", link["id"].as_str().unwrap());
     let (status, out, ana) = rest(&server.state, &ana, "DELETE", &share, None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(out, json!({ "ok": true, "removed_guests": 1 }));
-    let (status, _, _) = rest(&server.state, &Auth::default(), "GET", &format!("/api/share/{token}"), None).await;
+    let revoked_text = "This link was revoked and can no longer be used. Ask for a new one.";
+    let (status, out, _) = rest(&server.state, &Auth::default(), "GET", &format!("/api/share/{token}"), None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(out, json!({ "error": revoked_text }), "a revoked link says so, and names no project");
+    let (status, out, _) = rest(&server.state, &Auth::default(), "GET", "/api/share/never-issued", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(out["error"], "This share link is invalid, revoked, or expired. Ask for a new one.");
     let (status, _, _) = rest(&server.state, &guest, "GET", "/api/projects/paper", None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "the guest's session is gone");
-    let (status, _, _) =
+    let (status, out, _) =
         rest(&server.state, &Auth::default(), "POST", "/api/auth/landing", Some(json!({ "token": token, "name": "Late" }))).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(out["error"], revoked_text);
     let (status, out, ana) = rest(&server.state, &ana, "DELETE", &share, None).await;
     assert_eq!(status, StatusCode::OK, "a repeat revoke succeeds and changes nothing");
     assert_eq!(out, json!({ "ok": true, "removed_guests": 0 }));

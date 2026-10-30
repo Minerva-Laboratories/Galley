@@ -15,6 +15,7 @@ use crate::app::{AccessChanged, AppError, AppState};
 use crate::limits::{ClientIp, IpKey, Key, RuleId, TOO_MANY};
 use crate::auth::current::{csrf_cookie, expired, session_cookie, CurrentUser, MaybeUser, CSRF_COOKIE, SESSION_COOKIE};
 use crate::auth::{random_token, Role};
+use crate::share_routes::unavailable_share;
 use crate::store::User;
 
 /// Report the current user and whether public signup is on, so the SPA shows the right first screen.
@@ -189,8 +190,9 @@ pub async fn landing(
         .await
         .map_err(internal)?
         .map_err(|e| AppError::Internal(e.to_string()))?;
-    let invalid = || AppError::NotFound("This share link is invalid, revoked, or expired. Ask for a new one.".into());
-    let (project_id, role, share_id) = resolved.ok_or_else(invalid)?;
+    let Some((project_id, role, share_id)) = resolved else {
+        return Err(invalid_share(&app, body.token.clone()).await);
+    };
 
     // An existing account that is not a guest keeps its stronger role and its current session.
     if let Some(user) = current.filter(|u| !u.is_guest) {
@@ -221,8 +223,11 @@ pub async fn landing(
     // membership records the link, so revoking it removes this guest.
     let guest = tokio::task::spawn_blocking(move || store.join_as_guest(&share_id, &pid, role, &name))
         .await
-        .map_err(internal)??
-        .ok_or_else(invalid)?;
+        .map_err(internal)??;
+    // The link was revoked or expired after it resolved above.
+    let Some(guest) = guest else {
+        return Err(invalid_share(&app, body.token.clone()).await);
+    };
     app.store.audit(Some(&project_id), Some(&guest), "share.join", Some(role.as_str()));
 
     let (jar, mut value) = sign_in(&app, jar, &guest);
@@ -412,6 +417,12 @@ pub async fn rename(
 
 fn public_user(u: User) -> Value {
     json!({ "id": u.id, "name": u.name, "email": u.email, "is_admin": u.is_admin, "is_guest": u.is_guest })
+}
+
+/// The error for a share token that does not resolve, saying whether it was revoked or expired.
+async fn invalid_share(app: &AppState, token: String) -> AppError {
+    let store = app.store.clone();
+    tokio::task::spawn_blocking(move || unavailable_share(&store, &token)).await.unwrap_or_else(internal)
 }
 
 fn internal<E: std::fmt::Display>(e: E) -> AppError {

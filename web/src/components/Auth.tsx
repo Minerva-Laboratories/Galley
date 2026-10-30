@@ -144,7 +144,8 @@ export function LandingScreen({ token }: { token: string }) {
       {error && !preview ? (
         <>
           <h1 class="auth-h">Link unavailable</h1>
-          <p class="auth-sub">{error}</p>
+          {/* The server says whether the link was revoked or expired. */}
+          <p class="err" role="alert" style={{ textAlign: 'center' }}>{error}</p>
           <button class="tb" style={{ margin: '10px auto 0' }} onClick={() => navigate('/')}>
             Go to Galley
           </button>

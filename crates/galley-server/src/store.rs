@@ -31,6 +31,15 @@ pub struct Member {
     pub email: String,
     pub role: Role,
     pub is_guest: bool,
+    /// The share link a guest joined through, if any. Admins see guests under their link.
+    pub via_share: Option<String>,
+}
+
+/// Why a share token no longer works. A token that was never issued has no reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeadShare {
+    Revoked,
+    Expired,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -486,7 +495,7 @@ impl Store {
     pub fn members(&self, project_id: &str) -> Result<Vec<Member>, DbError> {
         let conn = self.db.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT m.user_id, u.name, u.email, m.role, u.is_guest FROM members m
+            "SELECT m.user_id, u.name, u.email, m.role, u.is_guest, m.via_share FROM members m
              JOIN users u ON u.id = m.user_id WHERE m.project_id = ?1
              ORDER BY CASE m.role WHEN 'admin' THEN 0 WHEN 'editor' THEN 1 WHEN 'commenter' THEN 2 ELSE 3 END, u.name",
         )?;
@@ -498,6 +507,7 @@ impl Store {
                     email: r.get(2)?,
                     role: Role::parse(&r.get::<_, String>(3)?).unwrap_or(Role::Viewer),
                     is_guest: r.get::<_, i64>(4)? != 0,
+                    via_share: r.get(5)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -547,6 +557,7 @@ impl Store {
             email: user.email,
             role,
             is_guest: user.is_guest,
+            via_share: None,
         })
     }
 
@@ -741,6 +752,24 @@ impl Store {
             Some((p, role, expires, id)) if expires.is_none_or(|e| e > Utc::now()) => {
                 Role::parse(&role).map(|r| (p, r, id))
             }
+            _ => None,
+        })
+    }
+
+    /// Why a share token that `share_by_token` refused no longer works: revoked or expired.
+    /// `None` for a token that was never issued, or one that is still live.
+    pub fn dead_share(&self, token: &str) -> Result<Option<DeadShare>, DbError> {
+        let conn = self.db.conn()?;
+        let row = conn
+            .query_row(
+                "SELECT revoked, expires_at FROM share_links WHERE token_hash = ?1",
+                params![token_hash(token)],
+                |r| Ok((r.get::<_, i64>(0)? != 0, r.get::<_, Option<DateTime<Utc>>>(1)?)),
+            )
+            .optional()?;
+        Ok(match row {
+            Some((true, _)) => Some(DeadShare::Revoked),
+            Some((false, Some(e))) if e <= Utc::now() => Some(DeadShare::Expired),
             _ => None,
         })
     }
@@ -1416,9 +1445,12 @@ mod tests {
         assert!(s.revoke_share("p1", "no-such-link").unwrap().is_none());
         assert!(s.share_by_token(&token).unwrap().is_none());
         assert!(s.shares("p1").unwrap().is_empty());
+        assert_eq!(s.dead_share(&token).unwrap(), Some(DeadShare::Revoked), "a revoked link says so");
+        assert_eq!(s.dead_share("never-issued").unwrap(), None, "an unknown token has no reason");
 
         let past = Utc::now() - chrono::Duration::days(1);
         let (_, expired) = s.create_share("p1", Role::Viewer, None, Some(past), &owner.id).unwrap();
+        assert_eq!(s.dead_share(&expired).unwrap(), Some(DeadShare::Expired));
         assert!(s.share_by_token(&expired).unwrap().is_none());
     }
 
@@ -1666,6 +1698,11 @@ mod tests {
         assert_eq!(via_share(&s, "p", &guest_a.id).as_deref(), Some(a.id.as_str()));
         assert_eq!(via_share(&s, "p", &promoted.id).as_deref(), Some(a.id.as_str()), "a role change keeps the link");
         assert_eq!(via_share(&s, "p", &signed.id), None);
+        // The members list carries the link, so admins see each guest under it.
+        let listed = s.members("p").unwrap();
+        let link_of = |id: &str| listed.iter().find(|m| m.user_id == id).and_then(|m| m.via_share.clone());
+        assert_eq!(link_of(&guest_b.id).as_deref(), Some(b.id.as_str()));
+        assert_eq!(link_of(&signed.id), None);
 
         let mut sessions = Vec::new();
         for u in [&guest_a, &guest_b, &signed] {
