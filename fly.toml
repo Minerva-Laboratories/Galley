@@ -1,0 +1,40 @@
+# fly.toml app configuration file generated for galley-demo on 2026-09-11T16:11:51-06:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'galley-demo'
+primary_region = 'sjc'
+
+[build]
+  dockerfile = 'Dockerfile'
+  [build.args]
+    TEXLIVE = '1'
+    WARM_TECTONIC = '1'
+
+[env]
+  GALLEY_ALLOW_UNSANDBOXED = 'false'
+  GALLEY_DOMAIN = 'galley-demo.fly.dev'
+  # The number of compiles at once across all workers: one per worker machine.
+  GALLEY_MAX_BUILDS = '1'
+  GALLEY_MEMORY_MB = '850'
+  GALLEY_PUBLIC_SIGNUP = 'true'
+  GALLEY_SANDBOX = 'auto'
+  GALLEY_WORKER_URL = 'http://galley-demo-workers.flycast'
+
+[[mounts]]
+  source = 'galley_data'
+  destination = '/data'
+
+[http_service]
+  internal_port = 7000
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '2gb'
+  cpus = 1
+  memory_mb = 2048
